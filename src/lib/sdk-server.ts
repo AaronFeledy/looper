@@ -1,0 +1,113 @@
+import { spawn, type Subprocess } from "bun";
+
+export type ServerHandle = {
+  url: string;
+  close: () => Promise<void>;
+};
+
+const LISTENING_RE = /opencode server listening on\s+(https?:\/\/\S+)/i;
+const SPAWN_TIMEOUT_MS = 15_000;
+
+async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of stream) {
+    buffer += decoder.decode(chunk);
+    let nl = buffer.indexOf("\n");
+    while (nl !== -1) {
+      yield buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      nl = buffer.indexOf("\n");
+    }
+  }
+  if (buffer.length > 0) yield buffer;
+}
+
+async function drain(stream: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (!stream) return;
+  for await (const _ of stream) {
+    void _;
+  }
+}
+
+async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">): Promise<string> {
+  const stdout = proc.stdout;
+  if (!stdout) throw new Error("opencode serve produced no stdout");
+
+  let url: string | null = null;
+  const exited = proc.exited.then((code) => {
+    if (url === null) throw new Error(`opencode serve exited before listening (code ${code})`);
+  });
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutTimer = setTimeout(() => reject(new Error(`opencode serve did not announce a URL within ${SPAWN_TIMEOUT_MS}ms`)), SPAWN_TIMEOUT_MS);
+  });
+  const scan = (async () => {
+    for await (const line of readLines(stdout)) {
+      const match = line.match(LISTENING_RE);
+      if (match?.[1]) {
+        url = match[1];
+        return;
+      }
+    }
+  })();
+
+  try {
+    await Promise.race([scan, exited, timeout]);
+  } catch (error) {
+    proc.kill("SIGTERM");
+    throw error;
+  } finally {
+    if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+  }
+
+  if (url === null) {
+    proc.kill("SIGTERM");
+    throw new Error("opencode serve closed stdout without announcing a URL");
+  }
+
+  return url;
+}
+
+async function spawnOpencodeServer(opencodeBin: string): Promise<{ url: string; proc: Subprocess }> {
+  const proc = spawn([opencodeBin, "serve", "--hostname=127.0.0.1", "--port=0"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  // Start draining stderr immediately; a noisy server can otherwise fill the pipe
+  // and block before stdout prints the listening URL.
+  void drain(proc.stderr).catch(() => undefined);
+
+  const url = await captureListeningUrl(proc);
+
+  // Keep draining stdout or the OS pipe buffer fills and the server blocks on write.
+  void drain(proc.stdout).catch(() => undefined);
+
+  return { url, proc };
+}
+
+export async function startOrAttachServer(options: {
+  opencodeBin: string;
+  attachUrl?: string;
+}): Promise<ServerHandle> {
+  if (options.attachUrl !== undefined) {
+    return {
+      url: options.attachUrl,
+      async close() {},
+    };
+  }
+
+  const { url, proc } = await spawnOpencodeServer(options.opencodeBin);
+
+  return {
+    url,
+    async close() {
+      if (proc.exitCode !== null) return;
+      proc.kill("SIGTERM");
+      const forceTimer = setTimeout(() => proc.kill("SIGKILL"), 3000);
+      await proc.exited.catch(() => undefined);
+      clearTimeout(forceTimer);
+    },
+  };
+}

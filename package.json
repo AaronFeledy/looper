@@ -1,0 +1,25 @@
+{
+  "name": "looper",
+  "version": "0.0.1",
+  "description": "TUI-driven iterative agent loop runner for OpenCode.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "looper": "bin/looper"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "1.15.3",
+    "@opentui/core": "0.2.6",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

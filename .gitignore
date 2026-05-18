@@ -1,0 +1,34 @@
+# dependencies
+node_modules
+
+# build/output
+out
+dist
+*.tgz
+
+# coverage
+coverage
+*.lcov
+
+# logs
+logs
+*.log
+
+# dotenv
+.env
+.env.*.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IDE / OS
+.idea
+.DS_Store
+
+# Local dev
+/.sisyphus
+
+# Scratch dirs used by e2e tests
+/test/.tmp
