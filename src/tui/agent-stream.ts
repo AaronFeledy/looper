@@ -261,6 +261,8 @@ function createGroupBlock(renderer: CliRenderer, id: string, block: Extract<Outp
     borderColor: block.borderColor,
     title: block.title,
     titleAlignment: "left",
+    bottomTitle: formatTimestamp(block.firstSeenAt),
+    bottomTitleAlignment: "right",
     paddingX: 1,
     marginBottom: 1,
   });
@@ -280,17 +282,6 @@ function formatTimestamp(ts: number): string {
   return `${h}:${m.toString().padStart(2, "0")} ${ampm}`;
 }
 
-function padTitle(left: string, right: string, totalWidth: number): string {
-  if (right.length === 0) return left;
-  const available = Math.max(0, totalWidth - 4);
-  const minSpacing = 2;
-  if (left.length + minSpacing + right.length > available) return `${left}  ${right}`;
-  const gap = available - left.length - right.length;
-  return `${left}${" ".repeat(gap)}${right}`;
-}
-
-type TitledBlock = { box: BoxRenderable; leftTitle: string; rightTitle: string };
-
 function createReasoningBlock(renderer: CliRenderer, id: string, block: Extract<OutputBlock, { kind: "reasoning" }>): BoxRenderable {
   const box = new BoxRenderable(renderer, {
     id,
@@ -303,6 +294,8 @@ function createReasoningBlock(renderer: CliRenderer, id: string, block: Extract<
     borderColor: "#6c7086",
     title: "Reasoning",
     titleAlignment: "left",
+    bottomTitle: formatTimestamp(block.firstSeenAt),
+    bottomTitleAlignment: "right",
     paddingX: 1,
     marginBottom: 1,
   });
@@ -324,6 +317,8 @@ function createToolBlock(renderer: CliRenderer, id: string, block: Extract<Outpu
     borderColor,
     title: `Tool · ${block.tool} · ${statusText}`,
     titleAlignment: "left",
+    bottomTitle: formatTimestamp(block.firstSeenAt),
+    bottomTitleAlignment: "right",
     paddingX: 1,
     marginBottom: 1,
   });
@@ -404,15 +399,6 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   });
 
   let outputRenderables: OutputRenderable[] = [];
-  let titledBlocks: TitledBlock[] = [];
-
-  const refreshTitleAlignment = (): void => {
-    for (const tb of titledBlocks) {
-      const w = tb.box.width;
-      if (!w || w <= 0) continue;
-      tb.box.title = padTitle(tb.leftTitle, tb.rightTitle, w);
-    }
-  };
 
   const replaceOutput = (lines: string[], times: number[]) => {
     for (const renderable of outputRenderables) {
@@ -421,7 +407,6 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     }
 
     outputRenderables = [];
-    titledBlocks = [];
 
     const sourceLines = lines.length > 0 ? lines : ["No output yet."];
     const sourceTimes = lines.length > 0 ? times : [Date.now()];
@@ -429,26 +414,17 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     blocks.forEach((block, index) => {
       let renderable: OutputRenderable;
       if (block.kind === "group") {
-        const box = createGroupBlock(renderer, `loop-agent-group-${index}`, block);
-        titledBlocks.push({ box, leftTitle: block.title, rightTitle: formatTimestamp(block.firstSeenAt) });
-        renderable = box;
+        renderable = createGroupBlock(renderer, `loop-agent-group-${index}`, block);
       } else if (block.kind === "reasoning") {
-        const box = createReasoningBlock(renderer, `loop-agent-reasoning-${index}`, block);
-        titledBlocks.push({ box, leftTitle: "Reasoning", rightTitle: formatTimestamp(block.firstSeenAt) });
-        renderable = box;
+        renderable = createReasoningBlock(renderer, `loop-agent-reasoning-${index}`, block);
       } else if (block.kind === "tool") {
-        const box = createToolBlock(renderer, `loop-agent-tool-${index}`, block);
-        const statusText = block.status === "waiting" ? "waiting" : block.status === "error" ? "failed" : "done";
-        titledBlocks.push({ box, leftTitle: `Tool · ${block.tool} · ${statusText}`, rightTitle: formatTimestamp(block.firstSeenAt) });
-        renderable = box;
+        renderable = createToolBlock(renderer, `loop-agent-tool-${index}`, block);
       } else {
         renderable = createTextBlock(renderer, `loop-agent-lines-${index}`, block.lines);
       }
       outputRenderables.push(renderable);
       stream.content.add(renderable);
     });
-    queueMicrotask(refreshTitleAlignment);
-    process.nextTick(refreshTitleAlignment);
   };
 
   let selectedOutput = initialOutput;
@@ -505,7 +481,6 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   };
 
   const onLayoutReflow = (): void => {
-    refreshTitleAlignment();
     if (pinToBottom) scrollToBottomIfPinned();
     else restoreSelectedScroll();
   };
