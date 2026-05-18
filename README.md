@@ -16,7 +16,7 @@ ln -sfn "$PWD/bin/looper" "$HOME/.local/bin/looper"
 In any project that has a `.local/looper/looper.yaml`:
 
 ```bash
-looper          # opens the TUI, press [g]o to start
+looper          # opens the TUI, press [g]o or [enter] to start
 looper --start  # start immediately
 looper --continue   # resume from the last completed step
 looper --help
