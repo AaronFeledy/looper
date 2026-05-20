@@ -18,7 +18,13 @@ type RawStep = {
 };
 
 type RawConfig = {
+  opencode?: unknown;
+  attachUrl?: unknown;
   steps?: unknown;
+};
+
+export type RuntimeConfig = {
+  opencodeServerUrl?: string;
 };
 
 function titleFromKey(key: string): string {
@@ -41,6 +47,13 @@ function argsValue(value: unknown, label: string): string[] | undefined {
     throw new Error(`${label} must be an array of strings`);
   }
   return value;
+}
+
+function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = stringValue(value, label);
+  if (parsed.length === 0) throw new Error(`${label} cannot be empty`);
+  return parsed;
 }
 
 function promptPath(configDir: string, prompt: string, label: string): string {
@@ -75,7 +88,7 @@ export function configFilePath(configDir: string): string {
   return join(configDir, CONFIG_FILE_NAME);
 }
 
-export function loadSteps(configDir: string): Step[] {
+function loadRawConfig(configDir: string): RawConfig {
   const configPath = configFilePath(configDir);
   if (!existsSync(configPath)) {
     throw new Error(`missing ${CONFIG_FILE_NAME} at ${configPath}; create it with at least one step`);
@@ -83,7 +96,24 @@ export function loadSteps(configDir: string): Step[] {
 
   const rawConfig = YAML.parse(readFileSync(configPath, "utf8")) as RawConfig | null;
   if (!rawConfig || typeof rawConfig !== "object") throw new Error(`${CONFIG_FILE_NAME} must contain a mapping`);
+  return rawConfig;
+}
 
+export function loadRuntimeConfig(configDir: string): RuntimeConfig {
+  const rawConfig = loadRawConfig(configDir);
+  if (rawConfig.opencode !== undefined) {
+    if (!rawConfig.opencode || typeof rawConfig.opencode !== "object" || Array.isArray(rawConfig.opencode)) {
+      throw new Error(`${CONFIG_FILE_NAME}.opencode must be a mapping`);
+    }
+    const opencode = rawConfig.opencode as { serverUrl?: unknown };
+    return { opencodeServerUrl: optionalNonEmptyStringValue(opencode.serverUrl, "opencode.serverUrl") };
+  }
+
+  return { opencodeServerUrl: optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl") };
+}
+
+export function loadSteps(configDir: string): Step[] {
+  const rawConfig = loadRawConfig(configDir);
   const steps = parseConfiguredSteps(configDir, rawConfig);
   if (steps.length === 0) throw new Error(`${CONFIG_FILE_NAME} must define at least one step`);
   return steps;

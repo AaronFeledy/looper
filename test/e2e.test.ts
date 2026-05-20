@@ -3,6 +3,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
 
+import { parseArgs, resolveAttachUrl } from "../src/lib/args.ts";
+import { loadRuntimeConfig } from "../src/lib/config.ts";
+import { startOrAttachServer } from "../src/lib/sdk-server.ts";
+
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const LOOPER_BIN = join(REPO_ROOT, "bin", "looper");
 const MAIN_ENTRY = join(REPO_ROOT, "src", "main.ts");
@@ -176,4 +180,37 @@ test("fails fast with exit 2 when no config is present, and auto-creates the con
   expect(exitCode).toBe(2);
   expect(err).toContain("missing looper.yaml");
   expect(existsSync(join(emptyDir, ".local", "looper"))).toBe(true);
+});
+
+test("loads an existing OpenCode server URL from looper.yaml", () => {
+  const configDir = join(SCRATCH, "config-server-url");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  serverUrl: http://127.0.0.1:4096",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).opencodeServerUrl).toBe("http://127.0.0.1:4096");
+});
+
+test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
+  expect(resolveAttachUrl(parseArgs([]), "http://127.0.0.1:4096", "http://default.local")).toBe("http://127.0.0.1:4096");
+  expect(resolveAttachUrl(parseArgs(["--attach=http://127.0.0.1:5000"]), "http://127.0.0.1:4096", "http://default.local")).toBe(
+    "http://127.0.0.1:5000",
+  );
+  expect(resolveAttachUrl(parseArgs(["--attach"]), undefined, "http://default.local")).toBe("http://default.local");
+  expect(resolveAttachUrl(parseArgs([]), undefined, "http://default.local")).toBeUndefined();
+});
+
+test("startOrAttachServer returns an attached handle without spawning opencode", async () => {
+  const server = await startOrAttachServer({ opencodeBin: "definitely-not-opencode", attachUrl: "http://127.0.0.1:4096" });
+  expect(server.url).toBe("http://127.0.0.1:4096");
+  await server.close();
 });

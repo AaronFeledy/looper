@@ -20,7 +20,7 @@ export function usage() {
 Usage: looper [--attach[=url]] [--start|--continue] [--wait[=minutes]|--wait minutes] [max_iterations]
 
 Flags:
-  --attach[=url]   Pass --attach to opencode. Without a URL, uses OPENCODE_ATTACH_URL or the local default.
+  --attach[=url]   Connect to an existing opencode server. Without a URL, uses looper.yaml, OPENCODE_ATTACH_URL, or the local default.
   --start          Start immediately. Without this, the TUI waits for [g]o.
   --continue       Start immediately from the last saved step checkpoint.
   --wait[=minutes] Wait between iterations. Without minutes, wait for the previous iteration duration.
@@ -104,4 +104,10 @@ export function parseArgs(argv: string[]): Options {
   }
 
   return { attach, attachUrl, continueFromLastStep, maxIterations, start, waitProvided, waitDuration };
+}
+
+export function resolveAttachUrl(options: Options, configUrl: string | undefined, defaultAttachUrl: string): string | undefined {
+  if (options.attachUrl !== undefined) return options.attachUrl;
+  if (configUrl !== undefined) return configUrl;
+  return options.attach ? defaultAttachUrl : undefined;
 }

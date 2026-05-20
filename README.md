@@ -19,6 +19,7 @@ In any project that has a `.local/looper/looper.yaml`:
 looper          # opens the TUI, press [g]o or [enter] to start
 looper --start  # start immediately
 looper --continue   # resume from the last completed step
+looper --attach=http://127.0.0.1:4096  # connect to an existing OpenCode server
 looper --help
 ```
 
@@ -40,6 +41,9 @@ Run `looper --help` for the full flag list (attach to an existing OpenCode serve
 `looper.yaml` shape:
 
 ```yaml
+opencode:
+  serverUrl: http://127.0.0.1:4096  # optional: connect to an existing OpenCode server instead of spawning one
+
 steps:
   build:
     name: Build
@@ -52,6 +56,8 @@ steps:
     agent: sonny
     prompt: check-done.md
 ```
+
+By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
 Steps run in declaration order. After each iteration the loop reloads `looper.yaml`, so you can edit it mid-run.
 
