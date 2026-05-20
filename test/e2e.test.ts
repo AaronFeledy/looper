@@ -2,10 +2,14 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { parseArgs, resolveAttachUrl } from "../src/lib/args.ts";
 import { loadRuntimeConfig } from "../src/lib/config.ts";
+import { reattachOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { startOrAttachServer } from "../src/lib/sdk-server.ts";
+import { createLoopState } from "../src/lib/state.ts";
+import { initStatePaths } from "../src/lib/state-files.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const LOOPER_BIN = join(REPO_ROOT, "bin", "looper");
@@ -213,4 +217,69 @@ test("startOrAttachServer returns an attached handle without spawning opencode",
   const server = await startOrAttachServer({ opencodeBin: "definitely-not-opencode", attachUrl: "http://127.0.0.1:4096" });
   expect(server.url).toBe("http://127.0.0.1:4096");
   await server.close();
+});
+
+test("reattach honors an older session-scoped active continuation record", async () => {
+  const repoDir = join(SCRATCH, "reattach-old-continuation");
+  const stateDir = join(repoDir, ".local", "looper");
+  const continuationDir = join(repoDir, ".sisyphus", "run-continuation");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(continuationDir, { recursive: true });
+  initStatePaths({ configDir: stateDir });
+
+  const oldTimestamp = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(
+    join(continuationDir, "ses_old.json"),
+    JSON.stringify(
+      {
+        sessionID: "ses_old",
+        updatedAt: oldTimestamp,
+        sources: {
+          "background-task": {
+            state: "active",
+            reason: "review",
+            updatedAt: oldTimestamp,
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const client = {
+    event: {
+      subscribe: async () => ({ stream: new ReadableStream() }),
+    },
+    session: {
+      abort: async () => ({}),
+      status: async () => ({ data: { ses_old: { type: "idle" } } }),
+      messages: async () => ({
+        data: [
+          {
+            info: {
+              role: "assistant",
+              parentID: "msg_old",
+              time: { completed: Date.now() },
+            },
+          },
+        ],
+      }),
+    },
+  } as unknown as OpencodeClient;
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Review"] });
+  const step: Step = { name: "Review", agent: "build", variant: "", model: "", prompt: "prompt.md" };
+
+  const result = await reattachOpenCodeStep({
+    state,
+    stepIndex: 0,
+    client,
+    repoDir,
+    step,
+    sessionID: "ses_old",
+    messageID: "msg_old",
+  });
+
+  expect(result.status).toBe("waiting");
+  expect(state.steps[0]?.status).toBe("waiting");
 });

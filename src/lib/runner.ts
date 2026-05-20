@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -23,6 +24,8 @@ export type StepResult = "done" | "failed" | "skipped" | "restart" | "waiting";
 export type StepRunResult = {
   status: StepResult;
   sessionID?: string;
+  errorMessage?: string;
+  messageID?: string;
 };
 
 type ContinuationState = "active" | "idle";
@@ -55,6 +58,8 @@ const CONTINUATION_START_SKEW_MS = 5_000;
 const CONTINUATION_EXIT_GRACE_MS = positiveIntegerEnv("LOOPER_CONTINUATION_EXIT_GRACE_MS", 30_000);
 const CONTINUATION_EXIT_GRACE_POLL_MS = 100;
 const CONTINUATION_STATUS_POLL_MS = 1_000;
+const REATTACH_STATUS_POLL_MS = 2_000;
+const REATTACH_MAX_WAIT_MS = 60 * 60 * 1000;
 /**
  * Cap for the active-record scan only. Scoped lookups by sessionID bypass this
  * and read `<sessionID>.json` directly so a long-lived run-continuation dir
@@ -80,6 +85,28 @@ function parseModel(model: string): { providerID: string; modelID: string } | un
   const slash = model.indexOf("/");
   if (slash === -1) return undefined;
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
+}
+
+const ID_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let lastIdTimestamp = 0;
+let idCounter = 0;
+
+function createOpencodeID(prefix: string): string {
+  const currentTimestamp = Date.now();
+  if (currentTimestamp !== lastIdTimestamp) {
+    lastIdTimestamp = currentTimestamp;
+    idCounter = 0;
+  }
+  idCounter += 1;
+  const value = BigInt(currentTimestamp) * BigInt(0x1000) + BigInt(idCounter);
+  const timeBytes = Buffer.alloc(6);
+  for (let i = 0; i < 6; i += 1) {
+    timeBytes[i] = Number((value >> BigInt(40 - 8 * i)) & BigInt(0xff));
+  }
+  const random = randomBytes(14);
+  let suffix = "";
+  for (let i = 0; i < 14; i += 1) suffix += ID_BASE62[random[i]! % 62];
+  return `${prefix}_${timeBytes.toString("hex")}${suffix}`;
 }
 
 function formatRequestError(error: unknown): string {
@@ -284,6 +311,38 @@ async function waitForActiveLoopContinuationRecord({
   return null;
 }
 
+async function waitForSessionLoopContinuationRecord({
+  client,
+  repoDir,
+  sessionID,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+}): Promise<RunContinuationRecord | null> {
+  const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
+  let nextStatusPoll = 0;
+  while (Date.now() <= deadline) {
+    const record = readProjectContinuationRecord(repoDir, sessionID);
+    if (record !== null) {
+      if (record.source.state === "active") return record;
+      if (record.source.state === "idle") return null;
+    }
+
+    const now = Date.now();
+    if (now >= nextStatusPoll) {
+      nextStatusPoll = now + CONTINUATION_STATUS_POLL_MS;
+      if (await sessionStillPending(client, repoDir, sessionID)) {
+        await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
+        continue;
+      }
+    }
+
+    await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
+  }
+  return null;
+}
+
 function logContinuationState(state: LoopState, stepIndex: number, record: RunContinuationRecord, prefix: string): void {
   const reason = record.source.reason ? ` reason=${sanitizeLogField(record.source.reason)}` : "";
   const line = `[looper] ${prefix}: session=${sanitizeLogField(record.sessionID)} state=${record.source.state}${reason} updatedAt=${sanitizeLogField(record.source.updatedAt)}`;
@@ -344,6 +403,261 @@ export async function waitForLoopContinuationIdle({
   }
 }
 
+export type AssistantClassification =
+  | { kind: "done" }
+  | { kind: "failed"; errorMessage: string }
+  | { kind: "in-progress" }
+  | { kind: "missing" };
+
+async function classifyAssistantForMessage(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+  parentMessageID: string,
+): Promise<AssistantClassification> {
+  let result;
+  try {
+    result = await client.session.messages({ sessionID, directory: repoDir });
+  } catch {
+    return { kind: "missing" };
+  }
+  if (result.error || !result.data) return { kind: "missing" };
+  for (const entry of result.data) {
+    const info = entry.info;
+    if (info.role !== "assistant") continue;
+    if (info.parentID !== parentMessageID) continue;
+    if (info.error) {
+      const err = info.error;
+      const data = err.data;
+      const message =
+        data && typeof data === "object" && "message" in data
+          ? String((data as { message: unknown }).message)
+          : err.name;
+      return { kind: "failed", errorMessage: `${err.name}: ${message}` };
+    }
+    if (info.time.completed !== undefined) return { kind: "done" };
+    return { kind: "in-progress" };
+  }
+  return { kind: "missing" };
+}
+
+export type PriorSessionEvaluation = {
+  statusKnown: boolean;
+  pending: boolean;
+  classification: AssistantClassification;
+};
+
+export async function evaluatePriorSession({
+  client,
+  repoDir,
+  sessionID,
+  messageID,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  messageID: string;
+}): Promise<PriorSessionEvaluation> {
+  let statusKnown = true;
+  let status: SessionStatus | undefined;
+  try {
+    const r = await client.session.status({ directory: repoDir });
+    if (r.error) statusKnown = false;
+    else status = r.data?.[sessionID];
+  } catch {
+    statusKnown = false;
+  }
+  const pending = statusKnown && isPendingSessionStatus(status);
+  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, messageID);
+  return { statusKnown, pending, classification };
+}
+
+export type ReattachStepOptions = {
+  state: LoopState;
+  stepIndex: number;
+  client: OpencodeClient;
+  repoDir: string;
+  step: Step;
+  sessionID: string;
+  messageID: string;
+};
+
+export async function reattachOpenCodeStep({
+  state,
+  stepIndex,
+  client,
+  repoDir,
+  step,
+  sessionID,
+  messageID,
+}: ReattachStepOptions): Promise<StepRunResult> {
+  const activeStep = state.steps[stepIndex];
+  if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
+  const startedAt = Date.now();
+
+  state.activeStepIndex = stepIndex;
+  syncSelectionToActiveStep(state);
+  activeStep.status = "running";
+  activeStep.statusMessage = "reattaching";
+  activeStep.startedAt = Date.now();
+  activeStep.finishedAt = undefined;
+  setStepSessionID(state, stepIndex, sessionID);
+  notify();
+
+  const pushLine = (line: string) => {
+    pushAgentLine(state, line);
+    pushStepOutputLine(state, stepIndex, line);
+  };
+  const pushLines = (lines: string[]) => {
+    if (lines.length === 0) return;
+    for (const line of lines) pushAgentLine(state, line);
+    pushStepOutputLines(state, stepIndex, lines);
+  };
+
+  pushLine(`[looper] reattaching to session ${sessionID} (messageID=${messageID}) for ${step.name}`);
+
+  const ctrl = new AbortController();
+  let cancellationAction: "skip" | "restart" | null = null;
+  let abortSent = false;
+  const requestCancellation = (reason: "skip" | "restart") => {
+    if (cancellationAction !== null) return;
+    cancellationAction = reason;
+    pushLine(`[looper] ${reason} requested for ${step.name} during reattach`);
+    if (!abortSent) {
+      abortSent = true;
+      void client.session.abort({ sessionID, directory: repoDir }).catch(() => undefined);
+    }
+    ctrl.abort();
+  };
+
+  const watcher = setInterval(() => {
+    if (cancellationAction !== null) return;
+    if (state.restartRequested) requestCancellation("restart");
+    else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
+  }, 100);
+
+  let consumerPromise: Promise<void> | undefined;
+  let timedOut = false;
+  let consecutiveStatusErrors = 0;
+
+  try {
+    const sub = await client.event.subscribe({ directory: repoDir }, { signal: ctrl.signal });
+    if (!sub.stream) throw new Error("event.subscribe returned no stream");
+    pushLine(`[looper] subscribed to events for reattach`);
+    consumerPromise = consumeSessionEvents(sub.stream, sessionID, { pushLine, pushLines }).catch((err) => {
+      const error = toError(err);
+      if (isAbortError(error)) return;
+      pushLine(`[error] event consumer crashed during reattach: ${error.message}`);
+    });
+  } catch (error) {
+    pushLine(`[error] reattach failed to subscribe: ${toError(error).message}`);
+  }
+
+  try {
+    while (cancellationAction === null) {
+      if (Date.now() - startedAt > REATTACH_MAX_WAIT_MS) {
+        timedOut = true;
+        break;
+      }
+      let statusOk = false;
+      let stillPending = false;
+      let statusErrorMessage: string | undefined;
+      try {
+        const statusResult = await client.session.status({ directory: repoDir });
+        if (!statusResult.error) {
+          statusOk = true;
+          stillPending = isPendingSessionStatus(statusResult.data?.[sessionID]);
+        } else {
+          statusErrorMessage = formatRequestError(statusResult.error);
+        }
+      } catch (error) {
+        statusErrorMessage = formatRequestError(error);
+      }
+      if (statusOk) {
+        consecutiveStatusErrors = 0;
+        if (!stillPending) break;
+      } else {
+        consecutiveStatusErrors += 1;
+        if (consecutiveStatusErrors >= 5) {
+          pushLine(`[looper] reattach: session.status failed ${consecutiveStatusErrors} times in a row; giving up${statusErrorMessage ? `: ${statusErrorMessage}` : ""}`);
+          break;
+        }
+      }
+      await Bun.sleep(REATTACH_STATUS_POLL_MS);
+    }
+  } finally {
+    clearInterval(watcher);
+    ctrl.abort();
+    if (consumerPromise) {
+      let consumerTimedOut = false;
+      await Promise.race([
+        consumerPromise,
+        Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS).then(() => {
+          consumerTimedOut = true;
+        }),
+      ]).catch(() => undefined);
+      if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
+    }
+  }
+
+  const finalize = (
+    statusValue: StepResult,
+    extras?: { errorMessage?: string; statusMessage?: string },
+  ): StepRunResult => {
+    if (statusValue === "restart") {
+      activeStep.status = "pending";
+      activeStep.statusMessage = undefined;
+      activeStep.finishedAt = undefined;
+    } else {
+      activeStep.status = statusValue;
+      activeStep.statusMessage = extras?.statusMessage;
+      activeStep.finishedAt = Date.now();
+    }
+    state.activeStepIndex = null;
+    notify();
+    return {
+      status: statusValue,
+      sessionID,
+      messageID,
+      ...(extras?.errorMessage !== undefined ? { errorMessage: extras.errorMessage } : {}),
+    };
+  };
+
+  if (cancellationAction === "restart") return finalize("restart");
+  if (cancellationAction === "skip") return finalize("skipped");
+  if (timedOut) {
+    const reason = `reattach timed out after ${Math.round(REATTACH_MAX_WAIT_MS / 1000)}s waiting for session ${sessionID}`;
+    pushLine(`[looper] ${reason}`);
+    return finalize("failed", { errorMessage: reason });
+  }
+
+  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, messageID);
+  if (classification.kind === "done") {
+    pushLine(`[looper] reattach: assistant message ${messageID} completed cleanly`);
+    const record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
+    if (record !== null) {
+      setContinuationStatus(state, stepIndex, record);
+      logContinuationState(state, stepIndex, record, "background tasks active after reattach");
+      activeStep.status = "waiting";
+      activeStep.finishedAt = undefined;
+      state.activeStepIndex = null;
+      notify();
+      return { status: "waiting", sessionID: record.sessionID, messageID };
+    }
+    return finalize("done");
+  }
+  if (classification.kind === "failed") {
+    pushLine(`[error] reattach: ${classification.errorMessage}`);
+    return finalize("failed", { errorMessage: classification.errorMessage });
+  }
+  const reason =
+    classification.kind === "missing"
+      ? `reattach: no assistant message found for prompt ${messageID}`
+      : `reattach: assistant message ${messageID} still in-progress after status idle`;
+  pushLine(`[looper] ${reason}`);
+  return finalize("failed", { errorMessage: reason });
+}
+
 
 export async function runOpenCodeStep({
   state,
@@ -379,6 +693,7 @@ export async function runOpenCodeStep({
 
   pushLine(`[looper] starting step ${step.name}`);
 
+  let sentMessageID: string | undefined;
   const ctrl = new AbortController();
   const cancellation: { action: "skip" | "restart" | null; abortSent: boolean; activeSessionID: string | undefined } = {
     action: null,
@@ -446,11 +761,14 @@ export async function runOpenCodeStep({
 
     const model = parseModel(step.model);
     const variant = step.variant || undefined;
-    pushLine(`[looper] sending prompt (agent=${step.agent}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""})`);
+    const messageID = createOpencodeID("msg");
+    sentMessageID = messageID;
+    pushLine(`[looper] sending prompt (agent=${step.agent}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(
       {
         sessionID: sid,
         directory: repoDir,
+        messageID,
         parts: [{ type: "text", text: prompt }],
         agent: step.agent,
         ...(model ? { model } : {}),
@@ -500,7 +818,7 @@ export async function runOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after opencode exit");
-      return { status: "waiting", sessionID: record.sessionID };
+      return { status: "waiting", sessionID: record.sessionID, ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}) };
     }
   }
 
@@ -516,5 +834,10 @@ export async function runOpenCodeStep({
   state.activeStepIndex = null;
   notify();
 
-  return { status, sessionID: cancellation.activeSessionID };
+  return {
+    status,
+    sessionID: cancellation.activeSessionID,
+    ...(status === "failed" && finalError ? { errorMessage: finalError.message } : {}),
+    ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}),
+  };
 }
