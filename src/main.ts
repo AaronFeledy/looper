@@ -5,8 +5,8 @@ import { BoxRenderable, createCliRenderer, type CliRenderer } from "@opentui/cor
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
-import { HelpRequested, parseArgs } from "./lib/args.ts";
-import { CONFIG_FILE_NAME, configFilePath, loadSteps } from "./lib/config.ts";
+import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
+import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import type { Step } from "./lib/runner.ts";
@@ -116,6 +116,11 @@ function stopReason(): string {
   return readStopFile() ?? readStopAfterIterationFile() ?? "stop requested";
 }
 
+function resolveAttachUrl(options: ReturnType<typeof parseArgs>): string | undefined {
+  const runtimeConfig = loadRuntimeConfig(configDir);
+  return resolveConfiguredAttachUrl(options, runtimeConfig.opencodeServerUrl, opencodeAttachUrl);
+}
+
 async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const steps = loadSteps(configDir);
   if (options.start) clearStopFilesForNewRun();
@@ -171,7 +176,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       maxFps: 30,
     });
 
-    const attachUrl = options.attach ? (options.attachUrl ?? opencodeAttachUrl) : undefined;
+    const attachUrl = resolveAttachUrl(options);
     server = await startOrAttachServer({ opencodeBin, attachUrl });
     const client = createOpencodeClient({ baseUrl: server.url });
 
@@ -314,7 +319,7 @@ async function main(): Promise<number> {
       repoDir,
       configDir,
       opencodeBin,
-      attachUrl: options.attach ? (options.attachUrl ?? opencodeAttachUrl) : undefined,
+      attachUrl: resolveAttachUrl(options),
       currentBranch,
     });
     return Number(process.exitCode ?? 0);

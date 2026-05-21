@@ -2,6 +2,14 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+
+import { parseArgs, resolveAttachUrl } from "../src/lib/args.ts";
+import { loadRuntimeConfig } from "../src/lib/config.ts";
+import { reattachOpenCodeStep, type Step } from "../src/lib/runner.ts";
+import { startOrAttachServer } from "../src/lib/sdk-server.ts";
+import { createLoopState } from "../src/lib/state.ts";
+import { initStatePaths } from "../src/lib/state-files.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const LOOPER_BIN = join(REPO_ROOT, "bin", "looper");
@@ -176,4 +184,102 @@ test("fails fast with exit 2 when no config is present, and auto-creates the con
   expect(exitCode).toBe(2);
   expect(err).toContain("missing looper.yaml");
   expect(existsSync(join(emptyDir, ".local", "looper"))).toBe(true);
+});
+
+test("loads an existing OpenCode server URL from looper.yaml", () => {
+  const configDir = join(SCRATCH, "config-server-url");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  serverUrl: http://127.0.0.1:4096",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).opencodeServerUrl).toBe("http://127.0.0.1:4096");
+});
+
+test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
+  expect(resolveAttachUrl(parseArgs([]), "http://127.0.0.1:4096", "http://default.local")).toBe("http://127.0.0.1:4096");
+  expect(resolveAttachUrl(parseArgs(["--attach=http://127.0.0.1:5000"]), "http://127.0.0.1:4096", "http://default.local")).toBe(
+    "http://127.0.0.1:5000",
+  );
+  expect(resolveAttachUrl(parseArgs(["--attach"]), undefined, "http://default.local")).toBe("http://default.local");
+  expect(resolveAttachUrl(parseArgs([]), undefined, "http://default.local")).toBeUndefined();
+});
+
+test("startOrAttachServer returns an attached handle without spawning opencode", async () => {
+  const server = await startOrAttachServer({ opencodeBin: "definitely-not-opencode", attachUrl: "http://127.0.0.1:4096" });
+  expect(server.url).toBe("http://127.0.0.1:4096");
+  await server.close();
+});
+
+test("reattach honors an older session-scoped active continuation record", async () => {
+  const repoDir = join(SCRATCH, "reattach-old-continuation");
+  const stateDir = join(repoDir, ".local", "looper");
+  const continuationDir = join(repoDir, ".sisyphus", "run-continuation");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(continuationDir, { recursive: true });
+  initStatePaths({ configDir: stateDir });
+
+  const oldTimestamp = new Date(Date.now() - 60_000).toISOString();
+  writeFileSync(
+    join(continuationDir, "ses_old.json"),
+    JSON.stringify(
+      {
+        sessionID: "ses_old",
+        updatedAt: oldTimestamp,
+        sources: {
+          "background-task": {
+            state: "active",
+            reason: "review",
+            updatedAt: oldTimestamp,
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const client = {
+    event: {
+      subscribe: async () => ({ stream: new ReadableStream() }),
+    },
+    session: {
+      abort: async () => ({}),
+      status: async () => ({ data: { ses_old: { type: "idle" } } }),
+      messages: async () => ({
+        data: [
+          {
+            info: {
+              role: "assistant",
+              parentID: "msg_old",
+              time: { completed: Date.now() },
+            },
+          },
+        ],
+      }),
+    },
+  } as unknown as OpencodeClient;
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Review"] });
+  const step: Step = { name: "Review", agent: "build", variant: "", model: "", prompt: "prompt.md" };
+
+  const result = await reattachOpenCodeStep({
+    state,
+    stepIndex: 0,
+    client,
+    repoDir,
+    step,
+    sessionID: "ses_old",
+    messageID: "msg_old",
+  });
+
+  expect(result.status).toBe("waiting");
+  expect(state.steps[0]?.status).toBe("waiting");
 });
