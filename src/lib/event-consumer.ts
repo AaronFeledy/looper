@@ -3,6 +3,7 @@ import type { Event, Part } from "@opencode-ai/sdk/v2";
 export type EventConsumerCallbacks = {
   pushLine: (line: string) => void;
   pushLines?: (lines: string[]) => void;
+  onSessionError?: (message: string) => void;
 };
 
 type TextPartState = {
@@ -278,6 +279,7 @@ export async function consumeSessionEvents(
         const err = event.properties.error;
         const message = err && typeof err === "object" && "message" in err ? String(err.message) : JSON.stringify(err);
         push(`${ui.red("✗ session error")} ${message}`);
+        callbacks.onSessionError?.(message);
         break;
       }
       case "session.next.retried":

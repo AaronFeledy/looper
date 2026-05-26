@@ -6,7 +6,8 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { parseArgs, resolveAttachUrl } from "../src/lib/args.ts";
 import { loadRuntimeConfig } from "../src/lib/config.ts";
-import { reattachOpenCodeStep, type Step } from "../src/lib/runner.ts";
+import { runIteration, StepFailureError } from "../src/lib/orchestrator.ts";
+import { reattachOpenCodeStep, runOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { startOrAttachServer } from "../src/lib/sdk-server.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
@@ -219,6 +220,101 @@ test("startOrAttachServer returns an attached handle without spawning opencode",
   await server.close();
 });
 
+test("session error events fail the current step", async () => {
+  async function* stream() {
+    yield {
+      type: "session.error",
+      properties: { sessionID: "ses_error", error: { message: "provider rejected request" } },
+    };
+  }
+
+  const client = {
+    event: {
+      subscribe: async () => ({ stream: stream() }),
+    },
+    session: {
+      abort: async () => ({}),
+      create: async () => ({ data: { id: "ses_error" } }),
+      prompt: async () => ({}),
+    },
+  } as unknown as OpencodeClient;
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Sync"] });
+  const step: Step = { name: "Sync", agent: "build", variant: "", model: "", prompt: "prompt.md" };
+
+  const result = await runOpenCodeStep({
+    state,
+    stepIndex: 0,
+    prompt: "run",
+    client,
+    repoDir: SCRATCH,
+    step,
+  });
+
+  expect(result.status).toBe("failed");
+  expect(result.errorMessage).toContain("provider rejected request");
+  expect(state.steps[0]?.status).toBe("failed");
+});
+
+test("runIteration retries session errors twice before surfacing terminal failure", async () => {
+  const retryDir = join(SCRATCH, "session-error-retries");
+  const configDir = join(retryDir, ".local", "looper");
+  mkdirSync(configDir, { recursive: true });
+  initStatePaths({ configDir });
+  writeFileSync(join(configDir, "prompt.md"), "trigger failure\n");
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "steps:",
+      "  sync:",
+      "    name: Sync",
+      "    agent: build",
+      "    model: openai/gpt-5.5",
+      "    variant: low",
+      "    prompt: prompt.md",
+      "",
+    ].join("\n"),
+  );
+
+  let promptCount = 0;
+  async function* stream() {
+    yield {
+      type: "session.error",
+      properties: { sessionID: "ses_retry", error: { message: `provider failure ${promptCount}` } },
+    };
+  }
+
+  const client = {
+    event: {
+      subscribe: async () => ({ stream: stream() }),
+    },
+    session: {
+      abort: async () => ({}),
+      create: async () => ({ data: { id: "ses_retry" } }),
+      messages: async () => ({ data: [] }),
+      prompt: async () => {
+        promptCount += 1;
+        return {};
+      },
+      status: async () => ({ data: {} }),
+    },
+  } as unknown as OpencodeClient;
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Sync"] });
+
+  await expect(runIteration({
+    state,
+    iteration: 1,
+    client,
+    repoDir: retryDir,
+    configDir,
+  })).rejects.toBeInstanceOf(StepFailureError);
+
+  expect(promptCount).toBe(3);
+  expect(state.steps[0]?.status).toBe("failed");
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying (attempt 1/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying (attempt 2/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
+});
+
 test("reattach honors an older session-scoped active continuation record", async () => {
   const repoDir = join(SCRATCH, "reattach-old-continuation");
   const stateDir = join(repoDir, ".local", "looper");
@@ -282,4 +378,69 @@ test("reattach honors an older session-scoped active continuation record", async
 
   expect(result.status).toBe("waiting");
   expect(state.steps[0]?.status).toBe("waiting");
+});
+
+test("session-scoped continuation lookup rejects path traversal session IDs", async () => {
+  const repoDir = join(SCRATCH, "reattach-traversal-continuation");
+  const stateDir = join(repoDir, ".local", "looper");
+  const continuationDir = join(repoDir, ".sisyphus", "run-continuation");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(continuationDir, { recursive: true });
+  initStatePaths({ configDir: stateDir });
+
+  const now = new Date().toISOString();
+  writeFileSync(
+    join(repoDir, ".sisyphus", "secret.json"),
+    JSON.stringify(
+      {
+        sessionID: "../secret",
+        updatedAt: now,
+        sources: {
+          "background-task": {
+            state: "active",
+            reason: "should-not-read",
+            updatedAt: now,
+          },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const client = {
+    event: {
+      subscribe: async () => ({ stream: new ReadableStream() }),
+    },
+    session: {
+      abort: async () => ({}),
+      status: async () => ({ data: { "../secret": { type: "idle" } } }),
+      messages: async () => ({
+        data: [
+          {
+            info: {
+              role: "assistant",
+              parentID: "msg_traversal",
+              time: { completed: Date.now() },
+            },
+          },
+        ],
+      }),
+    },
+  } as unknown as OpencodeClient;
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Review"] });
+  const step: Step = { name: "Review", agent: "build", variant: "", model: "", prompt: "prompt.md" };
+
+  const result = await reattachOpenCodeStep({
+    state,
+    stepIndex: 0,
+    client,
+    repoDir,
+    step,
+    sessionID: "../secret",
+    messageID: "msg_traversal",
+  });
+
+  expect(result.status).toBe("done");
+  expect(state.steps[0]?.status).toBe("done");
 });

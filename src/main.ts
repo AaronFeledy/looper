@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
-import { runIteration } from "./lib/orchestrator.ts";
+import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import { createLoopState, notify, resetIterationNavigationState } from "./lib/state.ts";
@@ -253,22 +253,36 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       const iterationSteps = loadSteps(configDir);
       resetIterationState(state, iteration, await currentBranch(), iterationSteps);
       const startedAt = Date.now();
-      const result = await runIteration({
-        state,
-        iteration,
-        client,
-        repoDir,
-        configDir,
-        startStepIndex: iteration === 1 ? firstIterationStartStepIndex : 0,
-        hooks: {
-          onStepBegin: ({ index }) => {
-            saveResumeStep(loadSteps(configDir), index);
+      let result: Awaited<ReturnType<typeof runIteration>>;
+      try {
+        result = await runIteration({
+          state,
+          iteration,
+          client,
+          repoDir,
+          configDir,
+          startStepIndex: iteration === 1 ? firstIterationStartStepIndex : 0,
+          hooks: {
+            onStepBegin: ({ index }) => {
+              saveResumeStep(loadSteps(configDir), index);
+            },
+            onStepFinish: ({ nextIndex, status }) => {
+              if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
+            },
           },
-          onStepFinish: ({ nextIndex, status }) => {
-            if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
-          },
-        },
-      });
+        });
+      } catch (error) {
+        if (!(error instanceof StepFailureError)) throw error;
+        state.started = false;
+        state.paused = false;
+        notify();
+        await waitForStart(state);
+        if (state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()) {
+          return finish(1, exitReason ?? error.message);
+        }
+        iteration -= 1;
+        continue;
+      }
 
       if (result === "stopped" || state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()) {
         return finish(0, exitReason ?? stopReason());

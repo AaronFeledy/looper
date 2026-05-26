@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import type { OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
@@ -202,6 +202,10 @@ function continuationDir(repoDir: string): string {
   return join(repoDir, ".sisyphus", "run-continuation");
 }
 
+function isSafeSessionID(sessionID: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(sessionID);
+}
+
 function readProjectContinuationRecords(repoDir: string): RunContinuationRecord[] {
   const dir = continuationDir(repoDir);
   try {
@@ -250,9 +254,14 @@ function newestRecord(records: RunContinuationRecord[]): RunContinuationRecord |
 function readProjectContinuationRecord(repoDir: string, sessionID: string): RunContinuationRecord | null {
   // Read the specific file directly so we never miss it because of the
   // active-scan cap. Falls back to scan-and-filter in case of corruption.
-  const path = join(continuationDir(repoDir), `${sessionID}.json`);
-  const direct = readContinuationRecordFromPath(path, `${sessionID}.json`);
-  if (direct !== null && direct.sessionID === sessionID) return direct;
+  if (isSafeSessionID(sessionID)) {
+    const dir = resolve(continuationDir(repoDir));
+    const path = resolve(dir, `${sessionID}.json`);
+    if (path.startsWith(`${dir}${sep}`)) {
+      const direct = readContinuationRecordFromPath(path, `${sessionID}.json`);
+      if (direct !== null && direct.sessionID === sessionID) return direct;
+    }
+  }
   return newestRecord(readProjectContinuationRecords(repoDir).filter((record) => record.sessionID === sessionID));
 }
 
@@ -286,6 +295,8 @@ async function waitForActiveLoopContinuationRecord({
   startedAt: number;
   sessionID: string | undefined;
 }): Promise<RunContinuationRecord | null> {
+  if (sessionID !== undefined && !isSafeSessionID(sessionID)) return null;
+
   const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
   let nextStatusPoll = 0;
   while (Date.now() <= deadline) {
@@ -320,6 +331,8 @@ async function waitForSessionLoopContinuationRecord({
   repoDir: string;
   sessionID: string;
 }): Promise<RunContinuationRecord | null> {
+  if (!isSafeSessionID(sessionID)) return null;
+
   const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
   let nextStatusPoll = 0;
   while (Date.now() <= deadline) {
@@ -728,6 +741,7 @@ export async function runOpenCodeStep({
 
   let consumerPromise: Promise<void> | undefined;
   let consumerError: Error | undefined;
+  let sessionEventError: Error | undefined;
   let finalError: Error | undefined;
 
   try {
@@ -752,7 +766,13 @@ export async function runOpenCodeStep({
     );
     if (!sub.stream) throw new Error("event.subscribe returned no stream");
     pushLine(`[looper] subscribed to events`);
-    consumerPromise = consumeSessionEvents(sub.stream, sid, { pushLine, pushLines }).catch((err) => {
+    consumerPromise = consumeSessionEvents(sub.stream, sid, {
+      pushLine,
+      pushLines,
+      onSessionError: (message) => {
+        sessionEventError ??= new Error(`session.error: ${message}`);
+      },
+    }).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
       consumerError = error;
@@ -799,6 +819,9 @@ export async function runOpenCodeStep({
 
   if (finalError === undefined && cancellation.action === null && consumerError !== undefined) {
     finalError = consumerError;
+  }
+  if (finalError === undefined && cancellation.action === null && sessionEventError !== undefined) {
+    finalError = sessionEventError;
   }
 
   const status: StepResult =
