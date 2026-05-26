@@ -199,7 +199,7 @@ function readContinuationRecordFromPath(path: string, expectedName?: string): Ru
 }
 
 function continuationDir(repoDir: string): string {
-  return join(repoDir, ".sisyphus", "run-continuation");
+  return join(repoDir, ".omo", "run-continuation");
 }
 
 function isSafeSessionID(sessionID: string): boolean {

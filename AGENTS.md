@@ -17,7 +17,7 @@ This file is for non-obvious repo context only. Keep it short and current.
 
 - `src/main.ts` &mdash; CLI entry. Decides TTY vs non-TTY mode, owns the renderer, spawns/attaches the opencode server.
 - `src/lib/orchestrator.ts` &mdash; runs one iteration: loop over steps, handle restart / skip / failure retries / background-task waits.
-- `src/lib/runner.ts` &mdash; runs one step against opencode (session create, prompt, subscribe to events, abort on cancel). Reads `.sisyphus/run-continuation/*.json` from the project repo to detect background tasks. Also exports `reattachOpenCodeStep` and `evaluatePriorSession` for the orchestrator's reattach-on-failure path; every prompt is sent with a self-generated opencode `msg_…` id (see `createOpencodeID`) so failures can be correlated against the actual assistant message via `session.messages()`.
+- `src/lib/runner.ts` &mdash; runs one step against opencode (session create, prompt, subscribe to events, abort on cancel). Reads `.omo/run-continuation/*.json` from the project repo to detect background tasks. Also exports `reattachOpenCodeStep` and `evaluatePriorSession` for the orchestrator's reattach-on-failure path; every prompt is sent with a self-generated opencode `msg_…` id (see `createOpencodeID`) so failures can be correlated against the actual assistant message via `session.messages()`.
 - `src/lib/state.ts` &mdash; in-memory TUI state, listener pub/sub.
 - `src/lib/state-files.ts` &mdash; on-disk stop/resume/branch files under the config dir. **Must call `initStatePaths({ configDir })` before any other export is used.**
 - `src/lib/fallback.ts` &mdash; non-TTY linear runner.

@@ -318,7 +318,7 @@ test("runIteration retries session errors twice before surfacing terminal failur
 test("reattach honors an older session-scoped active continuation record", async () => {
   const repoDir = join(SCRATCH, "reattach-old-continuation");
   const stateDir = join(repoDir, ".local", "looper");
-  const continuationDir = join(repoDir, ".sisyphus", "run-continuation");
+  const continuationDir = join(repoDir, ".omo", "run-continuation");
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(continuationDir, { recursive: true });
   initStatePaths({ configDir: stateDir });
@@ -383,14 +383,14 @@ test("reattach honors an older session-scoped active continuation record", async
 test("session-scoped continuation lookup rejects path traversal session IDs", async () => {
   const repoDir = join(SCRATCH, "reattach-traversal-continuation");
   const stateDir = join(repoDir, ".local", "looper");
-  const continuationDir = join(repoDir, ".sisyphus", "run-continuation");
+  const continuationDir = join(repoDir, ".omo", "run-continuation");
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(continuationDir, { recursive: true });
   initStatePaths({ configDir: stateDir });
 
   const now = new Date().toISOString();
   writeFileSync(
-    join(repoDir, ".sisyphus", "secret.json"),
+    join(repoDir, ".omo", "secret.json"),
     JSON.stringify(
       {
         sessionID: "../secret",
