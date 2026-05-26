@@ -28,7 +28,7 @@ logs
 .DS_Store
 
 # Local dev
-/.sisyphus
+/.omo
 
 # Scratch dirs used by e2e tests
 /test/.tmp
