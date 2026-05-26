@@ -89,8 +89,15 @@ async function waitWhilePaused(state: LoopState): Promise<void> {
 }
 
 const MAX_BACKGROUND_RESUMES_PER_STEP = 10;
-const MAX_FAILURE_RETRIES_PER_STEP = 10;
+const MAX_FAILURE_RETRIES_PER_STEP = 2;
 const MAX_REATTACH_PER_STEP = 5;
+
+export class StepFailureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StepFailureError";
+  }
+}
 
 function backgroundContinuationPrompt(): string {
   return "Background agents are done. Check their results, incorporate what you learned, and continue this step until it is complete. If more background tasks are needed, wait for them before reporting completion.\n";
@@ -337,7 +344,7 @@ export async function runIteration({
         break;
       }
       const reason = lastErrorMessage ?? "unknown error (no message reported)";
-      throw new Error(
+      throw new StepFailureError(
         `${step.name} failed after ${failureRetryCount} retr${failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
       );
     }

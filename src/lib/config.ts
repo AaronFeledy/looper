@@ -101,15 +101,16 @@ function loadRawConfig(configDir: string): RawConfig {
 
 export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
+  let opencodeServerUrl: string | undefined;
   if (rawConfig.opencode !== undefined) {
     if (!rawConfig.opencode || typeof rawConfig.opencode !== "object" || Array.isArray(rawConfig.opencode)) {
       throw new Error(`${CONFIG_FILE_NAME}.opencode must be a mapping`);
     }
     const opencode = rawConfig.opencode as { serverUrl?: unknown };
-    return { opencodeServerUrl: optionalNonEmptyStringValue(opencode.serverUrl, "opencode.serverUrl") };
+    opencodeServerUrl = optionalNonEmptyStringValue(opencode.serverUrl, "opencode.serverUrl");
   }
-
-  return { opencodeServerUrl: optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl") };
+  opencodeServerUrl ??= optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl");
+  return { opencodeServerUrl };
 }
 
 export function loadSteps(configDir: string): Step[] {
