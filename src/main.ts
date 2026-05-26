@@ -131,6 +131,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   state.started = options.start;
 
   let firstIterationStartStepIndex = options.continueFromLastStep ? resumeStepIndex(steps) : 0;
+  let resumeAfterStepFailure = false;
   let renderer: CliRenderer | undefined;
   let server: ServerHandle | undefined;
   let cleanupKeys: (() => void) | undefined;
@@ -220,11 +221,16 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       },
       onStart: () => {
         clearStopFilesForNewRun();
-        if (!options.continueFromLastStep) clearResumeStepFile();
-        if (!state.started && state.manualStepSelection && state.selectedStepIndex !== null) {
-          firstIterationStartStepIndex = state.selectedStepIndex;
-        } else if (!state.started && options.continueFromLastStep) {
-          firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
+        if (!options.continueFromLastStep && !resumeAfterStepFailure) clearResumeStepFile();
+        if (!state.started) {
+          if (resumeAfterStepFailure) {
+            firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
+            resumeAfterStepFailure = false;
+          } else if (state.manualStepSelection && state.selectedStepIndex !== null) {
+            firstIterationStartStepIndex = state.selectedStepIndex;
+          } else if (options.continueFromLastStep) {
+            firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
+          }
         }
         state.started = true;
         state.stopAfterIteration = false;
@@ -280,7 +286,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         if (state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()) {
           return finish(1, exitReason ?? error.message);
         }
-        iteration -= 1;
+        resumeAfterStepFailure = true;
         continue;
       }
 

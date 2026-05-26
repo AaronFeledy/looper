@@ -550,6 +550,7 @@ export async function reattachOpenCodeStep({
   }, 100);
 
   let consumerPromise: Promise<void> | undefined;
+  let sessionEventError: Error | undefined;
   let timedOut = false;
   let consecutiveStatusErrors = 0;
 
@@ -557,7 +558,13 @@ export async function reattachOpenCodeStep({
     const sub = await client.event.subscribe({ directory: repoDir }, { signal: ctrl.signal });
     if (!sub.stream) throw new Error("event.subscribe returned no stream");
     pushLine(`[looper] subscribed to events for reattach`);
-    consumerPromise = consumeSessionEvents(sub.stream, sessionID, { pushLine, pushLines }).catch((err) => {
+    consumerPromise = consumeSessionEvents(sub.stream, sessionID, {
+      pushLine,
+      pushLines,
+      onSessionError: (message) => {
+        sessionEventError ??= new Error(`session.error: ${message}`);
+      },
+    }).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
       pushLine(`[error] event consumer crashed during reattach: ${error.message}`);
@@ -611,6 +618,20 @@ export async function reattachOpenCodeStep({
       ]).catch(() => undefined);
       if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
     }
+  }
+
+  if (sessionEventError !== undefined && cancellationAction === null) {
+    pushLine(`[error] reattach: ${sessionEventError.message}`);
+    activeStep.status = "failed";
+    activeStep.finishedAt = Date.now();
+    state.activeStepIndex = null;
+    notify();
+    return {
+      status: "failed",
+      sessionID,
+      messageID,
+      errorMessage: sessionEventError.message,
+    };
   }
 
   const finalize = (

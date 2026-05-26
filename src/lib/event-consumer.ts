@@ -276,6 +276,7 @@ export async function consumeSessionEvents(
         partMessages.delete(event.properties.partID);
         break;
       case "session.error": {
+        if (evSid !== sessionID) break;
         const err = event.properties.error;
         const message = err && typeof err === "object" && "message" in err ? String(err.message) : JSON.stringify(err);
         push(`${ui.red("✗ session error")} ${message}`);
