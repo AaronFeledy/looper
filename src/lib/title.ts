@@ -230,17 +230,24 @@ async function tryTitlePrompt({
     log?.(`[looper] title gen: fallback prompt failed: ${formatError(secondResp.error)}`);
     return undefined;
   }
-  // Fallback bypasses opencode's hidden `title` agent and uses the server's
-  // default agent + model instead. Surface what we actually billed against so
-  // users notice if it's their heavyweight default (Opus / GPT-5 / etc.) and
-  // can switch to a cheaper agent.
-  const fbInfo = secondResp.data.info;
-  if (fbInfo.role === "assistant") {
-    log?.(
-      `[looper] title gen: fallback used agent=${fbInfo.agent} model=${fbInfo.providerID}/${fbInfo.modelID} cost=${fbInfo.cost.toFixed(4)}`,
-    );
-  }
+  logFallbackUsage(secondResp.data.info, log);
   return secondResp.data;
+}
+
+/**
+ * Fallback bypasses opencode's hidden `title` agent and uses the server's
+ * default agent + model. Surface what was billed so users notice if it's a
+ * heavyweight default. Wrapped in try/catch because this is purely
+ * diagnostic — a malformed response must not throw past the caller and
+ * discard the successfully generated title.
+ */
+function logFallbackUsage(info: Message, log: ((line: string) => void) | undefined): void {
+  if (log === undefined) return;
+  try {
+    if (info.role !== "assistant") return;
+    const cost = typeof info.cost === "number" ? `${info.cost.toFixed(4)}` : "n/a";
+    log(`[looper] title gen: fallback used agent=${info.agent} model=${info.providerID}/${info.modelID} cost=${cost}`);
+  } catch {}
 }
 
 function isAbort(error: unknown): boolean {
