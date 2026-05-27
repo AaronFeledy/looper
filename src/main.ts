@@ -6,6 +6,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
+import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
 import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
 import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
@@ -135,6 +136,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let renderer: CliRenderer | undefined;
   let server: ServerHandle | undefined;
   let cleanupKeys: (() => void) | undefined;
+  let branchWatcher: BranchWatcher | null = null;
+  let branchSafetyTimer: ReturnType<typeof setInterval> | undefined;
   let exitReason: string | undefined;
 
   const finish = (exitCode: number, reason: string): number => {
@@ -176,6 +179,23 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       targetFps: 30,
       maxFps: 30,
     });
+
+    branchWatcher = await watchBranch({
+      repoDir,
+      onChange: (branch) => {
+        if (state.branch === branch) return;
+        state.branch = branch;
+        notify();
+      },
+    });
+
+    // Belt-and-braces fallback around the 5s background poll: re-check HEAD
+    // every 60s in case the interval timer is starved or the watcher is
+    // degraded. Cheap (one stat + tiny read).
+    if (branchWatcher !== null) {
+      branchSafetyTimer = setInterval(() => branchWatcher?.refresh(), 60_000);
+      branchSafetyTimer.unref?.();
+    }
 
     const attachUrl = resolveAttachUrl(options);
     server = await startOrAttachServer({ opencodeBin, attachUrl });
@@ -257,7 +277,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       if (stopFileExists() || stopAfterIterationFileExists()) return finish(0, stopReason());
 
       const iterationSteps = loadSteps(configDir);
-      resetIterationState(state, iteration, await currentBranch(), iterationSteps);
+      resetIterationState(state, iteration, state.branch || (await currentBranch()), iterationSteps);
       const startedAt = Date.now();
       let result: Awaited<ReturnType<typeof runIteration>>;
       try {
@@ -271,9 +291,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           hooks: {
             onStepBegin: ({ index }) => {
               saveResumeStep(loadSteps(configDir), index);
+              // Step boundaries are common branch-change moments (the previous
+              // step may have run `git checkout`); re-read HEAD immediately so
+              // the header doesn't lag up to 5s behind reality.
+              branchWatcher?.refresh();
             },
             onStepFinish: ({ nextIndex, status }) => {
               if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
+              branchWatcher?.refresh();
             },
           },
         });
@@ -304,6 +329,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     return finish(1, `max iterations reached (${options.maxIterations})`);
   } finally {
     cleanupKeys?.();
+    if (branchSafetyTimer !== undefined) clearInterval(branchSafetyTimer);
+    branchWatcher?.stop();
     process.off("SIGINT", handleSigint);
     process.off("SIGTERM", handleSigterm);
     renderer?.destroy();
