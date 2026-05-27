@@ -10,13 +10,15 @@ import { stopFileExists } from "./state-files.ts";
 
 export type Step = {
   name: string;
-  agent: string;
-  variant: string;
-  model: string;
+  agent?: string;
+  variant?: string;
+  model?: string;
   prompt: string;
   prefix?: string;
   suffix?: string;
   args?: string[];
+  /** `true` = generate title at step end. `number` = N seconds after first assistant response, concurrently. See README. */
+  title?: boolean | number;
 };
 
 export type StepResult = "done" | "failed" | "skipped" | "restart" | "waiting";
@@ -78,9 +80,10 @@ export type RunOpenCodeStepOptions = {
   repoDir: string;
   step: Step;
   sessionID?: string;
+  onFirstAssistantContent?: () => void;
 };
 
-function parseModel(model: string): { providerID: string; modelID: string } | undefined {
+function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
   const slash = model.indexOf("/");
   if (slash === -1) return undefined;
@@ -91,7 +94,7 @@ const ID_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxy
 let lastIdTimestamp = 0;
 let idCounter = 0;
 
-function createOpencodeID(prefix: string): string {
+export function createOpencodeID(prefix: string): string {
   const currentTimestamp = Date.now();
   if (currentTimestamp !== lastIdTimestamp) {
     lastIdTimestamp = currentTimestamp;
@@ -701,6 +704,7 @@ export async function runOpenCodeStep({
   repoDir,
   step,
   sessionID,
+  onFirstAssistantContent,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -770,7 +774,7 @@ export async function runOpenCodeStep({
     if (sid === undefined) {
       pushLine(`[looper] creating session for ${step.name}`);
       const created = await client.session.create(
-        { directory: repoDir, agent: step.agent },
+        { directory: repoDir, ...(step.agent ? { agent: step.agent } : {}) },
         { signal: ctrl.signal },
       );
       if (created.error) throw new Error(`session.create: ${formatRequestError(created.error)}`);
@@ -793,6 +797,7 @@ export async function runOpenCodeStep({
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
+      ...(onFirstAssistantContent ? { onFirstAssistantContent } : {}),
     }).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
@@ -802,16 +807,17 @@ export async function runOpenCodeStep({
 
     const model = parseModel(step.model);
     const variant = step.variant || undefined;
+    const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
-    pushLine(`[looper] sending prompt (agent=${step.agent}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
+    pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(
       {
         sessionID: sid,
         directory: repoDir,
         messageID,
         parts: [{ type: "text", text: prompt }],
-        agent: step.agent,
+        ...(agent ? { agent } : {}),
         ...(model ? { model } : {}),
         ...(variant ? { variant } : {}),
       },

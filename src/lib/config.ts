@@ -15,6 +15,7 @@ type RawStep = {
   prefix?: unknown;
   suffix?: unknown;
   args?: unknown;
+  title?: unknown;
 };
 
 type RawConfig = {
@@ -49,6 +50,18 @@ function argsValue(value: unknown, label: string): string[] | undefined {
   return value;
 }
 
+function titleValue(value: unknown, label: string): boolean | number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new Error(`${label} must be true, false, or an integer >= 1 (seconds)`);
+    }
+    return value;
+  }
+  throw new Error(`${label} must be true, false, or an integer >= 1 (seconds)`);
+}
+
 function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   const parsed = stringValue(value, label);
@@ -73,13 +86,14 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
 
     return {
       name: stringValue(rawStep.name, `steps.${key}.name`, titleFromKey(key)),
-      agent: stringValue(rawStep.agent, `steps.${key}.agent`, "sonny"),
-      model: stringValue(rawStep.model, `steps.${key}.model`),
-      variant: stringValue(rawStep.variant, `steps.${key}.variant`),
+      agent: optionalNonEmptyStringValue(rawStep.agent, `steps.${key}.agent`),
+      model: optionalNonEmptyStringValue(rawStep.model, `steps.${key}.model`),
+      variant: optionalNonEmptyStringValue(rawStep.variant, `steps.${key}.variant`),
       prompt: promptPath(configDir, stringValue(rawStep.prompt, `steps.${key}.prompt`), `steps.${key}`),
       prefix: stringValue(rawStep.prefix, `steps.${key}.prefix`) || undefined,
       suffix: stringValue(rawStep.suffix, `steps.${key}.suffix`) || undefined,
       args: argsValue(rawStep.args, `steps.${key}.args`),
+      title: titleValue(rawStep.title, `steps.${key}.title`),
     };
   });
 }

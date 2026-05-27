@@ -4,6 +4,7 @@ export type EventConsumerCallbacks = {
   pushLine: (line: string) => void;
   pushLines?: (lines: string[]) => void;
   onSessionError?: (message: string) => void;
+  onFirstAssistantContent?: () => void;
 };
 
 type TextPartState = {
@@ -210,6 +211,13 @@ export async function consumeSessionEvents(
   const pushLines = callbacks.pushLines ?? ((lines: string[]) => {
     for (const line of lines) push(line);
   });
+  const onFirstAssistantContent = callbacks.onFirstAssistantContent;
+  let firstContentFired = false;
+  const fireFirstContent = (): void => {
+    if (firstContentFired || onFirstAssistantContent === undefined) return;
+    firstContentFired = true;
+    onFirstAssistantContent();
+  };
   const debug = process.env.LOOPER_DEBUG_EVENTS === "1";
 
   const roleForPart = (messageID: string): "user" | "assistant" | undefined => messageRoles.get(messageID);
@@ -217,11 +225,17 @@ export async function consumeSessionEvents(
   const replayPendingAssistantParts = (messageID: string): void => {
     if (roleForPart(messageID) !== "assistant") return;
     const updates = pendingPartUpdates.get(messageID) ?? [];
-    for (const part of updates) handlePartUpdate(parts, part, push, pushLines);
+    for (const part of updates) {
+      handlePartUpdate(parts, part, push, pushLines);
+      if (part.type === "text") fireFirstContent();
+    }
     pendingPartUpdates.delete(messageID);
 
     const deltas = pendingPartDeltas.get(messageID) ?? [];
-    for (const delta of deltas) handlePartDelta(parts, delta.partID, delta.field, delta.delta, push);
+    for (const delta of deltas) {
+      handlePartDelta(parts, delta.partID, delta.field, delta.delta, push);
+      if (delta.field === "text") fireFirstContent();
+    }
     pendingPartDeltas.delete(messageID);
   };
 
@@ -255,6 +269,7 @@ export async function consumeSessionEvents(
           break;
         }
         handlePartUpdate(parts, part, push, pushLines);
+        if (part.type === "text") fireFirstContent();
         break;
       }
       case "message.part.delta": {
@@ -269,6 +284,7 @@ export async function consumeSessionEvents(
           break;
         }
         handlePartDelta(parts, event.properties.partID, event.properties.field, event.properties.delta, push);
+        if (event.properties.field === "text") fireFirstContent();
         break;
       }
       case "message.part.removed":

@@ -14,6 +14,7 @@ import {
 } from "./runner.ts";
 import { notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
+import { extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
 
 function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
@@ -91,6 +92,24 @@ async function waitWhilePaused(state: LoopState): Promise<void> {
 const MAX_BACKGROUND_RESUMES_PER_STEP = 10;
 const MAX_FAILURE_RETRIES_PER_STEP = 2;
 const MAX_REATTACH_PER_STEP = 5;
+const FAILURE_RETRY_BASE_DELAY_MS = 2000;
+const FAILURE_RETRY_MAX_DELAY_MS = 30_000;
+
+function failureRetryDelayMs(attempt: number): number {
+  const exp = FAILURE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
+  return Math.min(exp, FAILURE_RETRY_MAX_DELAY_MS);
+}
+
+async function sleepInterruptible(state: LoopState, totalMs: number): Promise<void> {
+  const step = 100;
+  let remaining = totalMs;
+  while (remaining > 0) {
+    if (state.quitting || stopFileExists() || state.skipRequested || state.restartRequested) return;
+    const slice = Math.min(step, remaining);
+    await Bun.sleep(slice);
+    remaining -= slice;
+  }
+}
 
 export class StepFailureError extends Error {
   constructor(message: string) {
@@ -107,6 +126,83 @@ function failureResumePrompt(): string {
   return "The previous attempt at this step failed before reporting completion. Resume from where you left off, recover from whatever error occurred, and finish the step. If the same error recurs, switch to a different approach.\n";
 }
 
+class TitleCoordinator {
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private inflight: Promise<string | undefined> | undefined;
+  private readonly controller = new AbortController();
+  private firstFired = false;
+  private finished = false;
+
+  constructor(
+    private readonly client: OpencodeClient,
+    private readonly repoDir: string,
+    private readonly delaySeconds: number | undefined,
+    private readonly getSessionID: () => string | undefined,
+    private readonly log: (line: string) => void,
+  ) {}
+
+  readonly onFirstResponse = (): void => {
+    if (this.firstFired || this.finished) return;
+    this.firstFired = true;
+    if (this.delaySeconds === undefined) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      const sid = this.getSessionID();
+      if (sid === undefined) return;
+      this.inflight = this.snapshotAndGenerate(sid);
+    }, this.delaySeconds * 1000);
+  };
+
+  async resolve(finalSessionID: string): Promise<string | undefined> {
+    this.finished = true;
+    this.clearTimer();
+    if (this.inflight !== undefined) {
+      const fromTimer = await this.inflight;
+      if (fromTimer !== undefined) return fromTimer;
+    }
+    return await this.snapshotAndGenerate(finalSessionID);
+  }
+
+  cancel(): void {
+    if (this.finished) return;
+    this.finished = true;
+    this.clearTimer();
+    this.controller.abort();
+    this.inflight = undefined;
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private async snapshotAndGenerate(sessionID: string): Promise<string | undefined> {
+    try {
+      const messages = await this.client.session.messages(
+        { sessionID, directory: this.repoDir },
+        { signal: this.controller.signal },
+      );
+      if (messages.error || !messages.data) return undefined;
+      const text = extractAssistantText(messages.data);
+      if (text.length === 0) return undefined;
+      return await generateWorkDescription({
+        client: this.client,
+        repoDir: this.repoDir,
+        contextText: text,
+        signal: this.controller.signal,
+        log: this.log,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`[looper] title gen snapshot threw: ${message}`);
+      return undefined;
+    }
+  }
+}
+
 export async function runIteration({
   state,
   iteration,
@@ -119,6 +215,7 @@ export async function runIteration({
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
+  let workDescription: string | undefined;
 
   while (true) {
     const steps = loadSteps(configDir);
@@ -148,6 +245,24 @@ export async function runIteration({
 
     const step = steps[index]!;
 
+    const titleConfig = step.title;
+    const stepIndexForTitle = index;
+    const titleLog = (line: string) => {
+      pushAgentLine(state, line);
+      pushStepOutputLine(state, stepIndexForTitle, line);
+      notify();
+    };
+    const titleCoordinator =
+      titleConfig === undefined || titleConfig === false
+        ? undefined
+        : new TitleCoordinator(
+            client,
+            repoDir,
+            typeof titleConfig === "number" ? titleConfig : undefined,
+            () => state.steps[stepIndexForTitle]?.sessionID,
+            titleLog,
+          );
+
     let result: StepRunResult;
     let pendingResult: StepRunResult | undefined;
     let suppressFailureRetry = false;
@@ -172,6 +287,7 @@ export async function runIteration({
           repoDir,
           step,
           sessionID: resumeSessionID,
+          ...(titleCoordinator ? { onFirstAssistantContent: titleCoordinator.onFirstResponse } : {}),
         });
       }
       resumePrompt = undefined;
@@ -314,24 +430,38 @@ export async function runIteration({
         failureRetryCount += 1;
         const priorSessionID = state.steps[index]?.sessionID;
         const hasOutput = (state.steps[index]?.outputLines.length ?? 0) > 0;
+        const delayMs = failureRetryDelayMs(failureRetryCount);
+        const delaySeconds = Math.round(delayMs / 1000);
+        const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
+        const targetSuffix =
+          hasOutput && priorSessionID !== undefined
+            ? `will resume session ${priorSessionID}`
+            : `will restart with a fresh session`;
         if (hasOutput && priorSessionID !== undefined) {
           resumeSessionID = priorSessionID;
           resumePrompt = failureResumePrompt();
-          pushAgentLine(state, `[looper] ${step.name} failed: ${errReason} \u2014 retrying (attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}); resuming session ${priorSessionID}`);
-          pushStepOutputLine(state, index, `[looper] ${step.name} failed: ${errReason} \u2014 retrying (attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}); resuming session ${priorSessionID}`);
         } else {
           resumeSessionID = undefined;
           resumePrompt = undefined;
-          pushAgentLine(state, `[looper] ${step.name} failed: ${errReason} \u2014 retrying (attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}); restarting with a fresh session`);
-          pushStepOutputLine(state, index, `[looper] ${step.name} failed: ${errReason} \u2014 retrying (attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}); restarting with a fresh session`);
         }
+        const waitingLine = `[looper] ${step.name} failed: ${errReason} \u2014 waiting ${delaySeconds}s before retry (${attemptTag}); ${targetSuffix}`;
+        pushAgentLine(state, waitingLine);
+        pushStepOutputLine(state, index, waitingLine);
         const activeStep = state.steps[index];
         if (activeStep) {
           activeStep.status = "pending";
-          activeStep.statusMessage = undefined;
+          activeStep.statusMessage = `retry in ${delaySeconds}s`;
           activeStep.finishedAt = undefined;
         }
         notify();
+        await sleepInterruptible(state, delayMs);
+        if (!(state.quitting || stopFileExists() || state.skipRequested || state.restartRequested)) {
+          const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
+          pushAgentLine(state, retryingLine);
+          pushStepOutputLine(state, index, retryingLine);
+          if (activeStep) activeStep.statusMessage = undefined;
+          notify();
+        }
         continue;
       }
 
@@ -339,6 +469,7 @@ export async function runIteration({
     }
 
     if (result.status === "failed") {
+      titleCoordinator?.cancel();
       if (state.quitting || stopFileExists()) {
         markRemainingSkipped(state, index);
         break;
@@ -347,6 +478,32 @@ export async function runIteration({
       throw new StepFailureError(
         `${step.name} failed after ${failureRetryCount} retr${failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
       );
+    }
+
+    if (result.status === "done" && result.sessionID !== undefined) {
+      if (titleCoordinator !== undefined) {
+        const desc = await titleCoordinator.resolve(result.sessionID);
+        if (desc !== undefined) {
+          workDescription = desc;
+          await setSessionTitle({
+            client,
+            repoDir,
+            sessionID: result.sessionID,
+            title: `${step.name}: ${desc}`,
+            log: titleLog,
+          });
+        }
+      } else if (workDescription !== undefined) {
+        await setSessionTitle({
+          client,
+          repoDir,
+          sessionID: result.sessionID,
+          title: `${step.name}: ${workDescription}`,
+          log: titleLog,
+        });
+      }
+    } else {
+      titleCoordinator?.cancel();
     }
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status });
