@@ -256,6 +256,7 @@ test("session error events fail the current step", async () => {
 });
 
 test("runIteration retries session errors twice before surfacing terminal failure", async () => {
+
   const retryDir = join(SCRATCH, "session-error-retries");
   const configDir = join(retryDir, ".local", "looper");
   mkdirSync(configDir, { recursive: true });
@@ -310,10 +311,12 @@ test("runIteration retries session errors twice before surfacing terminal failur
 
   expect(promptCount).toBe(3);
   expect(state.steps[0]?.status).toBe("failed");
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying (attempt 1/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying (attempt 2/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
+  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
   expect(state.steps[0]?.outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
-});
+}, 15000);
 
 test("reattach honors an older session-scoped active continuation record", async () => {
   const repoDir = join(SCRATCH, "reattach-old-continuation");

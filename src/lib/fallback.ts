@@ -186,9 +186,9 @@ async function runNonTtyIterations({
         onStepBegin: ({ step, index, totalSteps }) => {
           saveResumeStep(loadSteps(configDir), index);
           process.stdout.write(`\n${divider(`Step ${index + 1}/${totalSteps} · ${step.name}`, ui.green)}`);
-          process.stdout.write(`${label("Agent", step.agent)}\n`);
-          process.stdout.write(`${label("Model", step.model || "agent default")}\n`);
-          process.stdout.write(`${label("Variant", step.variant || "agent default")}\n`);
+          process.stdout.write(`${label("Agent", step.agent || "default")}\n`);
+          process.stdout.write(`${label("Model", step.model || "default")}\n`);
+          process.stdout.write(`${label("Variant", step.variant || "default")}\n`);
           process.stdout.write(`${label("Prompt", step.prompt)}\n`);
         },
         onStepFinish: ({ nextIndex, status }) => {

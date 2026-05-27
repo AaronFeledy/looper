@@ -16,14 +16,23 @@ ln -sfn "$PWD/bin/looper" "$HOME/.local/bin/looper"
 In any project that has a `.local/looper/looper.yaml`:
 
 ```bash
-looper          # opens the TUI, press [g]o or [enter] to start
-looper --start  # start immediately
-looper --continue   # resume from the last completed step
-looper --attach=http://127.0.0.1:4096  # connect to an existing OpenCode server
+looper                                  # open the TUI, press [g]o or [enter] to start
+looper --start                          # start immediately
+looper --continue                       # resume from the last completed step
+looper --attach=http://127.0.0.1:4096   # connect to an existing OpenCode server
+looper --wait=10                        # pause 10 minutes between iterations
+looper --wait                           # pause for the previous iteration's runtime
+looper 5                                # cap at 5 iterations (positional; default 100)
 looper --help
 ```
 
-Run `looper --help` for the full flag list (attach to an existing OpenCode server, set iteration cap, wait between iterations, etc.).
+CLI flags:
+
+- `--attach[=url]` &mdash; connect to an existing opencode server instead of spawning one. Without a URL: tries `opencode.serverUrl` from `looper.yaml`, then `$OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
+- `--start` &mdash; skip the TUI start prompt and begin immediately.
+- `--continue` &mdash; start immediately at the last saved step checkpoint (`.looper-resume-step.json`).
+- `--wait[=minutes]` &mdash; sleep between iterations. With `=N`, sleep N minutes. Without a value, sleep for the previous iteration's wall-clock duration.
+- `max_iterations` (positional, default `100`) &mdash; stop after this many iterations if no step has written `.looper-stop`.
 
 ## Project layout in the consuming project
 
@@ -43,19 +52,46 @@ Run `looper --help` for the full flag list (attach to an existing OpenCode serve
 ```yaml
 opencode:
   serverUrl: http://127.0.0.1:4096  # optional: connect to an existing OpenCode server instead of spawning one
+# attachUrl: http://127.0.0.1:4096  # top-level alias for opencode.serverUrl; used only if opencode.serverUrl is unset
 
 steps:
   build:
-    name: Build
-    agent: build              # opencode agent name
-    model: openai/gpt-5.5     # provider/model id (optional, falls back to agent default)
-    variant: high             # opencode agent variant (optional)
-    prompt: build.md          # path relative to .local/looper, or absolute
+    name: Build                                  # display label (defaults to title-cased step key)
+    agent: build                                 # opencode agent name (optional)
+    model: openai/gpt-5.5                        # provider/model id (optional, falls back to agent default)
+    variant: high                                # opencode agent variant (optional)
+    prompt: build.md                             # path relative to .local/looper, or absolute
+    prefix: "Working on $LANDO_TICKET.\n\n"      # optional text prepended to the prompt file content
+    suffix: "Stop when CI passes."               # optional text appended to the prompt file content
+    title: 30                                    # see "Session titles" below
   check-done:
     name: Check Done
     agent: sonny
     prompt: check-done.md
 ```
+
+Per-step fields:
+
+- `name` &mdash; display label shown in the TUI; defaults to the step key title-cased.
+- `agent` &mdash; opencode agent name; omit to use opencode's default agent.
+- `model` &mdash; `<provider>/<model>` id; omit to inherit from the agent.
+- `variant` &mdash; opencode agent variant (e.g. `low` / `high`); omit for the agent's default.
+- `prompt` &mdash; path to a markdown file; relative paths resolve against `.local/looper`.
+- `prefix`, `suffix` &mdash; literal text wrapped around the prompt file content. Looper inserts a blank line between prefix/file/suffix unless they already end with a newline.
+- `title` &mdash; see "Session titles" below.
+
+### Session titles
+
+By default opencode generates a session title from the first user message of each step's session, which for looper means the (usually generic) step prompt &mdash; titles end up looking like `Loop review step` repeated across every iteration.
+
+To get titles that reflect *what's actually being worked on*, mark one step (typically your build step) with `title`:
+
+- `title: true` &mdash; when the step finishes, looper feeds the assistant's text output into opencode's built-in title agent (via a throwaway session, no extra auth) and overwrites the step's session title with `"<step.name>: <generated description>"`.
+- `title: <integer seconds>` &mdash; same flow, but the snapshot fires *N seconds after the first assistant response* so the title lands earlier in the TUI for long-running steps. If the step ends before N seconds, falls back to the `true` behavior.
+
+The resulting description is stashed for the rest of the iteration, and every subsequent step's session title is overwritten the same way (e.g. `Review: <description>`). The description does not persist across iterations &mdash; each iteration recomputes from its own build step. Skipped or failed steps do not influence titles.
+
+Only one step per iteration should set `title`; later `title` entries will overwrite the description. If opencode's hidden `title` agent is unavailable in your install, looper falls back to a manual prompt against the server's default agent + model and logs which it used &mdash; if that's an expensive default, switch to a cheaper agent.
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
