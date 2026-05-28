@@ -9,7 +9,7 @@ import {
 
 import type { BackgroundAgent, LoopState, LoopStep } from "../lib/state.ts";
 import { ansiToStyledText, stripAnsi } from "../lib/ansi.ts";
-import { consumeScrollIntent, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, consumeScrollIntent, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 
 type SelectedOutput = {
   step: LoopStep | null;
@@ -382,18 +382,12 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
   };
 }
 
-function backgroundAgentTitle(agent: BackgroundAgent): string {
-  if (agent.title && agent.title.length > 0) return agent.title;
-  if (agent.agent && agent.agent.length > 0) return agent.agent;
-  return agent.sessionID.slice(-6);
-}
-
 function outputTitle(state: LoopState, selectedOutput: SelectedOutput): string {
   if (!selectedOutput.step || selectedOutput.stepIndex === null) return fallbackTitle(state);
   const { name, title } = selectedOutput.step;
   const stepLabel = title && title.length > 0 ? `${name}: ${title}` : `${name} output`;
   if (selectedOutput.backgroundAgent === null) return stepLabel;
-  return `${stepLabel} · bg: ${backgroundAgentTitle(selectedOutput.backgroundAgent)}`;
+  return `${stepLabel} · bg: ${backgroundAgentLabel(selectedOutput.backgroundAgent)}`;
 }
 
 /** Pixels from the bottom within which we still treat the view as "at bottom" for follow mode. */

@@ -88,6 +88,12 @@ function createLoopStep(name: string): LoopStep {
   };
 }
 
+export function backgroundAgentLabel(agent: BackgroundAgent): string {
+  if (agent.title && agent.title.length > 0) return agent.title;
+  if (agent.agent && agent.agent.length > 0) return agent.agent;
+  return agent.sessionID.slice(-6);
+}
+
 export function createBackgroundAgent(
   sessionID: string,
   startedAt: number,

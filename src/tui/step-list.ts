@@ -1,7 +1,7 @@
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { BackgroundAgent, FlatRow, LoopState, LoopStep, StepStatus } from "../lib/state.ts";
-import { flattenRows, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const ROW_WIDTH = 26;
@@ -41,12 +41,6 @@ function backgroundRowContent(agent: BackgroundAgent, frame: string): string {
   const label = `  ↳ ${frame} ${backgroundAgentLabel(agent)}`;
   const right = durationSecondsFrom(agent.startedAt, undefined);
   return formatRow(label, right);
-}
-
-function backgroundAgentLabel(agent: BackgroundAgent): string {
-  if (agent.title && agent.title.length > 0) return agent.title;
-  if (agent.agent && agent.agent.length > 0) return agent.agent;
-  return agent.sessionID.slice(-6);
 }
 
 function formatRow(label: string, right: string): string {
