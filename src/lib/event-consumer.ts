@@ -1,4 +1,4 @@
-import type { Event, Part } from "@opencode-ai/sdk/v2";
+import type { Event, Message, Part } from "@opencode-ai/sdk/v2";
 
 export type EventConsumerCallbacks = {
   pushLine: (line: string) => void;
@@ -313,4 +313,24 @@ export async function consumeSessionEvents(
     if (messageID && roleForPart(messageID) === "user") continue;
     flushRemaining(state, push);
   }
+}
+
+export function renderSessionMessages(messages: { info: Message; parts: Part[] }[]): string[] {
+  const lines: string[] = [];
+  const partsMap = new Map<string, PartState>();
+  const push = (line: string) => lines.push(line);
+  const pushLines = (xs: string[]) => {
+    for (const line of xs) lines.push(line);
+  };
+
+  for (const entry of messages) {
+    if (entry.info.role !== "assistant") continue;
+    for (const part of entry.parts) handlePartUpdate(partsMap, part, push, pushLines);
+  }
+
+  for (const state of partsMap.values()) {
+    if (state.kind === "text" || state.kind === "reasoning") flushRemaining(state, push);
+  }
+
+  return lines;
 }

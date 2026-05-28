@@ -51,9 +51,9 @@ function syncStepsUiState(state: LoopState, cfgSteps: Step[], nextIndex: number,
     if (j < nextIndex) {
       const prev = completed[j];
       if (prev && prev.name === step.name) return { ...prev };
-      return { name: step.name, status: "skipped" as const, finishedAt: Date.now(), outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true };
+      return { name: step.name, status: "skipped" as const, finishedAt: Date.now(), outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] };
     }
-    return { name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true };
+    return { name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] };
   });
   notify();
 }

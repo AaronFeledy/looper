@@ -6,6 +6,24 @@ export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "
 
 export type ScrollIntent = { direction: ScrollDirection; stepIndex: number; seq: number };
 
+/**
+ * A live child opencode session spawned by a step's parent session (e.g. via
+ * the task tool). Rendered as an indented sub-row beneath its parent step.
+ * `outputLines` is empty until the user selects this row, at which point the
+ * subscription manager starts feeding events into it; on deselect/end the
+ * buffer is dropped to keep memory bounded.
+ */
+export type BackgroundAgent = {
+  sessionID: string;
+  agent?: string;
+  title?: string;
+  startedAt: number;
+  outputLines: string[];
+  outputLineTimes: number[];
+  outputScrollTop: number;
+  outputPinnedToBottom: boolean;
+};
+
 export type LoopStep = {
   name: string;
   status: StepStatus;
@@ -19,6 +37,7 @@ export type LoopStep = {
   outputLineTimes: number[];
   outputScrollTop: number;
   outputPinnedToBottom: boolean;
+  backgroundAgents: BackgroundAgent[];
 };
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
@@ -33,6 +52,7 @@ export type LoopState = {
   steps: LoopStep[];
   focusedPane: LoopPane;
   selectedStepIndex: number | null;
+  selectedBackgroundSessionID: string | null;
   manualStepSelection: boolean;
   activeStepIndex: number | null;
   started: boolean;
@@ -47,6 +67,10 @@ export type LoopState = {
   scrollIntent: ScrollIntent | null;
 };
 
+export type FlatRow =
+  | { kind: "step"; stepIndex: number }
+  | { kind: "background"; stepIndex: number; sessionID: string };
+
 type Listener = () => void;
 
 const listeners = new Set<Listener>();
@@ -56,6 +80,24 @@ function createLoopStep(name: string): LoopStep {
   return {
     name,
     status: "pending",
+    outputLines: [],
+    outputLineTimes: [],
+    outputScrollTop: 0,
+    outputPinnedToBottom: true,
+    backgroundAgents: [],
+  };
+}
+
+export function createBackgroundAgent(
+  sessionID: string,
+  startedAt: number,
+  fields: { agent?: string; title?: string } = {},
+): BackgroundAgent {
+  return {
+    sessionID,
+    startedAt,
+    ...(fields.agent !== undefined ? { agent: fields.agent } : {}),
+    ...(fields.title !== undefined ? { title: fields.title } : {}),
     outputLines: [],
     outputLineTimes: [],
     outputScrollTop: 0,
@@ -112,6 +154,7 @@ export function createLoopState({
     steps: stepNames.map(createLoopStep),
     focusedPane: "steps",
     selectedStepIndex: null,
+    selectedBackgroundSessionID: null,
     manualStepSelection: false,
     activeStepIndex: null,
     started: false,
@@ -154,38 +197,79 @@ export function toggleFocusedPane(state: LoopState): LoopPane {
 
 export function setSelectedStepIndex(state: LoopState, stepIndex: number | null): void {
   const nextStepIndex = clampStepIndex(getStepCount(state), stepIndex);
-  if (state.selectedStepIndex === nextStepIndex && state.manualStepSelection === (nextStepIndex !== null)) return;
+  if (
+    state.selectedStepIndex === nextStepIndex &&
+    state.selectedBackgroundSessionID === null &&
+    state.manualStepSelection === (nextStepIndex !== null)
+  ) {
+    return;
+  }
   state.selectedStepIndex = nextStepIndex;
+  state.selectedBackgroundSessionID = null;
   state.manualStepSelection = nextStepIndex !== null;
   notifyStateChange();
 }
 
-export function selectPreviousStep(state: LoopState): number | null {
-  const stepCount = getStepCount(state);
-  if (stepCount === 0) return null;
-
-  const currentStepIndex = clampStepIndex(stepCount, state.selectedStepIndex ?? state.activeStepIndex ?? stepCount - 1);
-  const nextStepIndex = currentStepIndex === null ? null : Math.max(0, currentStepIndex - 1);
-  if (state.selectedStepIndex !== nextStepIndex || !state.manualStepSelection) {
-    state.selectedStepIndex = nextStepIndex;
-    state.manualStepSelection = nextStepIndex !== null;
-    notifyStateChange();
-  }
-  return nextStepIndex;
+export function flattenRows(state: LoopState): FlatRow[] {
+  const rows: FlatRow[] = [];
+  state.steps.forEach((step, stepIndex) => {
+    rows.push({ kind: "step", stepIndex });
+    for (const agent of step.backgroundAgents) {
+      rows.push({ kind: "background", stepIndex, sessionID: agent.sessionID });
+    }
+  });
+  return rows;
 }
 
-export function selectNextStep(state: LoopState): number | null {
-  const stepCount = getStepCount(state);
-  if (stepCount === 0) return null;
-
-  const currentStepIndex = clampStepIndex(stepCount, state.selectedStepIndex ?? state.activeStepIndex ?? 0);
-  const nextStepIndex = currentStepIndex === null ? null : Math.min(stepCount - 1, currentStepIndex + 1);
-  if (state.selectedStepIndex !== nextStepIndex || !state.manualStepSelection) {
-    state.selectedStepIndex = nextStepIndex;
-    state.manualStepSelection = nextStepIndex !== null;
-    notifyStateChange();
+function currentRowIndex(state: LoopState, rows: FlatRow[]): number | null {
+  if (rows.length === 0) return null;
+  const stepIndex = state.selectedStepIndex ?? state.activeStepIndex;
+  if (stepIndex === null) return null;
+  const sessionID = state.selectedBackgroundSessionID;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]!;
+    if (sessionID === null) {
+      if (row.kind === "step" && row.stepIndex === stepIndex) return i;
+    } else {
+      if (row.kind === "background" && row.stepIndex === stepIndex && row.sessionID === sessionID) return i;
+    }
   }
-  return nextStepIndex;
+  return null;
+}
+
+function applyRowSelection(state: LoopState, row: FlatRow): void {
+  const nextSessionID = row.kind === "background" ? row.sessionID : null;
+  if (
+    state.selectedStepIndex === row.stepIndex &&
+    state.selectedBackgroundSessionID === nextSessionID &&
+    state.manualStepSelection
+  ) {
+    return;
+  }
+  state.selectedStepIndex = row.stepIndex;
+  state.selectedBackgroundSessionID = nextSessionID;
+  state.manualStepSelection = true;
+  notifyStateChange();
+}
+
+export function selectPreviousStep(state: LoopState): FlatRow | null {
+  const rows = flattenRows(state);
+  if (rows.length === 0) return null;
+  const current = currentRowIndex(state, rows);
+  const nextIndex = current === null ? rows.length - 1 : Math.max(0, current - 1);
+  const next = rows[nextIndex]!;
+  applyRowSelection(state, next);
+  return next;
+}
+
+export function selectNextStep(state: LoopState): FlatRow | null {
+  const rows = flattenRows(state);
+  if (rows.length === 0) return null;
+  const current = currentRowIndex(state, rows);
+  const nextIndex = current === null ? 0 : Math.min(rows.length - 1, current + 1);
+  const next = rows[nextIndex]!;
+  applyRowSelection(state, next);
+  return next;
 }
 
 export function setStepSessionID(state: LoopState, stepIndex: number, sessionID: string): void {
@@ -225,17 +309,25 @@ export function trimStepOutputBuffer(step: LoopStep): void {
   if (removed > 0) step.outputScrollTop = Math.max(0, step.outputScrollTop - removed);
 }
 
+function getSelectedBackgroundAgent(state: LoopState): BackgroundAgent | null {
+  if (state.selectedBackgroundSessionID === null || state.selectedStepIndex === null) return null;
+  const step = state.steps[state.selectedStepIndex];
+  if (!step) return null;
+  return step.backgroundAgents.find((agent) => agent.sessionID === state.selectedBackgroundSessionID) ?? null;
+}
+
 export function setSelectedStepOutputScroll(state: LoopState, scrollTop: number, pinnedToBottom: boolean): void {
-  const selectedStep = getSelectedStep(state);
-  if (selectedStep === null) return;
-  selectedStep.outputScrollTop = Math.max(0, scrollTop);
-  selectedStep.outputPinnedToBottom = pinnedToBottom;
+  const target = getSelectedBackgroundAgent(state) ?? getSelectedStep(state);
+  if (target === null) return;
+  target.outputScrollTop = Math.max(0, scrollTop);
+  target.outputPinnedToBottom = pinnedToBottom;
   notifyStateChange();
 }
 
 export function resetIterationNavigationState(state: LoopState): void {
   state.focusedPane = "steps";
   state.selectedStepIndex = clampStepIndex(getStepCount(state), state.activeStepIndex);
+  state.selectedBackgroundSessionID = null;
   state.manualStepSelection = false;
   for (const step of state.steps) {
     step.outputScrollTop = 0;
@@ -248,8 +340,100 @@ export function syncSelectionToActiveStep(state: LoopState): void {
   if (state.manualStepSelection) return;
 
   const nextStepIndex = clampStepIndex(getStepCount(state), state.activeStepIndex);
-  if (state.selectedStepIndex === nextStepIndex) return;
+  if (state.selectedStepIndex === nextStepIndex && state.selectedBackgroundSessionID === null) return;
   state.selectedStepIndex = nextStepIndex;
+  state.selectedBackgroundSessionID = null;
+  notifyStateChange();
+}
+
+export function syncStepBackgroundAgents(
+  state: LoopState,
+  stepIndex: number,
+  next: { sessionID: string; agent?: string; title?: string; startedAt: number }[],
+): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+
+  const existing = new Map(step.backgroundAgents.map((agent) => [agent.sessionID, agent] as const));
+  const nextIDs = new Set(next.map((agent) => agent.sessionID));
+
+  const merged: BackgroundAgent[] = [];
+  let changed = step.backgroundAgents.length !== next.length;
+  for (const incoming of next) {
+    const prev = existing.get(incoming.sessionID);
+    if (prev !== undefined) {
+      if (incoming.agent !== undefined && prev.agent !== incoming.agent) {
+        prev.agent = incoming.agent;
+        changed = true;
+      }
+      if (incoming.title !== undefined && prev.title !== incoming.title) {
+        prev.title = incoming.title;
+        changed = true;
+      }
+      merged.push(prev);
+    } else {
+      merged.push(createBackgroundAgent(incoming.sessionID, incoming.startedAt, {
+        ...(incoming.agent !== undefined ? { agent: incoming.agent } : {}),
+        ...(incoming.title !== undefined ? { title: incoming.title } : {}),
+      }));
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    for (let i = 0; i < merged.length; i += 1) {
+      if (merged[i] !== step.backgroundAgents[i]) {
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  step.backgroundAgents = merged;
+
+  if (
+    state.selectedBackgroundSessionID !== null &&
+    state.selectedStepIndex === stepIndex &&
+    !nextIDs.has(state.selectedBackgroundSessionID)
+  ) {
+    state.selectedBackgroundSessionID = null;
+    changed = true;
+  }
+
+  if (changed) notifyStateChange();
+}
+
+export function pushBackgroundAgentLines(
+  state: LoopState,
+  stepIndex: number,
+  sessionID: string,
+  lines: string[],
+): void {
+  if (lines.length === 0) return;
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
+  if (!agent) return;
+  const now = Date.now();
+  agent.outputLines.push(...lines);
+  for (let i = 0; i < lines.length; i += 1) agent.outputLineTimes.push(now);
+  const removed = trimPairedLines(agent.outputLines, agent.outputLineTimes);
+  if (removed > 0) agent.outputScrollTop = Math.max(0, agent.outputScrollTop - removed);
+  if (agent.outputPinnedToBottom) {
+    agent.outputScrollTop = Math.max(0, agent.outputLines.length - 1);
+  }
+  notifyStateChange();
+}
+
+export function clearBackgroundAgentBuffer(state: LoopState, stepIndex: number, sessionID: string): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
+  if (!agent || agent.outputLines.length === 0) return;
+  agent.outputLines = [];
+  agent.outputLineTimes = [];
+  agent.outputScrollTop = 0;
+  agent.outputPinnedToBottom = true;
   notifyStateChange();
 }
 
