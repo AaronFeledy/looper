@@ -467,6 +467,54 @@ describe("title orchestration", () => {
     expect(captured).toContainEqual({ sessionID: "ses_review", title: "Review: US-001 feature" });
   });
 
+  test("inherited title renames opencode session ~5s after first response, not at step end", async () => {
+    writeTwoStepConfig();
+    const prev = process.env["LOOPER_INHERITED_TITLE_DELAY_MS"];
+    process.env["LOOPER_INHERITED_TITLE_DELAY_MS"] = "100";
+    try {
+      const captured: Array<{ sessionID: string; title: string }> = [];
+      const deletes: string[] = [];
+      let streamCount = 0;
+      let reviewMidStreamCaptured: Array<{ sessionID: string; title: string }> = [];
+
+      const client = makeStubClient({
+        buildSessionID: "ses_build",
+        reviewSessionID: "ses_review",
+        titleSessionID: "ses_title",
+        titleText: "Widget X export",
+        capturedUpdates: captured,
+        capturedDeletes: deletes,
+        streamPostHook: async () => {
+          streamCount += 1;
+          if (streamCount === 2) {
+            await Bun.sleep(300);
+            reviewMidStreamCaptured = [...captured];
+          }
+        },
+      });
+
+      const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+
+      const result = await runIteration({
+        state,
+        iteration: 1,
+        client,
+        repoDir: scratch,
+        configDir,
+      });
+
+      expect(result).toBe("complete");
+      expect(reviewMidStreamCaptured).toContainEqual({
+        sessionID: "ses_review",
+        title: "Review: Widget X export",
+      });
+      expect(captured.filter((c) => c.sessionID === "ses_review")).toHaveLength(1);
+    } finally {
+      if (prev === undefined) delete process.env["LOOPER_INHERITED_TITLE_DELAY_MS"];
+      else process.env["LOOPER_INHERITED_TITLE_DELAY_MS"] = prev;
+    }
+  });
+
   test("no title means no title.update calls at all", async () => {
     writeFileSync(
       join(configDir, "looper.yaml"),

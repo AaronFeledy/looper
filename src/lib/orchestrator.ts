@@ -148,6 +148,19 @@ function branchHintFor(branch: string | undefined): string | undefined {
 const BRANCH_FALLBACK_SECONDS = 300;
 
 /**
+ * Delay between a step's first assistant response and the opencode
+ * `session.update` rename for steps that inherited a title from an earlier
+ * step in the same iteration. Lets the new step prove it's actually producing
+ * content (avoids racing the rename against the create) without waiting for
+ * step end &mdash; opencode would otherwise auto-title from the step prompt.
+ * Override with `LOOPER_INHERITED_TITLE_DELAY_MS` (tests use this).
+ */
+function inheritedRenameDelayMs(): number {
+  const raw = Number(process.env["LOOPER_INHERITED_TITLE_DELAY_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+}
+
+/**
  * How often the branch-mode coordinator re-reads `state.branch` looking for a
  * transition. Branch changes don't need ms-grained detection; 500ms keeps the
  * latency low without burning measurable CPU.
@@ -393,9 +406,42 @@ export async function runIteration({
     // Step has no own title config but the iteration already has a description
     // from a previous step (typical: build sets it, review/cleanup/push inherit).
     // Apply the TUI side immediately so the output-box header shows the title
-    // from the first frame of this step; the opencode session.update is deferred
-    // to the post-step block (sessionID isn't bound until the runner creates it).
-    if (titleCoordinator === undefined && workDescription !== undefined) {
+    // from the first frame of this step; defer the opencode session.update
+    // until N ms after the first assistant response (see
+    // inheritedRenameDelayMs) so opencode doesn't auto-title from the prompt
+    // and the rename doesn't race the session-create. Step end is the
+    // fallback if no first response is seen.
+    const usingInheritedTitle = titleCoordinator === undefined && workDescription !== undefined;
+    let inheritedTitleApplied = false;
+    let inheritedTitleTimer: ReturnType<typeof setTimeout> | undefined;
+    let inheritedTitleInflight: Promise<void> | undefined;
+    const applyInheritedOpencodeTitle = async (): Promise<void> => {
+      if (inheritedTitleApplied) return;
+      inheritedTitleApplied = true;
+      const sid = state.steps[stepIndexForTitle]?.sessionID;
+      if (sid === undefined || workDescription === undefined) return;
+      await setSessionTitle({
+        client,
+        repoDir,
+        sessionID: sid,
+        title: `${step.name}: ${workDescription}`,
+        log: titleLog,
+      });
+    };
+    const onInheritedFirstResponse = (): void => {
+      if (inheritedTitleApplied || inheritedTitleTimer !== undefined) return;
+      inheritedTitleTimer = setTimeout(() => {
+        inheritedTitleTimer = undefined;
+        inheritedTitleInflight = applyInheritedOpencodeTitle();
+      }, inheritedRenameDelayMs());
+    };
+    const cancelInheritedTitleTimer = (): void => {
+      if (inheritedTitleTimer !== undefined) {
+        clearTimeout(inheritedTitleTimer);
+        inheritedTitleTimer = undefined;
+      }
+    };
+    if (usingInheritedTitle) {
       const row = state.steps[stepIndexForTitle];
       if (row && row.title !== workDescription) {
         row.title = workDescription;
@@ -427,7 +473,11 @@ export async function runIteration({
           repoDir,
           step,
           sessionID: resumeSessionID,
-          ...(titleCoordinator ? { onFirstAssistantContent: titleCoordinator.onFirstResponse } : {}),
+          ...(titleCoordinator
+            ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
+            : usingInheritedTitle
+              ? { onFirstAssistantContent: onInheritedFirstResponse }
+              : {}),
         });
       }
       resumePrompt = undefined;
@@ -626,14 +676,17 @@ export async function runIteration({
         // generation succeeded (branch poll, delay timer, or in-step). resolve()
         // also covers the "no signal fired yet, snapshot at step end" fallback.
         await titleCoordinator.resolve(result.sessionID);
-      } else if (workDescription !== undefined) {
-        // Reuse-case opencode session.update: state.title was already set at
-        // step start; this call only fires the deferred session.update now that
-        // sessionID is known.
-        await applyTitle(workDescription);
+      } else if (usingInheritedTitle) {
+        cancelInheritedTitleTimer();
+        if (inheritedTitleInflight !== undefined) {
+          await inheritedTitleInflight;
+        } else {
+          await applyInheritedOpencodeTitle();
+        }
       }
     } else {
       titleCoordinator?.cancel();
+      cancelInheritedTitleTimer();
     }
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status });
