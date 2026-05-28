@@ -50,16 +50,17 @@ function argsValue(value: unknown, label: string): string[] | undefined {
   return value;
 }
 
-function titleValue(value: unknown, label: string): boolean | number | undefined {
+function titleValue(value: unknown, label: string): boolean | number | "branch" | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "boolean") return value;
+  if (value === "branch") return "branch";
   if (typeof value === "number") {
     if (!Number.isInteger(value) || value < 1) {
-      throw new Error(`${label} must be true, false, or an integer >= 1 (seconds)`);
+      throw new Error(`${label} must be true, false, "branch", or an integer >= 1 (seconds)`);
     }
     return value;
   }
-  throw new Error(`${label} must be true, false, or an integer >= 1 (seconds)`);
+  throw new Error(`${label} must be true, false, "branch", or an integer >= 1 (seconds)`);
 }
 
 function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {

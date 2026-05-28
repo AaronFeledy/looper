@@ -82,16 +82,15 @@ Per-step fields:
 
 ### Session titles
 
-By default opencode generates a session title from the first user message of each step's session, which for looper means the (usually generic) step prompt &mdash; titles end up looking like `Loop review step` repeated across every iteration.
+Mark one step per iteration (typically your build step) with `title` to overwrite that step's opencode session title &mdash; and every later step's session title in the same iteration &mdash; with a description of what the agent actually worked on. The final title format is `"<step.name>: <generated description>"`.
 
-To get titles that reflect *what's actually being worked on*, mark one step (typically your build step) with `title`:
+- `title: true` &mdash; generate the title when the step finishes.
+- `title: <integer seconds>` &mdash; generate the title *N seconds after the first assistant response* so it lands earlier in the TUI for long-running steps; falls back to the `title: true` behavior if the step ends sooner.
+- `title: branch` &mdash; generate the title as soon as the branch watcher detects a switch to a non-trivial branch (anything other than `main`/`master`/`dev`/`develop`/`trunk`) during this step. Useful when the step itself creates a story branch &mdash; the new branch name becomes the primary title signal. Falls back to `title: 300` (snapshot 5min after first response, or at step end) if no branch transition is observed.
 
-- `title: true` &mdash; when the step finishes, looper feeds the assistant's text output into opencode's built-in title agent (via a throwaway session, no extra auth) and overwrites the step's session title with `"<step.name>: <generated description>"`.
-- `title: <integer seconds>` &mdash; same flow, but the snapshot fires *N seconds after the first assistant response* so the title lands earlier in the TUI for long-running steps. If the step ends before N seconds, falls back to the `true` behavior.
+The description is reused for every subsequent step in the same iteration (e.g. `Review: <description>`), does not persist across iterations, and is not affected by skipped or failed steps. Set `title` on at most one step per iteration &mdash; later entries overwrite the description.
 
-The resulting description is stashed for the rest of the iteration, and every subsequent step's session title is overwritten the same way (e.g. `Review: <description>`). The description does not persist across iterations &mdash; each iteration recomputes from its own build step. Skipped or failed steps do not influence titles.
-
-Only one step per iteration should set `title`; later `title` entries will overwrite the description. If opencode's hidden `title` agent is unavailable in your install, looper falls back to a manual prompt against the server's default agent + model and logs which it used &mdash; if that's an expensive default, switch to a cheaper agent.
+Title generation runs against the opencode server's default agent + model; looper logs which one it used. Switch the default to something cheap if you don't want to pay for it.
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
