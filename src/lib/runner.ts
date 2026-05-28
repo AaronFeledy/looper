@@ -17,8 +17,8 @@ export type Step = {
   prefix?: string;
   suffix?: string;
   args?: string[];
-  /** `true` = generate title at step end. `number` = N seconds after first assistant response, concurrently. See README. */
-  title?: boolean | number;
+  /** `true` = generate title at step end. `number` = N seconds after first assistant response, concurrently. `"branch"` = fire when the branch watcher detects a switch to a non-trivial branch; fallback to ~5min after first response or step end. See README. */
+  title?: boolean | number | "branch";
 };
 
 export type StepResult = "done" | "failed" | "skipped" | "restart" | "waiting";

@@ -126,49 +126,125 @@ function failureResumePrompt(): string {
   return "The previous attempt at this step failed before reporting completion. Resume from where you left off, recover from whatever error occurred, and finish the step. If the same error recurs, switch to a different approach.\n";
 }
 
+/**
+ * Branch names that don't carry useful information for titling. Filtered out
+ * before they reach the title prompt so the model isn't tempted to summarize
+ * an iteration as "Main" / "Master".
+ */
+const TRIVIAL_BRANCH_NAMES = new Set(["main", "master", "dev", "develop", "trunk", "default", "unknown", "detached"]);
+
+function branchHintFor(branch: string | undefined): string | undefined {
+  if (branch === undefined) return undefined;
+  const trimmed = branch.trim();
+  if (trimmed.length === 0) return undefined;
+  if (TRIVIAL_BRANCH_NAMES.has(trimmed.toLowerCase())) return undefined;
+  return trimmed;
+}
+
+/**
+ * Fallback delay for `title: branch` mode when no branch transition is
+ * observed during the step. Matches the spirit of `title: 300`.
+ */
+const BRANCH_FALLBACK_SECONDS = 300;
+
+/**
+ * How often the branch-mode coordinator re-reads `state.branch` looking for a
+ * transition. Branch changes don't need ms-grained detection; 500ms keeps the
+ * latency low without burning measurable CPU.
+ */
+const BRANCH_POLL_INTERVAL_MS = 500;
+
+type TitleMode =
+  | { kind: "end" }
+  | { kind: "delay"; seconds: number }
+  | { kind: "branch"; fallbackSeconds: number };
+
+function titleModeFor(cfg: boolean | number | "branch"): TitleMode | undefined {
+  if (cfg === false) return undefined;
+  if (cfg === true) return { kind: "end" };
+  if (cfg === "branch") return { kind: "branch", fallbackSeconds: BRANCH_FALLBACK_SECONDS };
+  return { kind: "delay", seconds: cfg };
+}
+
 class TitleCoordinator {
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private branchPollTimer: ReturnType<typeof setInterval> | undefined;
   private inflight: Promise<string | undefined> | undefined;
   private readonly controller = new AbortController();
   private firstFired = false;
   private finished = false;
+  private applied = false;
+  private readonly initialBranch: string | undefined;
 
   constructor(
     private readonly client: OpencodeClient,
     private readonly repoDir: string,
-    private readonly delaySeconds: number | undefined,
+    private readonly mode: TitleMode,
     private readonly getSessionID: () => string | undefined,
+    private readonly getBranch: () => string | undefined,
+    /** Apply the generated title (state mutation + opencode session.update). Called eagerly the moment generation succeeds, NOT at step end — so TUI and opencode update mid-step. */
+    private readonly applyTitle: (desc: string) => Promise<void>,
     private readonly log: (line: string) => void,
-  ) {}
+  ) {
+    this.initialBranch = mode.kind === "branch" ? getBranch() : undefined;
+    if (mode.kind === "branch") {
+      this.branchPollTimer = setInterval(() => this.checkBranchChange(), BRANCH_POLL_INTERVAL_MS);
+    }
+  }
 
   readonly onFirstResponse = (): void => {
     if (this.firstFired || this.finished) return;
     this.firstFired = true;
-    if (this.delaySeconds === undefined) return;
+    const delaySeconds =
+      this.mode.kind === "delay"
+        ? this.mode.seconds
+        : this.mode.kind === "branch"
+          ? this.mode.fallbackSeconds
+          : undefined;
+    if (delaySeconds === undefined) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
+      if (this.inflight !== undefined) return;
       const sid = this.getSessionID();
       if (sid === undefined) return;
-      this.inflight = this.snapshotAndGenerate(sid);
-    }, this.delaySeconds * 1000);
+      this.inflight = this.runGeneration(sid);
+    }, delaySeconds * 1000);
   };
 
   async resolve(finalSessionID: string): Promise<string | undefined> {
     this.finished = true;
-    this.clearTimer();
+    this.clearTimers();
     if (this.inflight !== undefined) {
       const fromTimer = await this.inflight;
       if (fromTimer !== undefined) return fromTimer;
     }
-    return await this.snapshotAndGenerate(finalSessionID);
+    return await this.runGeneration(finalSessionID);
   }
 
   cancel(): void {
     if (this.finished) return;
     this.finished = true;
-    this.clearTimer();
+    this.clearTimers();
     this.controller.abort();
     this.inflight = undefined;
+  }
+
+  private checkBranchChange(): void {
+    if (this.finished || this.inflight !== undefined) return;
+    const current = this.getBranch();
+    if (current === undefined || current === this.initialBranch) return;
+    const hint = branchHintFor(current);
+    if (hint === undefined) return;
+    const sid = this.getSessionID();
+    if (sid === undefined) return; // session not bound yet; try again next tick
+    this.clearBranchPoll();
+    this.log(`[looper] title gen: branch changed to ${hint}; firing title now`);
+    this.inflight = this.runGeneration(sid);
+  }
+
+  private clearTimers(): void {
+    this.clearTimer();
+    this.clearBranchPoll();
   }
 
   private clearTimer(): void {
@@ -178,7 +254,14 @@ class TitleCoordinator {
     }
   }
 
-  private async snapshotAndGenerate(sessionID: string): Promise<string | undefined> {
+  private clearBranchPoll(): void {
+    if (this.branchPollTimer !== undefined) {
+      clearInterval(this.branchPollTimer);
+      this.branchPollTimer = undefined;
+    }
+  }
+
+  private async runGeneration(sessionID: string): Promise<string | undefined> {
     try {
       const messages = await this.client.session.messages(
         { sessionID, directory: this.repoDir },
@@ -186,14 +269,29 @@ class TitleCoordinator {
       );
       if (messages.error || !messages.data) return undefined;
       const text = extractAssistantText(messages.data);
-      if (text.length === 0) return undefined;
-      return await generateWorkDescription({
+      const branchHint = branchHintFor(this.getBranch());
+      // Skip generation only if BOTH signals are empty. A useful branch alone
+      // is enough to produce a good title even before the assistant has said
+      // anything substantive.
+      if (text.length === 0 && branchHint === undefined) return undefined;
+      const desc = await generateWorkDescription({
         client: this.client,
         repoDir: this.repoDir,
         contextText: text,
+        ...(branchHint !== undefined ? { branchHint } : {}),
         signal: this.controller.signal,
         log: this.log,
       });
+      if (desc !== undefined && !this.applied) {
+        this.applied = true;
+        try {
+          await this.applyTitle(desc);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log(`[looper] title gen: applyTitle threw: ${message}`);
+        }
+      }
+      return desc;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return undefined;
       const message = error instanceof Error ? error.message : String(error);
@@ -252,16 +350,58 @@ export async function runIteration({
       pushStepOutputLine(state, stepIndexForTitle, line);
       notify();
     };
+
+    /**
+     * Apply a generated title to (a) the TUI row's `title` field and (b) the
+     * opencode session via `session.update`. Idempotent on state; the opencode
+     * call is skipped when sessionID is not yet bound (e.g., called from the
+     * eager step-start path of a reuse step before the session exists). Also
+     * mutates the outer `workDescription` so later steps inherit the value.
+     */
+    const applyTitle = async (desc: string): Promise<void> => {
+      workDescription = desc;
+      const row = state.steps[stepIndexForTitle];
+      if (row && row.title !== desc) {
+        row.title = desc;
+        notify();
+      }
+      const sid = state.steps[stepIndexForTitle]?.sessionID;
+      if (sid === undefined) return;
+      await setSessionTitle({
+        client,
+        repoDir,
+        sessionID: sid,
+        title: `${step.name}: ${desc}`,
+        log: titleLog,
+      });
+    };
+
+    const titleMode = titleConfig === undefined ? undefined : titleModeFor(titleConfig);
     const titleCoordinator =
-      titleConfig === undefined || titleConfig === false
+      titleMode === undefined
         ? undefined
         : new TitleCoordinator(
             client,
             repoDir,
-            typeof titleConfig === "number" ? titleConfig : undefined,
+            titleMode,
             () => state.steps[stepIndexForTitle]?.sessionID,
+            () => state.branch,
+            applyTitle,
             titleLog,
           );
+
+    // Step has no own title config but the iteration already has a description
+    // from a previous step (typical: build sets it, review/cleanup/push inherit).
+    // Apply the TUI side immediately so the output-box header shows the title
+    // from the first frame of this step; the opencode session.update is deferred
+    // to the post-step block (sessionID isn't bound until the runner creates it).
+    if (titleCoordinator === undefined && workDescription !== undefined) {
+      const row = state.steps[stepIndexForTitle];
+      if (row && row.title !== workDescription) {
+        row.title = workDescription;
+        notify();
+      }
+    }
 
     let result: StepRunResult;
     let pendingResult: StepRunResult | undefined;
@@ -482,25 +622,15 @@ export async function runIteration({
 
     if (result.status === "done" && result.sessionID !== undefined) {
       if (titleCoordinator !== undefined) {
-        const desc = await titleCoordinator.resolve(result.sessionID);
-        if (desc !== undefined) {
-          workDescription = desc;
-          await setSessionTitle({
-            client,
-            repoDir,
-            sessionID: result.sessionID,
-            title: `${step.name}: ${desc}`,
-            log: titleLog,
-          });
-        }
+        // applyTitle was called eagerly inside the coordinator the moment
+        // generation succeeded (branch poll, delay timer, or in-step). resolve()
+        // also covers the "no signal fired yet, snapshot at step end" fallback.
+        await titleCoordinator.resolve(result.sessionID);
       } else if (workDescription !== undefined) {
-        await setSessionTitle({
-          client,
-          repoDir,
-          sessionID: result.sessionID,
-          title: `${step.name}: ${workDescription}`,
-          log: titleLog,
-        });
+        // Reuse-case opencode session.update: state.title was already set at
+        // step start; this call only fires the deferred session.update now that
+        // sessionID is known.
+        await applyTitle(workDescription);
       }
     } else {
       titleCoordinator?.cancel();

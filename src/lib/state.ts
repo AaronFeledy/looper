@@ -13,6 +13,8 @@ export type LoopStep = {
   startedAt?: number;
   finishedAt?: number;
   sessionID?: string;
+  /** Generated work-description from the title agent. Used as the output-box header suffix and as the session-title suffix. Reused across later steps in the same iteration. */
+  title?: string;
   outputLines: string[];
   outputLineTimes: number[];
   outputScrollTop: number;

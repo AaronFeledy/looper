@@ -139,13 +139,21 @@ describe("config title parsing", () => {
     expect(loadSteps(dir)[0]?.title).toBe(30);
   });
 
+  test("accepts the literal string \"branch\"", () => {
+    writeFileSync(
+      join(dir, "looper.yaml"),
+      "steps:\n  build:\n    prompt: build.md\n    title: branch\n",
+    );
+    expect(loadSteps(dir)[0]?.title).toBe("branch");
+  });
+
   test("rejects zero, negatives, and floats", () => {
     for (const bad of ["0", "-5", "1.5"]) {
       writeFileSync(
         join(dir, "looper.yaml"),
         `steps:\n  build:\n    prompt: build.md\n    title: ${bad}\n`,
       );
-      expect(() => loadSteps(dir)).toThrow(/title must be true, false, or an integer/);
+      expect(() => loadSteps(dir)).toThrow(/title must be true, false, "branch", or an integer/);
     }
   });
 
@@ -154,7 +162,7 @@ describe("config title parsing", () => {
       join(dir, "looper.yaml"),
       'steps:\n  build:\n    prompt: build.md\n    title: "yes"\n',
     );
-    expect(() => loadSteps(dir)).toThrow(/title must be true, false, or an integer/);
+    expect(() => loadSteps(dir)).toThrow(/title must be true, false, "branch", or an integer/);
   });
 
   test("defaults to undefined when omitted", () => {
@@ -209,6 +217,9 @@ describe("title orchestration", () => {
     titleText: string;
     capturedUpdates: Array<{ sessionID: string; title: string }>;
     capturedDeletes: string[];
+    capturedTitlePrompts?: string[];
+    /** Runs after the stream yields its events; lets tests mutate state mid-step (e.g., flip the branch) and then sleep so background timers can fire before the step completes. */
+    streamPostHook?: () => Promise<void>;
   }): OpencodeClient {
     let buildAgentCreates = 0;
     const buildAssistantText = "Implemented widget X and exported it.";
@@ -228,6 +239,7 @@ describe("title orchestration", () => {
           },
         },
       };
+      if (opts.streamPostHook !== undefined) await opts.streamPostHook();
     }
     return {
       event: {
@@ -252,8 +264,14 @@ describe("title orchestration", () => {
           opts.capturedUpdates.push({ sessionID, title });
           return {};
         },
-        prompt: async (params: { sessionID: string; agent?: string }) => {
+        prompt: async (params: {
+          sessionID: string;
+          agent?: string;
+          parts?: Array<{ type: string; text?: string }>;
+        }) => {
           if (params.sessionID === opts.titleSessionID) {
+            const text = params.parts?.[0]?.text ?? "";
+            opts.capturedTitlePrompts?.push(text);
             return {
               data: {
                 info: { role: "assistant" },
@@ -310,6 +328,143 @@ describe("title orchestration", () => {
       { sessionID: "ses_review", title: "Review: Widget X export" },
     ]);
     expect(deletes).toContain("ses_title");
+    expect(state.steps[0]?.title).toBe("Widget X export");
+    expect(state.steps[1]?.title).toBe("Widget X export");
+  });
+
+  test("non-trivial branch is injected into the title prompt", async () => {
+    writeTwoStepConfig();
+    const captured: Array<{ sessionID: string; title: string }> = [];
+    const deletes: string[] = [];
+    const prompts: string[] = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "US-057 guide frontmatter schema",
+      capturedUpdates: captured,
+      capturedDeletes: deletes,
+      capturedTitlePrompts: prompts,
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    state.branch = "us-057-guide-frontmatter-schema";
+
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: scratch,
+      configDir,
+    });
+
+    expect(result).toBe("complete");
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[0]).toContain("[branch: us-057-guide-frontmatter-schema]");
+    expect(state.steps[0]?.title).toBe("US-057 guide frontmatter schema");
+  });
+
+  test("trivial branch names (main/master/etc) are NOT injected", async () => {
+    writeTwoStepConfig();
+    const captured: Array<{ sessionID: string; title: string }> = [];
+    const deletes: string[] = [];
+    const prompts: string[] = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: captured,
+      capturedDeletes: deletes,
+      capturedTitlePrompts: prompts,
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    state.branch = "main";
+
+    await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: scratch,
+      configDir,
+    });
+
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[0]).not.toContain("[branch:");
+  });
+
+  test("title: branch fires title gen when branch changes mid-step", async () => {
+    writeFileSync(
+      join(configDir, "looper.yaml"),
+      [
+        "steps:",
+        "  build:",
+        "    name: Build",
+        "    agent: build",
+        "    prompt: build.md",
+        "    title: branch",
+        "  review:",
+        "    name: Review",
+        "    agent: build",
+        "    prompt: review.md",
+        "",
+      ].join("\n"),
+    );
+
+    const captured: Array<{ sessionID: string; title: string }> = [];
+    const deletes: string[] = [];
+    const prompts: string[] = [];
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    state.branch = "main";
+
+    // Snapshots captured WHILE the build stream is still running — these are
+    // the assertions that pin down the mid-step apply behavior (the bug fix):
+    // by the time the streamPostHook returns, state.steps[0].title and the
+    // opencode session.update for ses_build must already be observable.
+    let midStepBuildTitle: string | undefined;
+    let midStepCapturedCount = 0;
+
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "US-001 feature",
+      capturedUpdates: captured,
+      capturedDeletes: deletes,
+      capturedTitlePrompts: prompts,
+      streamPostHook: async () => {
+        state.branch = "us-001-feature";
+        // Wait long enough for the 500ms branch poll + the title prompt round-trip + applyTitle.
+        await Bun.sleep(800);
+        midStepBuildTitle = state.steps[0]?.title;
+        midStepCapturedCount = captured.length;
+      },
+    });
+
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: scratch,
+      configDir,
+    });
+
+    expect(result).toBe("complete");
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.some((text) => text.includes("[branch: us-001-feature]"))).toBe(true);
+
+    // Mid-step assertions: title applied to TUI state AND opencode BEFORE step end.
+    expect(midStepBuildTitle).toBe("US-001 feature");
+    expect(midStepCapturedCount).toBeGreaterThan(0);
+    expect(captured.slice(0, midStepCapturedCount)).toContainEqual({
+      sessionID: "ses_build",
+      title: "Build: US-001 feature",
+    });
+
+    // End-of-iteration: Review inherited the description.
+    expect(state.steps[1]?.title).toBe("US-001 feature");
+    expect(captured).toContainEqual({ sessionID: "ses_review", title: "Review: US-001 feature" });
   });
 
   test("no title means no title.update calls at all", async () => {

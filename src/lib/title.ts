@@ -5,19 +5,23 @@ import { createOpencodeID } from "./runner.ts";
 const TITLE_MAX_CHARS = 100;
 
 /**
- * Verbatim copy of opencode's title agent prompt (sst/opencode @
- * packages/opencode/src/agent/prompt/title.txt). Used as the system prompt for
- * a throwaway session so titles look like the ones opencode generates natively.
+ * System prompt for the throwaway title session. Originally a verbatim copy of
+ * opencode's title agent prompt (sst/opencode @
+ * packages/opencode/src/agent/prompt/title.txt) but customized for looper's
+ * input shape: we feed the assistant's *work log* from a build/review step,
+ * not a user chat message, so the prompt is framed accordingly and adds
+ * explicit rules for ignoring mode banners, role declarations, and other
+ * boilerplate the agent emits before getting to actual work.
  *
- * Kept inline (rather than a text import) so this file is self-contained and
- * survives prompt drift in upstream opencode without runtime surprises.
+ * Kept inline so this file is self-contained and survives drift in upstream
+ * opencode without runtime surprises.
  */
-const TITLE_PROMPT = `You are a title generator. You output ONLY a thread title. Nothing else.
+const TITLE_PROMPT = `You are a title generator for an autonomous coding agent's work log. You output ONLY a thread title. Nothing else.
 
 <task>
-Generate a brief title that would help the user find this conversation later.
+The input is the assistant's narration of work it performed in one step of an automated coding loop (file edits, code changes, decisions, debugging, test runs). Produce a short title that captures WHAT THE AGENT IS WORKING ON.
 
-Follow all rules in <rules>
+Follow all rules in <rules>.
 Use the <examples> so you know what a good title looks like.
 Your output must be:
 - A single line
@@ -26,36 +30,35 @@ Your output must be:
 </task>
 
 <rules>
-- you MUST use the same language as the user message you are summarizing
-- Title must be grammatically correct and read naturally - no word salad
-- Never include tool names in the title (e.g. "read tool", "bash tool", "edit tool")
-- Focus on the main topic or question the user needs to retrieve
-- Vary your phrasing - avoid repetitive patterns like always starting with "Analyzing"
-- When a file is mentioned, focus on WHAT the user wants to do WITH the file, not just that they shared it
-- Keep exact: technical terms, numbers, filenames, HTTP codes
-- Remove: the, this, my, a, an
-- Never assume tech stack
-- Never use tools
-- NEVER respond to questions, just generate a title for the conversation
-- The title should NEVER include "summarizing" or "generating" when generating a title
-- DO NOT SAY YOU CANNOT GENERATE A TITLE OR COMPLAIN ABOUT THE INPUT
-- Always output something meaningful, even if the input is minimal.
-- If the user message is short or conversational (e.g. "hello", "lol", "what's up", "hey"):
-  → create a title that reflects the user's tone or intent (such as Greeting, Quick check-in, Light chat, Intro message, etc.)
+- Title must be grammatically correct and read naturally - no word salad.
+- Focus on the concrete subject of the work: the feature, bug, file, story ID, system, or refactor being executed.
+- IGNORE mode banners, role declarations, agent identity statements, status preambles, and meta narration. Examples that must NEVER become titles: "ULTRAWORKER MODE", "ULTRAWORK MODE", "ULTRATHINK", "Starting work", "I'll handle this", "Plan:", "TL;DR:", "Continuing where I left off", any single-line ALL-CAPS banner, any sentence whose only content is the agent's mode, identity, or current state.
+- If the log opens with such a banner, skip past it and title from the actual work that follows.
+- If the input begins with a "[branch: <name>]" hint, treat that branch name as a STRONG candidate for the title (humanized into Title Case prose if needed). Branches are chosen by the agent specifically to summarize the work in progress, so they're a reliable signal unless the work log clearly describes something different.
+- Never include tool names in the title (e.g. "read tool", "bash tool", "edit tool", "grep").
+- Vary your phrasing - avoid repetitive openings like always starting with "Working on", "Implementing", "Analyzing".
+- When a file or symbol is mentioned, focus on what is being DONE to it.
+- Keep exact: technical terms, numbers, filenames, HTTP codes, branch names, story IDs (e.g. US-001, US-057).
+- Remove filler: the, this, my, a, an.
+- Never assume tech stack beyond what the log mentions.
+- Never use tools.
+- NEVER include "summarizing" or "generating" in the title.
+- DO NOT SAY YOU CANNOT GENERATE A TITLE OR COMPLAIN ABOUT THE INPUT.
+- Always output something meaningful. If the log is dominated by boilerplate with little real work yet, title from whatever real work IS present (e.g. the file being read, the branch being checked out, the story ID just selected).
 </rules>
 
 <examples>
-"debug 500 errors in production" → Debugging production 500 errors
-"refactor user service" → Refactoring user service
-"why is app.js failing" → app.js failure investigation
-"implement rate limiting" → Rate limiting implementation
-"how do I connect postgres to my API" → Postgres API connection
-"best practices for React hooks" → React hooks best practices
-"@src/auth.ts can you add refresh token support" → Auth refresh token support
-"@utils/parser.ts this is broken" → Parser bug fix
-"look at @config.json" → Config review
-"@App.tsx add dark mode toggle" → Dark mode toggle in App
-</examples>`;
+"ULTRAWORKER MODE\n\nReading spec/beta/prd.json to pick the next story. Selected US-057, checking out us-057-guide-frontmatter-schema..." → US-057 guide frontmatter schema
+"ULTRAWORK MODE\n\nFixed the 500 error in /api/users — the JWT middleware was throwing on null session cookies. Added a guard and a test." → 500 error fix in JWT middleware
+"Plan: refactor the user service to extract billing logic into its own module." → User service billing extraction
+"TL;DR: bumped @opencode-ai/sdk to v2.3.1 and adjusted the new prompt() signature across runner.ts and title.ts." → opencode-ai/sdk v2.3.1 bump
+"I'll handle the dark mode toggle. Added a theme context provider to App.tsx and wired the toggle into the header." → Dark mode toggle in App
+"Continuing where I left off. The migration script needs IF NOT EXISTS guards on every CREATE TABLE." → Migration IF NOT EXISTS guards
+"Investigating why pg connection times out. Pool config was missing max=10, fixed." → Postgres pool max fix
+"ULTRATHINK\n\nRan bun typecheck and bun test — both green. Committed feat: US-001 provider-lando Linux setup." → US-001 provider-lando Linux setup
+"[branch: us-057-guide-frontmatter-schema]\n\nULTRAWORKER MODE\n\nReading spec/beta/prd.json to decide which story to pick up." → US-057 guide frontmatter schema
+"[branch: fix-pg-pool-timeout]\n\nPlan: bump max=10 and add a backoff." → Fix pg pool timeout
+</examples>`
 
 /**
  * Mirror opencode's title post-processing: strip <think> blocks, take the first
@@ -122,30 +125,41 @@ export async function setSessionTitle({
 }
 
 /**
- * Fire opencode's built-in title agent against `contextText` via a throwaway
- * session. Returns the post-processed title, or undefined on any failure
- * (caller falls back to letting opencode auto-title normally).
+ * Approximate opencode's hidden title agent against `contextText` via a
+ * throwaway session. The title agent isn't exposed by opencode's public
+ * `session.prompt` API, so we pass TITLE_PROMPT (a looper-customized
+ * derivative of opencode's title prompt) as a `system` override against the
+ * server's default agent + model.
  *
- * We try `agent: "title"` first. If the server rejects that (e.g. hidden
- * agents are not exposed via the public prompt API), we retry without an agent
- * and supply the title prompt verbatim as the `system` override.
+ * Returns the post-processed title, or undefined on any failure (caller falls
+ * back to letting opencode auto-title normally).
  */
 export async function generateWorkDescription({
   client,
   repoDir,
   contextText,
+  branchHint,
   signal,
   log,
 }: {
   client: OpencodeClient;
   repoDir: string;
   contextText: string;
+  /**
+   * Optional current git branch. Surfaced to the title prompt as a labelled
+   * hint and treated as a strong title candidate. Callers should strip
+   * uninformative defaults (main/master/dev/develop/trunk) before passing it
+   * in.
+   */
+  branchHint?: string;
   signal?: AbortSignal;
   log?: (line: string) => void;
 }): Promise<string | undefined> {
   const trimmed = contextText.trim();
-  if (trimmed.length === 0) return undefined;
+  if (trimmed.length === 0 && (branchHint === undefined || branchHint.length === 0)) return undefined;
   if (signal?.aborted) return undefined;
+  const branchLine = branchHint && branchHint.length > 0 ? `[branch: ${branchHint}]\n\n` : "";
+  const userMessage = `${branchLine}${trimmed}`;
 
   let titleSessionID: string | undefined;
   try {
@@ -156,16 +170,23 @@ export async function generateWorkDescription({
     }
     titleSessionID = created.data.id;
 
-    const result = await tryTitlePrompt({
-      client,
-      repoDir,
-      sessionID: titleSessionID,
-      contextText: trimmed,
-      signal,
-      log,
-    });
-    if (!result) return undefined;
-    const titleText = extractAssistantText([{ info: result.info, parts: result.parts }]);
+    const resp = await client.session.prompt(
+      {
+        sessionID: titleSessionID,
+        directory: repoDir,
+        messageID: createOpencodeID("msg"),
+        parts: [{ type: "text", text: userMessage }],
+        system: TITLE_PROMPT,
+      },
+      { signal },
+    );
+    if (resp.error || !resp.data) {
+      log?.(`[looper] title gen: prompt failed: ${formatError(resp.error)}`);
+      return undefined;
+    }
+    logTitleAgentUsage(resp.data.info, log);
+
+    const titleText = extractAssistantText([{ info: resp.data.info, parts: resp.data.parts }]);
     if (titleText.length === 0) {
       log?.("[looper] title gen: assistant returned no text");
       return undefined;
@@ -185,68 +206,19 @@ export async function generateWorkDescription({
   }
 }
 
-async function tryTitlePrompt({
-  client,
-  repoDir,
-  sessionID,
-  contextText,
-  signal,
-  log,
-}: {
-  client: OpencodeClient;
-  repoDir: string;
-  sessionID: string;
-  contextText: string;
-  signal?: AbortSignal;
-  log?: (line: string) => void;
-}): Promise<{ info: Message; parts: Part[] } | undefined> {
-  // Attempt 1: built-in hidden agent (matches opencode's native title path).
-  const firstResp = await client.session.prompt(
-    {
-      sessionID,
-      directory: repoDir,
-      messageID: createOpencodeID("msg"),
-      parts: [{ type: "text", text: contextText }],
-      agent: "title",
-    },
-    { signal },
-  );
-  if (!firstResp.error && firstResp.data) return firstResp.data;
-
-  // Attempt 2: supply title prompt verbatim as system override, no agent.
-  // Use a fresh messageID because some server errors may have partially recorded the first.
-  log?.(`[looper] title gen: agent="title" failed (${formatError(firstResp.error)}); retrying with system prompt`);
-  const secondResp = await client.session.prompt(
-    {
-      sessionID,
-      directory: repoDir,
-      messageID: createOpencodeID("msg"),
-      parts: [{ type: "text", text: contextText }],
-      system: TITLE_PROMPT,
-    },
-    { signal },
-  );
-  if (secondResp.error || !secondResp.data) {
-    log?.(`[looper] title gen: fallback prompt failed: ${formatError(secondResp.error)}`);
-    return undefined;
-  }
-  logFallbackUsage(secondResp.data.info, log);
-  return secondResp.data;
-}
-
 /**
- * Fallback bypasses opencode's hidden `title` agent and uses the server's
- * default agent + model. Surface what was billed so users notice if it's a
+ * Title generation runs against whatever default agent + model the opencode
+ * server is configured with. Surface that so users notice if it's a
  * heavyweight default. Wrapped in try/catch because this is purely
  * diagnostic — a malformed response must not throw past the caller and
  * discard the successfully generated title.
  */
-function logFallbackUsage(info: Message, log: ((line: string) => void) | undefined): void {
+function logTitleAgentUsage(info: Message, log: ((line: string) => void) | undefined): void {
   if (log === undefined) return;
   try {
     if (info.role !== "assistant") return;
     const cost = typeof info.cost === "number" ? `${info.cost.toFixed(4)}` : "n/a";
-    log(`[looper] title gen: fallback used agent=${info.agent} model=${info.providerID}/${info.modelID} cost=${cost}`);
+    log(`[looper] title gen used agent=${info.agent} model=${info.providerID}/${info.modelID} cost=${cost}`);
   } catch {}
 }
 
