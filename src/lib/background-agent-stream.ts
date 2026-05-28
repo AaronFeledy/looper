@@ -53,7 +53,10 @@ export function startBackgroundAgentStreamer({
     pushBackgroundAgentLines(state, stepIndex, sessionID, lines);
   };
 
+  let inflight = false;
   const refresh = async (target: { sessionID: string; stepIndex: number }): Promise<void> => {
+    if (inflight) return;
+    inflight = true;
     try {
       const result = await client.session.messages({ sessionID: target.sessionID, directory: repoDir });
       if (result.error || !result.data) return;
@@ -62,6 +65,8 @@ export function startBackgroundAgentStreamer({
       replaceBuffer(target.stepIndex, target.sessionID, lines);
     } catch {
       // transient; next tick retries
+    } finally {
+      inflight = false;
     }
   };
 
