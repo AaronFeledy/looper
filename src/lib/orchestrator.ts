@@ -187,6 +187,7 @@ class TitleCoordinator {
   private firstFired = false;
   private finished = false;
   private applied = false;
+  private appliedToSessionID: string | undefined;
   private readonly initialBranch: string | undefined;
 
   constructor(
@@ -229,7 +230,19 @@ class TitleCoordinator {
     this.clearTimers();
     if (this.inflight !== undefined) {
       const fromTimer = await this.inflight;
-      if (fromTimer !== undefined) return fromTimer;
+      if (fromTimer !== undefined) {
+        // Title was generated and applied mid-step, but if the step retried
+        // with a new session, we need to re-apply the title to the final session.
+        if (this.appliedToSessionID !== undefined && this.appliedToSessionID !== finalSessionID) {
+          try {
+            await this.applyTitle(fromTimer);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log(`[looper] title gen: re-apply to retry session threw: ${message}`);
+          }
+        }
+        return fromTimer;
+      }
     }
     return await this.runGeneration(finalSessionID);
   }
@@ -297,6 +310,7 @@ class TitleCoordinator {
       });
       if (desc !== undefined && !this.applied) {
         this.applied = true;
+        this.appliedToSessionID = sessionID;
         try {
           await this.applyTitle(desc);
         } catch (err) {
