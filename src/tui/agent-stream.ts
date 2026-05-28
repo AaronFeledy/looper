@@ -364,8 +364,8 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
 
 function outputTitle(state: LoopState, selectedOutput: SelectedOutput): string {
   if (!selectedOutput.step || selectedOutput.stepIndex === null) return fallbackTitle(state);
-  const focus = state.focusedPane === "output" ? "focused" : "selected";
-  return `${selectedOutput.step.name} output (${focus})`;
+  const { name, title } = selectedOutput.step;
+  return title && title.length > 0 ? `${name}: ${title}` : `${name} output`;
 }
 
 /** Pixels from the bottom within which we still treat the view as "at bottom" for follow mode. */
