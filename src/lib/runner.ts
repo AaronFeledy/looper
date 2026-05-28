@@ -386,10 +386,6 @@ function setContinuationStatus(state: LoopState, stepIndex: number, _record: Run
 
 const BACKGROUND_AGENT_POLL_MS = 2_500;
 
-function isLiveSessionStatus(status: SessionStatus | undefined): boolean {
-  return status?.type === "busy" || status?.type === "retry";
-}
-
 async function snapshotLiveBackgroundAgents({
   client,
   repoDir,
@@ -409,7 +405,7 @@ async function snapshotLiveBackgroundAgents({
   const statusMap = statusResult.data;
   const liveAgents: { sessionID: string; agent?: string; title?: string; startedAt: number }[] = [];
   for (const child of childrenResult.data) {
-    if (!isLiveSessionStatus(statusMap[child.id])) continue;
+    if (!isPendingSessionStatus(statusMap[child.id])) continue;
     liveAgents.push({
       sessionID: child.id,
       ...(child.agent !== undefined ? { agent: child.agent } : {}),
@@ -720,20 +716,6 @@ export async function reattachOpenCodeStep({
     }
   }
 
-  if (sessionEventError !== undefined && cancellationAction === null) {
-    pushLine(`[error] reattach: ${sessionEventError.message}`);
-    activeStep.status = "failed";
-    activeStep.finishedAt = Date.now();
-    state.activeStepIndex = null;
-    notify();
-    return {
-      status: "failed",
-      sessionID,
-      messageID,
-      errorMessage: sessionEventError.message,
-    };
-  }
-
   const finalize = (
     statusValue: StepResult,
     extras?: { errorMessage?: string; statusMessage?: string },
@@ -757,6 +739,11 @@ export async function reattachOpenCodeStep({
       ...(extras?.errorMessage !== undefined ? { errorMessage: extras.errorMessage } : {}),
     };
   };
+
+  if (sessionEventError !== undefined && cancellationAction === null) {
+    pushLine(`[error] reattach: ${sessionEventError.message}`);
+    return finalize("failed", { errorMessage: sessionEventError.message });
+  }
 
   if (cancellationAction === "restart") return finalize("restart");
   if (cancellationAction === "skip") return finalize("skipped");
