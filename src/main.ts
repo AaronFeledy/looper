@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
 import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
 import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
 import type { Step } from "./lib/runner.ts";
@@ -79,7 +80,7 @@ function resetIterationState(
   state.restartRequested = false;
   state.agentLines = [];
   state.stepOutputLines = steps.map(() => []);
-  state.steps = steps.map((step) => ({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true }));
+  state.steps = steps.map((step) => ({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] }));
   resetIterationNavigationState(state);
   notify();
 }
@@ -136,6 +137,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let renderer: CliRenderer | undefined;
   let server: ServerHandle | undefined;
   let cleanupKeys: (() => void) | undefined;
+  let backgroundAgentStreamer: { stop: () => void } | undefined;
   let branchWatcher: BranchWatcher | null = null;
   let branchSafetyTimer: ReturnType<typeof setInterval> | undefined;
   let exitReason: string | undefined;
@@ -200,6 +202,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     const attachUrl = resolveAttachUrl(options);
     server = await startOrAttachServer({ opencodeBin, attachUrl });
     const client = createOpencodeClient({ baseUrl: server.url });
+
+    backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
 
     const root = new BoxRenderable(renderer, {
       id: "looper-root",
@@ -329,6 +333,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     return finish(1, `max iterations reached (${options.maxIterations})`);
   } finally {
     cleanupKeys?.();
+    backgroundAgentStreamer?.stop();
     if (branchSafetyTimer !== undefined) clearInterval(branchSafetyTimer);
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);

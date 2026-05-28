@@ -1,9 +1,10 @@
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
 
-import type { LoopState, LoopStep, StepStatus } from "../lib/state.ts";
-import { subscribe } from "../lib/state.ts";
+import type { BackgroundAgent, FlatRow, LoopState, LoopStep, StepStatus } from "../lib/state.ts";
+import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ROW_WIDTH = 26;
 
 function statusIcon(status: StepStatus, frame: string): string {
   if (status === "done") return "✓";
@@ -14,24 +15,44 @@ function statusIcon(status: StepStatus, frame: string): string {
   return " ";
 }
 
-function hasLiveStep(state: LoopState): boolean {
-  return state.steps.some((step) => step.status === "running" || step.status === "waiting");
+function hasLiveRow(state: LoopState): boolean {
+  for (const step of state.steps) {
+    if (step.status === "running" || step.status === "waiting") return true;
+    if (step.backgroundAgents.length > 0) return true;
+  }
+  return false;
 }
 
-function duration(step: LoopStep): string {
-  if (step.startedAt === undefined) return "";
-  const finishedAt = step.finishedAt ?? Date.now();
-  const seconds = Math.max(0, Math.floor((finishedAt - step.startedAt) / 1000));
+function durationSecondsFrom(startedAt: number | undefined, finishedAt: number | undefined): string {
+  if (startedAt === undefined) return "";
+  const end = finishedAt ?? Date.now();
+  const seconds = Math.max(0, Math.floor((end - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
-function rowContent(step: LoopStep, frame: string): string {
-  const label = `${statusIcon(step.status, frame)} ${step.name}`.padEnd(18, " ");
-  return `${label}${step.statusMessage ?? duration(step)}`.slice(0, 28);
+function stepRowContent(step: LoopStep, frame: string): string {
+  const right = step.statusMessage ?? durationSecondsFrom(step.startedAt, step.finishedAt);
+  const label = `${statusIcon(step.status, frame)} ${step.name}`;
+  return formatRow(label, right);
 }
 
-function rowColor(step: LoopStep): string {
+function backgroundRowContent(agent: BackgroundAgent, frame: string): string {
+  const label = `  ↳ ${frame} ${backgroundAgentLabel(agent)}`;
+  const right = durationSecondsFrom(agent.startedAt, undefined);
+  return formatRow(label, right);
+}
+
+function formatRow(label: string, right: string): string {
+  const max = ROW_WIDTH;
+  if (right.length === 0) return label.slice(0, max);
+  const labelMax = Math.max(0, max - right.length - 1);
+  const truncatedLabel = label.length > labelMax ? `${label.slice(0, Math.max(0, labelMax - 1))}…` : label;
+  const padded = truncatedLabel.padEnd(labelMax, " ");
+  return `${padded} ${right}`.slice(0, max);
+}
+
+function stepRowColor(step: LoopStep): string {
   if (step.status === "running") return "#8bd5ff";
   if (step.status === "waiting") return "#f9e2af";
   if (step.status === "done") return "#a6e3a1";
@@ -40,9 +61,8 @@ function rowColor(step: LoopStep): string {
   return "#6c7086";
 }
 
-function selectedStepIndex(state: LoopState): number | null {
-  if (state.manualStepSelection) return state.selectedStepIndex;
-  return state.selectedStepIndex ?? state.activeStepIndex;
+function backgroundRowColor(): string {
+  return "#94e2d5";
 }
 
 function rowBackgroundColor(isSelected: boolean, isFocused: boolean): string | undefined {
@@ -50,6 +70,15 @@ function rowBackgroundColor(isSelected: boolean, isFocused: boolean): string | u
   return isFocused ? "#313244" : "#262936";
 }
 
+function isRowSelected(state: LoopState, row: FlatRow): boolean {
+  const selectedStepIndex = state.manualStepSelection
+    ? state.selectedStepIndex
+    : state.selectedStepIndex ?? state.activeStepIndex;
+  if (selectedStepIndex === null) return false;
+  if (row.stepIndex !== selectedStepIndex) return false;
+  if (row.kind === "step") return state.selectedBackgroundSessionID === null;
+  return state.selectedBackgroundSessionID === row.sessionID;
+}
 
 export function createStepList(renderer: CliRenderer, state: LoopState): BoxRenderable {
   const list = new BoxRenderable(renderer, {
@@ -65,49 +94,56 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
   });
 
   let nextRowId = 0;
-  const rows: TextRenderable[] = [];
+  const rowRenderables: TextRenderable[] = [];
 
   const ensureRowCount = (count: number) => {
-    while (rows.length > count) {
-      const row = rows.pop()!;
+    while (rowRenderables.length > count) {
+      const row = rowRenderables.pop()!;
       list.remove(row.id);
       row.destroy();
     }
-    while (rows.length < count) {
+    while (rowRenderables.length < count) {
       const row = new TextRenderable(renderer, {
         id: `loop-step-row-${nextRowId++}`,
         width: "100%",
         height: 1,
-        content: rowContent(
-          { name: "", status: "pending", outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true },
-          frames[0]!,
-        ),
-        fg: rowColor({ name: "", status: "pending", outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true }),
+        content: "",
+        fg: "#6c7086",
         bg: "transparent",
         attributes: TextAttributes.NONE,
         truncate: true,
       });
-      rows.push(row);
+      rowRenderables.push(row);
       list.add(row);
     }
   };
 
   let frameIndex = 0;
   const updateRows = () => {
-    ensureRowCount(state.steps.length);
+    const rows = flattenRows(state);
+    ensureRowCount(rows.length);
     const frame = frames[frameIndex % frames.length]!;
-    const stepIndex = selectedStepIndex(state);
     const isFocused = state.focusedPane === "steps";
     list.borderColor = isFocused ? "#89b4fa" : "#45475a";
 
-    state.steps.forEach((step, index) => {
-      const row = rows[index];
-      if (!row) return;
-      const isSelected = stepIndex === index;
-      row.content = rowContent(step, frame);
-      row.fg = rowColor(step);
-      row.bg = rowBackgroundColor(isSelected, isFocused) ?? "transparent";
-      row.attributes = isSelected ? TextAttributes.BOLD : TextAttributes.NONE;
+    rows.forEach((row, index) => {
+      const renderable = rowRenderables[index];
+      if (!renderable) return;
+      const step = state.steps[row.stepIndex];
+      if (!step) return;
+      const isSelected = isRowSelected(state, row);
+
+      if (row.kind === "step") {
+        renderable.content = stepRowContent(step, frame);
+        renderable.fg = stepRowColor(step);
+      } else {
+        const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === row.sessionID);
+        if (!agent) return;
+        renderable.content = backgroundRowContent(agent, frame);
+        renderable.fg = backgroundRowColor();
+      }
+      renderable.bg = rowBackgroundColor(isSelected, isFocused) ?? "transparent";
+      renderable.attributes = isSelected ? TextAttributes.BOLD : TextAttributes.NONE;
     });
     renderer.requestRender();
   };
@@ -115,7 +151,7 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
   const unsubscribe = subscribe(updateRows);
   const timer = setInterval(() => {
     frameIndex += 1;
-    if (hasLiveStep(state)) updateRows();
+    if (hasLiveRow(state)) updateRows();
   }, 100);
 
   list.on(RenderableEvents.DESTROYED, () => {

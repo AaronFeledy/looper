@@ -7,13 +7,14 @@ import {
   type CliRenderer,
 } from "@opentui/core";
 
-import type { LoopState, LoopStep } from "../lib/state.ts";
+import type { BackgroundAgent, LoopState, LoopStep } from "../lib/state.ts";
 import { ansiToStyledText, stripAnsi } from "../lib/ansi.ts";
-import { consumeScrollIntent, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, consumeScrollIntent, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 
 type SelectedOutput = {
   step: LoopStep | null;
   stepIndex: number | null;
+  backgroundAgent: BackgroundAgent | null;
   lines: string[];
   times: number[];
 };
@@ -346,9 +347,27 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
     if (candidateStepIndex === null) continue;
     const step = state.steps[candidateStepIndex];
     if (!step) continue;
+    if (
+      candidateStepIndex === state.selectedStepIndex &&
+      state.selectedBackgroundSessionID !== null
+    ) {
+      const agent = step.backgroundAgents.find(
+        (candidate) => candidate.sessionID === state.selectedBackgroundSessionID,
+      );
+      if (agent) {
+        return {
+          step,
+          stepIndex: candidateStepIndex,
+          backgroundAgent: agent,
+          lines: agent.outputLines,
+          times: agent.outputLineTimes,
+        };
+      }
+    }
     return {
       step,
       stepIndex: candidateStepIndex,
+      backgroundAgent: null,
       lines: step.outputLines,
       times: step.outputLineTimes,
     };
@@ -357,6 +376,7 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
   return {
     step: null,
     stepIndex: null,
+    backgroundAgent: null,
     lines: state.agentLines,
     times: state.agentLineTimes,
   };
@@ -365,7 +385,9 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
 function outputTitle(state: LoopState, selectedOutput: SelectedOutput): string {
   if (!selectedOutput.step || selectedOutput.stepIndex === null) return fallbackTitle(state);
   const { name, title } = selectedOutput.step;
-  return title && title.length > 0 ? `${name}: ${title}` : `${name} output`;
+  const stepLabel = title && title.length > 0 ? `${name}: ${title}` : `${name} output`;
+  if (selectedOutput.backgroundAgent === null) return stepLabel;
+  return `${stepLabel} · bg: ${backgroundAgentLabel(selectedOutput.backgroundAgent)}`;
 }
 
 /** Pixels from the bottom within which we still treat the view as "at bottom" for follow mode. */
@@ -429,21 +451,32 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
   let selectedOutput = initialOutput;
   let selectedStepIndex = initialOutput.stepIndex;
+  let selectedBackgroundSessionID = initialOutput.backgroundAgent?.sessionID ?? null;
   let renderedOutputKey: string | undefined;
-  let pinToBottom = initialOutput.step?.outputPinnedToBottom ?? true;
+  let pinToBottom = (initialOutput.backgroundAgent ?? initialOutput.step)?.outputPinnedToBottom ?? true;
   let syncingStateScroll = false;
 
-  const outputKey = (output: SelectedOutput): string =>
-    `${output.stepIndex ?? "agent"}:${output.lines.length}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
+  const outputKey = (output: SelectedOutput): string => {
+    const stepKey = output.stepIndex ?? "agent";
+    const bgKey = output.backgroundAgent?.sessionID ?? "step";
+    return `${stepKey}:${bgKey}:${output.lines.length}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
+  };
+
+  const selectedScrollTarget = (): { outputScrollTop: number; outputPinnedToBottom: boolean } | null =>
+    selectedOutput.backgroundAgent ?? selectedOutput.step;
 
   const maxScrollTop = (): number => Math.max(0, stream.scrollHeight - stream.viewport.height);
 
   const persistSelectedScroll = (scrollTop: number, pinnedToBottom: boolean): void => {
-    if (selectedOutput.step === null || selectedOutput.stepIndex === null) return;
-    if (selectedOutput.step.outputScrollTop === scrollTop && selectedOutput.step.outputPinnedToBottom === pinnedToBottom) return;
-    if (selectedOutput.stepIndex !== state.selectedStepIndex) {
-      selectedOutput.step.outputScrollTop = scrollTop;
-      selectedOutput.step.outputPinnedToBottom = pinnedToBottom;
+    const target = selectedScrollTarget();
+    if (target === null || selectedOutput.stepIndex === null) return;
+    if (target.outputScrollTop === scrollTop && target.outputPinnedToBottom === pinnedToBottom) return;
+    const stillSelected =
+      selectedOutput.stepIndex === state.selectedStepIndex &&
+      (selectedOutput.backgroundAgent?.sessionID ?? null) === state.selectedBackgroundSessionID;
+    if (!stillSelected) {
+      target.outputScrollTop = scrollTop;
+      target.outputPinnedToBottom = pinnedToBottom;
       return;
     }
     syncingStateScroll = true;
@@ -471,7 +504,8 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
       if (stream.scrollTop !== 0) stream.scrollTop = 0;
       return;
     }
-    const desiredScrollTop = pinToBottom ? max : Math.max(0, Math.min(selectedOutput.step?.outputScrollTop ?? 0, max));
+    const target = selectedScrollTarget();
+    const desiredScrollTop = pinToBottom ? max : Math.max(0, Math.min(target?.outputScrollTop ?? 0, max));
     if (stream.scrollTop !== desiredScrollTop) stream.scrollTop = desiredScrollTop;
     persistSelectedScroll(desiredScrollTop, pinToBottom || desiredScrollTop >= max - BOTTOM_SLACK);
   };
@@ -511,10 +545,14 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
   const rebuild = () => {
     const nextSelectedOutput = resolveSelectedOutput(state);
-    const stepChanged = nextSelectedOutput.stepIndex !== selectedStepIndex;
+    const nextBackgroundSessionID = nextSelectedOutput.backgroundAgent?.sessionID ?? null;
+    const stepChanged =
+      nextSelectedOutput.stepIndex !== selectedStepIndex ||
+      nextBackgroundSessionID !== selectedBackgroundSessionID;
     selectedOutput = nextSelectedOutput;
     selectedStepIndex = nextSelectedOutput.stepIndex;
-    pinToBottom = selectedOutput.step?.outputPinnedToBottom ?? pinToBottom;
+    selectedBackgroundSessionID = nextBackgroundSessionID;
+    pinToBottom = (selectedOutput.backgroundAgent ?? selectedOutput.step)?.outputPinnedToBottom ?? pinToBottom;
     stream.title = outputTitle(state, selectedOutput);
     const nextOutputKey = outputKey(selectedOutput);
     if (nextOutputKey !== renderedOutputKey) {
