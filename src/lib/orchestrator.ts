@@ -674,6 +674,7 @@ export async function runIteration({
 
     if (result.status === "failed") {
       titleCoordinator?.cancel();
+      cancelInheritedTitleTimer();
       if (state.quitting || stopFileExists()) {
         markRemainingSkipped(state, index);
         break;
