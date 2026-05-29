@@ -38,7 +38,8 @@ function durationSecondsFrom(startedAt: number | undefined, finishedAt: number |
 
 function stepRowContent(step: LoopStep, frame: string): string {
   const right = step.statusMessage ?? durationSecondsFrom(step.startedAt, step.finishedAt);
-  const label = `${statusIcon(step.status, frame)} ${step.name}`;
+  const icon = step.restartReason === "timeout" ? "◷" : step.restartReason === "manual" ? "↻" : statusIcon(step.status, frame);
+  const label = `${icon} ${step.name}`;
   return formatRow(label, right);
 }
 
@@ -108,6 +109,8 @@ function charDisplayWidth(char: string): number {
 }
 
 function stepRowColor(step: LoopStep): string {
+  if (step.restartReason === "manual") return "#cba6f7";
+  if (step.restartReason === "timeout") return "#f9e2af";
   if (step.status === "running") return "#8bd5ff";
   if (step.status === "waiting") return "#f9e2af";
   if (step.status === "done") return "#a6e3a1";

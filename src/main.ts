@@ -78,6 +78,7 @@ function resetIterationState(
   state.started = true;
   state.skipRequested = false;
   state.restartRequested = false;
+  state.restartReason = undefined;
   state.agentLines = [];
   state.stepOutputLines = steps.map(() => []);
   state.steps = steps.map((step) => ({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] }));
@@ -264,6 +265,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       onRestart: () => {
         if (state.activeStepIndex === null) return;
         state.restartRequested = true;
+        state.restartReason = "manual";
         notify();
       },
       onStopAfterIteration: () => {
