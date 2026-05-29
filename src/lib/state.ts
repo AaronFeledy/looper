@@ -262,6 +262,7 @@ export function insertRestartAttempt(state: LoopState, stepIndex: number, reason
   const step = state.steps[stepIndex];
   if (!step) return stepIndex;
   step.restartReason = reason;
+  step.status = "done";
   step.statusMessage = undefined;
   step.finishedAt = Date.now();
   const next: LoopStep = {
