@@ -487,6 +487,7 @@ export async function runIteration({
     let backgroundResumeCount = 0;
     let lastErrorMessage: string | undefined;
     let lastPromptMessageID: string | undefined;
+    const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
     while (true) {
       if (pendingResult !== undefined) {
@@ -501,6 +502,7 @@ export async function runIteration({
           repoDir,
           step,
           sessionID: resumeSessionID,
+          timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
@@ -542,8 +544,7 @@ export async function runIteration({
           break;
         }
 
-        const budget = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
-        const remainingMs = Math.max(0, budget - (Date.now() - stepStartTime));
+        const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
         const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !state.quitting && !stopFileExists()) {
           resumeSessionID = waitSessionID;

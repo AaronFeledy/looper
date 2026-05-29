@@ -100,6 +100,7 @@ export type RunOpenCodeStepOptions = {
   step: Step;
   sessionID?: string;
   onFirstAssistantContent?: () => void;
+  timeoutMsOverride?: number;
 };
 
 function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
@@ -838,10 +839,12 @@ export async function runOpenCodeStep({
   step,
   sessionID,
   onFirstAssistantContent,
+  timeoutMsOverride,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
+  const effectiveTimeoutMs = timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
 
   state.activeStepIndex = stepIndex;
   syncSelectionToActiveStep(state);
@@ -896,7 +899,7 @@ export async function runOpenCodeStep({
     if (cancellation.action !== null) return;
     cancellation.action = reason === "skip" ? "skip" : "restart";
     cancellation.reason = reason === "skip" ? undefined : reason;
-    const label = reason === "timeout" ? `timeout after ${Math.round((step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS) / 1000)}s` : reason;
+    const label = reason === "timeout" ? `timeout after ${Math.round(effectiveTimeoutMs / 1000)}s` : reason;
     pushLine(`[looper] ${label} requested for ${step.name}`);
     if (cancellation.activeSessionID !== undefined && !cancellation.abortSent) {
       cancellation.abortSent = true;
@@ -918,7 +921,7 @@ export async function runOpenCodeStep({
     state.restartReason = "timeout";
     notify();
     requestCancellation("timeout");
-  }, step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS);
+  }, effectiveTimeoutMs);
 
   let consumerPromise: Promise<void> | undefined;
   let consumerError: Error | undefined;
