@@ -4,6 +4,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { loadSteps } from "./config.ts";
 import {
+  DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
   reattachOpenCodeStep,
   runOpenCodeStep,
@@ -486,6 +487,7 @@ export async function runIteration({
     let backgroundResumeCount = 0;
     let lastErrorMessage: string | undefined;
     let lastPromptMessageID: string | undefined;
+    let stepStartTime = Date.now();
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
@@ -540,7 +542,9 @@ export async function runIteration({
           break;
         }
 
-        const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: step.timeoutMs });
+        const budget = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+        const remainingMs = Math.max(0, budget - (Date.now() - stepStartTime));
+        const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !state.quitting && !stopFileExists()) {
           resumeSessionID = waitSessionID;
           resumePrompt = backgroundContinuationPrompt();
@@ -555,6 +559,7 @@ export async function runIteration({
           const previousStepIndex = currentStepIndex;
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
           stepIndexForTitle = currentStepIndex;
+          stepStartTime = Date.now();
           resumeSessionID = undefined;
           resumePrompt = cleanRestartPrompt(step, reason);
           pushAgentLine(state, `[looper] restart requested during background wait for session ${waitSessionID}`);
@@ -575,6 +580,7 @@ export async function runIteration({
           const previousStepIndex = currentStepIndex;
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
           stepIndexForTitle = currentStepIndex;
+          stepStartTime = Date.now();
           resumeSessionID = undefined;
           resumePrompt = cleanRestartPrompt(step, "timeout");
           pushAgentLine(state, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
@@ -612,6 +618,7 @@ export async function runIteration({
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
         currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
         stepIndexForTitle = currentStepIndex;
+        stepStartTime = Date.now();
         resumeSessionID = undefined;
         resumePrompt = cleanRestartPrompt(step, reason);
         continue;

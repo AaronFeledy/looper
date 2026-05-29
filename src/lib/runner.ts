@@ -14,6 +14,7 @@ import {
   syncSelectionToActiveStep,
   syncStepBackgroundAgents,
   type LoopState,
+  type StepRestartReason,
 } from "./state.ts";
 import { stopFileExists } from "./state-files.ts";
 
@@ -34,7 +35,6 @@ export type Step = {
 export const DEFAULT_STEP_TIMEOUT_MS = 60 * 60 * 1000;
 
 export type StepResult = "done" | "failed" | "skipped" | "restart" | "waiting";
-export type StepRestartReason = "manual" | "timeout";
 
 export type StepRunResult = {
   status: StepResult;
