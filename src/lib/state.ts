@@ -17,6 +17,7 @@ export type BackgroundAgent = {
   sessionID: string;
   agent?: string;
   title?: string;
+  placeholder?: true;
   startedAt: number;
   outputLines: string[];
   outputLineTimes: number[];
@@ -97,13 +98,14 @@ export function backgroundAgentLabel(agent: BackgroundAgent): string {
 export function createBackgroundAgent(
   sessionID: string,
   startedAt: number,
-  fields: { agent?: string; title?: string } = {},
+  fields: { agent?: string; title?: string; placeholder?: true } = {},
 ): BackgroundAgent {
   return {
     sessionID,
     startedAt,
     ...(fields.agent !== undefined ? { agent: fields.agent } : {}),
     ...(fields.title !== undefined ? { title: fields.title } : {}),
+    ...(fields.placeholder !== undefined ? { placeholder: fields.placeholder } : {}),
     outputLines: [],
     outputLineTimes: [],
     outputScrollTop: 0,
@@ -355,7 +357,7 @@ export function syncSelectionToActiveStep(state: LoopState): void {
 export function syncStepBackgroundAgents(
   state: LoopState,
   stepIndex: number,
-  next: { sessionID: string; agent?: string; title?: string; startedAt: number }[],
+  next: { sessionID: string; agent?: string; title?: string; placeholder?: true; startedAt: number }[],
 ): void {
   const step = state.steps[stepIndex];
   if (!step) return;
@@ -376,11 +378,17 @@ export function syncStepBackgroundAgents(
         prev.title = incoming.title;
         changed = true;
       }
+      if (prev.placeholder !== incoming.placeholder) {
+        if (incoming.placeholder === undefined) delete prev.placeholder;
+        else prev.placeholder = incoming.placeholder;
+        changed = true;
+      }
       merged.push(prev);
     } else {
       merged.push(createBackgroundAgent(incoming.sessionID, incoming.startedAt, {
         ...(incoming.agent !== undefined ? { agent: incoming.agent } : {}),
         ...(incoming.title !== undefined ? { title: incoming.title } : {}),
+        ...(incoming.placeholder !== undefined ? { placeholder: incoming.placeholder } : {}),
       }));
       changed = true;
     }

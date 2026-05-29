@@ -10,6 +10,7 @@ import {
   selectPreviousStep,
   syncStepBackgroundAgents,
 } from "../src/lib/state.ts";
+import { formatRow } from "../src/tui/step-list.ts";
 
 function state(stepNames: string[]) {
   return createLoopState({ maxIterations: 1, stepNames });
@@ -51,6 +52,23 @@ describe("syncStepBackgroundAgents", () => {
     expect(s.steps[0]?.backgroundAgents).toEqual([]);
     expect(s.selectedBackgroundSessionID).toBeNull();
   });
+
+  test("updates placeholder rows into real session rows", () => {
+    const s = state(["review"]);
+    syncStepBackgroundAgents(s, 0, [
+      { sessionID: "continuation-ses_parent", startedAt: 1, title: "1 background task active", placeholder: true },
+    ]);
+    expect(s.steps[0]?.backgroundAgents[0]?.placeholder).toBe(true);
+
+    syncStepBackgroundAgents(s, 0, [
+      { sessionID: "ses_child", startedAt: 2, agent: "general", title: "Trace subagent step UI" },
+    ]);
+
+    expect(s.steps[0]?.backgroundAgents).toMatchObject([
+      { sessionID: "ses_child", agent: "general", title: "Trace subagent step UI" },
+    ]);
+    expect(s.steps[0]?.backgroundAgents[0]?.placeholder).toBeUndefined();
+  });
 });
 
 describe("selectNext/Previous traversal", () => {
@@ -87,6 +105,22 @@ describe("clearBackgroundAgentBuffer", () => {
     expect(agent?.outputLines).toEqual([]);
     expect(agent?.outputLineTimes).toEqual([]);
     expect(agent?.sessionID).toBe("ses_a");
+  });
+});
+
+describe("formatRow", () => {
+  test("right-aligns the duration at the same column for ASCII and indented rows", () => {
+    const parent = formatRow("✓ Sync", "1m");
+    const subagent = formatRow("  ↳ ⠋ explore", "1m");
+    expect(parent.endsWith("1m")).toBe(true);
+    expect(subagent.endsWith("1m")).toBe(true);
+    expect(parent.length).toBe(subagent.length);
+  });
+
+  test("truncates long labels with an ellipsis while keeping the duration intact", () => {
+    const row = formatRow("  ↳ ⠋ a very long subagent title that overflows", "12m");
+    expect(row.endsWith("12m")).toBe(true);
+    expect(row).toContain("…");
   });
 });
 

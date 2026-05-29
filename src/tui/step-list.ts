@@ -4,7 +4,10 @@ import type { BackgroundAgent, FlatRow, LoopState, LoopStep, StepStatus } from "
 import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const ROW_WIDTH = 26;
+const LIST_WIDTH = 28;
+const LIST_BORDER = 2;
+const LIST_PADDING_X = 1;
+const ROW_WIDTH = LIST_WIDTH - LIST_BORDER - LIST_PADDING_X * 2;
 
 function statusIcon(status: StepStatus, frame: string): string {
   if (status === "done") return "✓";
@@ -28,7 +31,9 @@ function durationSecondsFrom(startedAt: number | undefined, finishedAt: number |
   const end = finishedAt ?? Date.now();
   const seconds = Math.max(0, Math.floor((end - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
 }
 
 function stepRowContent(step: LoopStep, frame: string): string {
@@ -38,18 +43,68 @@ function stepRowContent(step: LoopStep, frame: string): string {
 }
 
 function backgroundRowContent(agent: BackgroundAgent, frame: string): string {
-  const label = `  ↳ ${frame} ${backgroundAgentLabel(agent)}`;
+  const label = `↳ ${frame} ${backgroundAgentLabel(agent)}`;
   const right = durationSecondsFrom(agent.startedAt, undefined);
   return formatRow(label, right);
 }
 
-function formatRow(label: string, right: string): string {
-  const max = ROW_WIDTH;
-  if (right.length === 0) return label.slice(0, max);
-  const labelMax = Math.max(0, max - right.length - 1);
-  const truncatedLabel = label.length > labelMax ? `${label.slice(0, Math.max(0, labelMax - 1))}…` : label;
-  const padded = truncatedLabel.padEnd(labelMax, " ");
-  return `${padded} ${right}`.slice(0, max);
+export function formatRow(label: string, right: string, max: number = ROW_WIDTH): string {
+  if (right.length === 0) return truncateDisplay(label, max);
+  const rightWidth = displayWidth(right);
+  const labelMax = Math.max(0, max - rightWidth - 1);
+  const truncatedLabel = truncateDisplay(label, labelMax);
+  const padded = `${truncatedLabel}${" ".repeat(Math.max(0, labelMax - displayWidth(truncatedLabel)))}`;
+  return truncateDisplay(`${padded} ${right}`, max);
+}
+
+function truncateDisplay(value: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (displayWidth(value) <= maxWidth) return value;
+  const ellipsisWidth = displayWidth("…");
+  const targetWidth = Math.max(0, maxWidth - ellipsisWidth);
+  let result = "";
+  let width = 0;
+  for (const char of value) {
+    const charWidth = charDisplayWidth(char);
+    if (width + charWidth > targetWidth) break;
+    result += char;
+    width += charWidth;
+  }
+  return `${result}…`;
+}
+
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) width += charDisplayWidth(char);
+  return width;
+}
+
+function charDisplayWidth(char: string): number {
+  const codePoint = char.codePointAt(0);
+  if (codePoint === undefined) return 0;
+  if (codePoint === 0) return 0;
+  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (codePoint >= 0x300 && codePoint <= 0x36f) return 0;
+  if (codePoint >= 0x1ab0 && codePoint <= 0x1aff) return 0;
+  if (codePoint >= 0x1dc0 && codePoint <= 0x1dff) return 0;
+  if (codePoint >= 0x20d0 && codePoint <= 0x20ff) return 0;
+  if (codePoint >= 0xfe20 && codePoint <= 0xfe2f) return 0;
+  if (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+    (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  ) return 2;
+  return 1;
 }
 
 function stepRowColor(step: LoopStep): string {
@@ -83,13 +138,13 @@ function isRowSelected(state: LoopState, row: FlatRow): boolean {
 export function createStepList(renderer: CliRenderer, state: LoopState): BoxRenderable {
   const list = new BoxRenderable(renderer, {
     id: "loop-step-list",
-    width: 28,
+    width: LIST_WIDTH,
     height: "100%",
     border: true,
     borderStyle: "rounded",
     borderColor: "#45475a",
     title: "Steps",
-    paddingX: 1,
+    paddingX: LIST_PADDING_X,
     flexDirection: "column",
   });
 

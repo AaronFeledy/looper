@@ -53,6 +53,8 @@ type RunContinuationRecord = {
   source: BackgroundTaskSource;
 };
 
+type BackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: string; placeholder?: true; startedAt: number };
+
 export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
@@ -384,6 +386,23 @@ function setContinuationStatus(state: LoopState, stepIndex: number, _record: Run
   notify();
 }
 
+function continuationBackgroundAgent(record: RunContinuationRecord): BackgroundAgentSnapshot {
+  const startedAt = continuationTime(record);
+  return {
+    sessionID: `continuation-${record.sessionID}`,
+    title: record.source.reason ?? "background tasks active",
+    placeholder: true,
+    startedAt: startedAt > 0 ? startedAt : Date.now(),
+  };
+}
+
+function continuationFallback(repoDir: string, sessionID: string): () => BackgroundAgentSnapshot[] {
+  return () => {
+    const record = readProjectContinuationRecord(repoDir, sessionID);
+    return record !== null && record.source.state === "active" ? [continuationBackgroundAgent(record)] : [];
+  };
+}
+
 const BACKGROUND_AGENT_POLL_MS = 2_500;
 
 async function snapshotLiveBackgroundAgents({
@@ -424,12 +443,14 @@ function startBackgroundAgentPoller({
   client,
   repoDir,
   parentSessionID,
+  fallbackAgents,
 }: {
   state: LoopState;
   stepIndex: number;
   client: OpencodeClient;
   repoDir: string;
   parentSessionID: string;
+  fallbackAgents?: () => BackgroundAgentSnapshot[];
 }): BackgroundAgentPoller {
   let stopped = false;
   let inflight = false;
@@ -438,7 +459,8 @@ function startBackgroundAgentPoller({
     if (stopped || inflight) return;
     inflight = true;
     try {
-      const agents = await snapshotLiveBackgroundAgents({ client, repoDir, parentSessionID });
+      const liveAgents = await snapshotLiveBackgroundAgents({ client, repoDir, parentSessionID });
+      const agents = liveAgents.length > 0 ? liveAgents : fallbackAgents?.() ?? [];
       if (stopped) return;
       syncStepBackgroundAgents(state, stepIndex, agents);
     } catch {
@@ -475,7 +497,14 @@ export async function waitForLoopContinuationIdle({
   sessionID: string;
 }): Promise<ContinuationWaitResult> {
   const startedAt = Date.now();
-  const poller = startBackgroundAgentPoller({ state, stepIndex, client, repoDir, parentSessionID: sessionID });
+  const poller = startBackgroundAgentPoller({
+    state,
+    stepIndex,
+    client,
+    repoDir,
+    parentSessionID: sessionID,
+    fallbackAgents: continuationFallback(repoDir, sessionID),
+  });
 
   try {
     while (true) {
@@ -507,6 +536,7 @@ export async function waitForLoopContinuationIdle({
     }
   } finally {
     poller.stop();
+    syncStepBackgroundAgents(state, stepIndex, []);
   }
 }
 
@@ -606,7 +636,7 @@ export async function reattachOpenCodeStep({
   syncSelectionToActiveStep(state);
   activeStep.status = "running";
   activeStep.statusMessage = "reattaching";
-  activeStep.startedAt = Date.now();
+  activeStep.startedAt ??= Date.now();
   activeStep.finishedAt = undefined;
   setStepSessionID(state, stepIndex, sessionID);
   notify();
@@ -642,7 +672,14 @@ export async function reattachOpenCodeStep({
     if (state.restartRequested) requestCancellation("restart");
     else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
-  const bgPoller = startBackgroundAgentPoller({ state, stepIndex, client, repoDir, parentSessionID: sessionID });
+  const bgPoller = startBackgroundAgentPoller({
+    state,
+    stepIndex,
+    client,
+    repoDir,
+    parentSessionID: sessionID,
+    fallbackAgents: continuationFallback(repoDir, sessionID),
+  });
 
   let consumerPromise: Promise<void> | undefined;
   let sessionEventError: Error | undefined;
@@ -760,6 +797,7 @@ export async function reattachOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after reattach");
+      syncStepBackgroundAgents(state, stepIndex, [continuationBackgroundAgent(record)]);
       activeStep.status = "waiting";
       activeStep.finishedAt = undefined;
       state.activeStepIndex = null;
@@ -799,7 +837,7 @@ export async function runOpenCodeStep({
   syncSelectionToActiveStep(state);
   activeStep.status = "running";
   activeStep.statusMessage = undefined;
-  activeStep.startedAt = Date.now();
+  activeStep.startedAt ??= Date.now();
   activeStep.finishedAt = undefined;
   notify();
 
@@ -829,7 +867,14 @@ export async function runOpenCodeStep({
     cancellation.activeSessionID = sid;
     setStepSessionID(state, stepIndex, sid);
     if (bgPoller === undefined) {
-      bgPoller = startBackgroundAgentPoller({ state, stepIndex, client, repoDir, parentSessionID: sid });
+      bgPoller = startBackgroundAgentPoller({
+        state,
+        stepIndex,
+        client,
+        repoDir,
+        parentSessionID: sid,
+        fallbackAgents: continuationFallback(repoDir, sid),
+      });
     }
   };
 
@@ -958,6 +1003,7 @@ export async function runOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after opencode exit");
+      syncStepBackgroundAgents(state, stepIndex, [continuationBackgroundAgent(record)]);
       return { status: "waiting", sessionID: record.sessionID, ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}) };
     }
   }
