@@ -2,9 +2,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
-import type { OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
+import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { consumeSessionEvents } from "./event-consumer.ts";
+import { consumeSessionEvents, createSessionEventConsumer } from "./event-consumer.ts";
 import {
   notify,
   pushAgentLine,
@@ -26,17 +26,22 @@ export type Step = {
   prefix?: string;
   suffix?: string;
   args?: string[];
+  timeoutMs?: number;
   /** `true` = generate title at step end. `number` = N seconds after first assistant response, concurrently. `"branch"` = fire when the branch watcher detects a switch to a non-trivial branch; fallback to ~5min after first response or step end. See README. */
   title?: boolean | number | "branch";
 };
 
+export const DEFAULT_STEP_TIMEOUT_MS = 60 * 60 * 1000;
+
 export type StepResult = "done" | "failed" | "skipped" | "restart" | "waiting";
+export type StepRestartReason = "manual" | "timeout";
 
 export type StepRunResult = {
   status: StepResult;
   sessionID?: string;
   errorMessage?: string;
   messageID?: string;
+  restartReason?: StepRestartReason;
 };
 
 type ContinuationState = "active" | "idle";
@@ -82,6 +87,9 @@ const CONTINUATION_MAX_FILES = 1_000;
 const CONTINUATION_MAX_BYTES = 64 * 1024;
 const CONTINUATION_LOG_FIELD_MAX = 200;
 const EVENT_CONSUMER_CLOSE_TIMEOUT_MS = 2_000;
+const EVENT_WATCHDOG_POLL_MS = positiveIntegerEnv("LOOPER_EVENT_WATCHDOG_POLL_MS", 15_000);
+const EVENT_STALL_THRESHOLD_MS = positiveIntegerEnv("LOOPER_EVENT_STALL_MS", 45_000);
+const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS", 1_000);
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -489,12 +497,14 @@ export async function waitForLoopContinuationIdle({
   stepIndex,
   repoDir,
   sessionID,
+  timeoutMs = DEFAULT_STEP_TIMEOUT_MS,
 }: {
   state: LoopState;
   client: OpencodeClient;
   stepIndex: number;
   repoDir: string;
   sessionID: string;
+  timeoutMs?: number;
 }): Promise<ContinuationWaitResult> {
   const startedAt = Date.now();
   const poller = startBackgroundAgentPoller({
@@ -530,7 +540,7 @@ export async function waitForLoopContinuationIdle({
         if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
       }
 
-      if (Date.now() - startedAt > CONTINUATION_MAX_WAIT_MS) return "timeout";
+      if (Date.now() - startedAt > Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs)) return "timeout";
 
       await Bun.sleep(CONTINUATION_POLL_MS);
     }
@@ -856,8 +866,10 @@ export async function runOpenCodeStep({
 
   let sentMessageID: string | undefined;
   const ctrl = new AbortController();
-  const cancellation: { action: "skip" | "restart" | null; abortSent: boolean; activeSessionID: string | undefined } = {
+  const subscription: { ctrl: AbortController | undefined } = { ctrl: undefined };
+  const cancellation: { action: "skip" | "restart" | null; reason: StepRestartReason | undefined; abortSent: boolean; activeSessionID: string | undefined } = {
     action: null,
+    reason: undefined,
     abortSent: false,
     activeSessionID: sessionID,
   };
@@ -880,28 +892,43 @@ export async function runOpenCodeStep({
 
   if (sessionID !== undefined) persistSessionID(sessionID);
 
-  const requestCancellation = (reason: "skip" | "restart") => {
+  const requestCancellation = (reason: "skip" | StepRestartReason) => {
     if (cancellation.action !== null) return;
-    cancellation.action = reason;
-    pushLine(`[looper] ${reason} requested for ${step.name}`);
+    cancellation.action = reason === "skip" ? "skip" : "restart";
+    cancellation.reason = reason === "skip" ? undefined : reason;
+    const label = reason === "timeout" ? `timeout after ${Math.round((step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS) / 1000)}s` : reason;
+    pushLine(`[looper] ${label} requested for ${step.name}`);
     if (cancellation.activeSessionID !== undefined && !cancellation.abortSent) {
       cancellation.abortSent = true;
       const sid = cancellation.activeSessionID;
       void client.session.abort({ sessionID: sid, directory: repoDir }).catch(() => undefined);
     }
+    subscription.ctrl?.abort();
     ctrl.abort();
   };
 
   const watcher = setInterval(() => {
     if (cancellation.action !== null) return;
-    if (state.restartRequested) requestCancellation("restart");
+    if (state.restartRequested) requestCancellation(state.restartReason ?? "manual");
     else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
+  const timeout = setTimeout(() => {
+    if (cancellation.action !== null) return;
+    state.restartRequested = true;
+    state.restartReason = "timeout";
+    notify();
+    requestCancellation("timeout");
+  }, step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS);
 
   let consumerPromise: Promise<void> | undefined;
   let consumerError: Error | undefined;
   let sessionEventError: Error | undefined;
   let finalError: Error | undefined;
+  let supervisorPromise: Promise<void> | undefined;
+  let supervisorStopped = false;
+  let watchdogStallReason: string | undefined;
+  let lastEventAt = Date.now();
+  let flushConsumer: (() => void) | undefined;
 
   try {
     let sid = cancellation.activeSessionID;
@@ -918,32 +945,133 @@ export async function runOpenCodeStep({
       persistSessionID(sid);
     }
     pushLine(`[looper] session=${sid}`);
+    const boundSessionID = sid;
 
-    const sub = await client.event.subscribe(
-      { directory: repoDir },
-      { signal: ctrl.signal },
-    );
-    if (!sub.stream) throw new Error("event.subscribe returned no stream");
-    pushLine(`[looper] subscribed to events`);
-    consumerPromise = consumeSessionEvents(sub.stream, sid, {
+    const consumer = createSessionEventConsumer(boundSessionID, {
       pushLine,
       pushLines,
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
+      onActivity: () => {
+        lastEventAt = Date.now();
+      },
       ...(onFirstAssistantContent ? { onFirstAssistantContent } : {}),
-    }).catch((err) => {
-      const error = toError(err);
-      if (isAbortError(error)) return;
-      consumerError = error;
-      pushLine(`[error] event consumer crashed: ${error.message}`);
     });
+    flushConsumer = consumer.flush;
+
+    const subscribeStream = async (): Promise<AsyncIterable<Event> | undefined> => {
+      const sc = new AbortController();
+      subscription.ctrl = sc;
+      const sub = await client.event.subscribe({ directory: repoDir }, { signal: sc.signal });
+      return sub.stream ?? undefined;
+    };
+
+    const startConsume = (stream: AsyncIterable<Event>): void => {
+      consumerPromise = consumer.consume(stream).catch((err) => {
+        const error = toError(err);
+        if (isAbortError(error)) return;
+        consumerError = error;
+        pushLine(`[error] event consumer crashed: ${error.message}`);
+      });
+    };
+
+    let lastResubscribeAt = 0;
+    const resubscribe = async (reason: string): Promise<boolean> => {
+      if (supervisorStopped || cancellation.action !== null) return false;
+      const sinceLast = Date.now() - lastResubscribeAt;
+      if (sinceLast < EVENT_RESUBSCRIBE_BACKOFF_MS) await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS - sinceLast);
+      if (supervisorStopped || cancellation.action !== null) return false;
+      lastResubscribeAt = Date.now();
+      subscription.ctrl?.abort();
+      if (consumerPromise) {
+        await Promise.race([consumerPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
+      }
+      if (supervisorStopped || cancellation.action !== null) return false;
+      const stream = await subscribeStream().catch(() => undefined);
+      if (!stream) {
+        pushLine(`[looper] resubscribe failed to obtain a stream (${reason})`);
+        return false;
+      }
+      lastEventAt = Date.now();
+      startConsume(stream);
+      try {
+        const msgs = await client.session.messages({ sessionID: boundSessionID, directory: repoDir });
+        if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
+      } catch {
+        // backfill is best-effort; live events will continue to heal state
+      }
+      pushLine(`[looper] resubscribed to events for ${boundSessionID} (${reason})`);
+      return true;
+    };
+
+    const supervise = async (): Promise<void> => {
+      while (!supervisorStopped && cancellation.action === null) {
+        const current = consumerPromise ?? Promise.resolve();
+        const outcome = await Promise.race([
+          current.then(() => "ended" as const),
+          Bun.sleep(EVENT_WATCHDOG_POLL_MS).then(() => "tick" as const),
+        ]);
+        if (supervisorStopped || cancellation.action !== null) break;
+
+        const streamEnded = outcome === "ended";
+        if (!streamEnded && Date.now() - lastEventAt < EVENT_STALL_THRESHOLD_MS) continue;
+
+        let pending: boolean | undefined;
+        try {
+          pending = await sessionStillPending(client, repoDir, boundSessionID);
+        } catch {
+          pending = undefined;
+        }
+        if (supervisorStopped || cancellation.action !== null) break;
+
+        if (pending === undefined) {
+          if (streamEnded && !(await resubscribe("stream closed; session status unknown"))) {
+            await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+          }
+          continue;
+        }
+
+        if (pending) {
+          const reason = streamEnded ? "stream closed while session busy" : "no events while session busy";
+          if (!(await resubscribe(reason))) await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+          continue;
+        }
+
+        if (sentMessageID !== undefined) {
+          const cls = await classifyAssistantForMessage(client, repoDir, boundSessionID, sentMessageID);
+          if (supervisorStopped || cancellation.action !== null) break;
+          if (cls.kind === "done" || cls.kind === "failed") {
+            const silentSeconds = Math.round((Date.now() - lastEventAt) / 1000);
+            watchdogStallReason = `event watchdog: session ${boundSessionID} idle with assistant message ${cls.kind} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
+            pushLine(`[looper] ${watchdogStallReason}`);
+            ctrl.abort();
+            break;
+          }
+          if (streamEnded && !(await resubscribe("stream closed; assistant still in-progress"))) {
+            await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+          }
+          continue;
+        }
+
+        if (streamEnded && !(await resubscribe("stream closed before prompt"))) {
+          await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+        }
+      }
+    };
+
+    const stream0 = await subscribeStream();
+    if (!stream0) throw new Error("event.subscribe returned no stream");
+    pushLine(`[looper] subscribed to events`);
+    lastEventAt = Date.now();
+    startConsume(stream0);
 
     const model = parseModel(step.model);
     const variant = step.variant || undefined;
     const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
+    supervisorPromise = supervise();
     pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(
       {
@@ -961,12 +1089,22 @@ export async function runOpenCodeStep({
     pushLine(`[looper] prompt completed`);
   } catch (error) {
     if (cancellation.action === null) {
-      finalError = error instanceof Error ? error : new Error(String(error));
+      if (watchdogStallReason !== undefined && error instanceof Error && isAbortError(error)) {
+        finalError = new Error(watchdogStallReason);
+      } else {
+        finalError = error instanceof Error ? error : new Error(String(error));
+      }
     }
   } finally {
     clearInterval(watcher);
+    clearTimeout(timeout);
     bgPoller?.stop();
+    supervisorStopped = true;
+    subscription.ctrl?.abort();
     ctrl.abort();
+    if (supervisorPromise) {
+      await Promise.race([supervisorPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
+    }
     if (consumerPromise) {
       let timedOut = false;
       await Promise.race([
@@ -977,6 +1115,7 @@ export async function runOpenCodeStep({
       ]).catch(() => undefined);
       if (timedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms; continuing`);
     }
+    flushConsumer?.();
   }
 
   if (finalError === undefined && cancellation.action === null && consumerError !== undefined) {
@@ -1026,5 +1165,6 @@ export async function runOpenCodeStep({
     sessionID: cancellation.activeSessionID,
     ...(status === "failed" && finalError ? { errorMessage: finalError.message } : {}),
     ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}),
+    ...(status === "restart" && cancellation.reason !== undefined ? { restartReason: cancellation.reason } : {}),
   };
 }
