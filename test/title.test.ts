@@ -19,6 +19,7 @@ function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
 }
 
 import { loadSteps } from "../src/lib/config.ts";
+import { DEFAULT_STEP_TIMEOUT_MS } from "../src/lib/runner.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState } from "../src/lib/state.ts";
@@ -171,6 +172,63 @@ describe("config title parsing", () => {
       "steps:\n  build:\n    prompt: build.md\n",
     );
     expect(loadSteps(dir)[0]?.title).toBeUndefined();
+  });
+});
+
+describe("config timeout parsing", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "looper-timeout-cfg-"));
+    writeFileSync(join(dir, "build.md"), "");
+    writeFileSync(join(dir, "review.md"), "");
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("defaults to 60 minutes", () => {
+    writeFileSync(join(dir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n");
+    expect(loadSteps(dir)[0]?.timeoutMs).toBe(DEFAULT_STEP_TIMEOUT_MS);
+  });
+
+  test("loads .looper.yaml when looper.yaml is absent", () => {
+    writeFileSync(join(dir, ".looper.yaml"), "timeout: 1h\nsteps:\n  build:\n    prompt: build.md\n");
+    expect(loadSteps(dir)[0]?.timeoutMs).toBe(60 * 60 * 1000);
+  });
+
+  test("applies root timeout and lets steps override it", () => {
+    writeFileSync(
+      join(dir, "looper.yaml"),
+      [
+        "timeout: 2",
+        "steps:",
+        "  build:",
+        "    prompt: build.md",
+        "  review:",
+        "    prompt: review.md",
+        "    timeout: 30s",
+        "",
+      ].join("\n"),
+    );
+    const steps = loadSteps(dir);
+    expect(steps[0]?.timeoutMs).toBe(2 * 60 * 1000);
+    expect(steps[1]?.timeoutMs).toBe(30 * 1000);
+  });
+
+  test("accepts simple duration strings", () => {
+    for (const [value, expected] of [["60m", 60 * 60 * 1000], ["1h", 60 * 60 * 1000], ["30s", 30 * 1000]] as const) {
+      writeFileSync(join(dir, "looper.yaml"), `timeout: ${value}\nsteps:\n  build:\n    prompt: build.md\n`);
+      expect(loadSteps(dir)[0]?.timeoutMs).toBe(expected);
+    }
+  });
+
+  test("rejects invalid timeout values", () => {
+    for (const bad of ["0", "1.5", "soon", "5d"]) {
+      writeFileSync(join(dir, "looper.yaml"), `timeout: ${bad}\nsteps:\n  build:\n    prompt: build.md\n`);
+      expect(() => loadSteps(dir)).toThrow(/timeout must be an integer >= 1/);
+    }
   });
 });
 
