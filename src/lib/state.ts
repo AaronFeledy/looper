@@ -2,6 +2,8 @@ export type StepStatus = "pending" | "running" | "waiting" | "done" | "failed" |
 
 export type LoopPane = "steps" | "output";
 
+export type StepRestartReason = "manual" | "timeout";
+
 export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "end";
 
 export type ScrollIntent = { direction: ScrollDirection; stepIndex: number; seq: number };
@@ -39,6 +41,7 @@ export type LoopStep = {
   outputScrollTop: number;
   outputPinnedToBottom: boolean;
   backgroundAgents: BackgroundAgent[];
+  restartReason?: StepRestartReason;
 };
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
@@ -62,6 +65,7 @@ export type LoopState = {
   stopAfterIteration: boolean;
   skipRequested: boolean;
   restartRequested: boolean;
+  restartReason?: StepRestartReason;
   agentLines: string[];
   agentLineTimes: number[];
   stepOutputLines: string[][];
@@ -122,13 +126,6 @@ function clampStepIndex(stepCount: number, stepIndex: number | null): number | n
   return Math.max(0, Math.min(stepCount - 1, stepIndex));
 }
 
-function trimLines(lines: string[]): number {
-  const overflow = lines.length - AGENT_MAX_LINES;
-  if (overflow <= 0) return 0;
-  lines.splice(0, overflow);
-  return overflow;
-}
-
 function trimPairedLines(lines: string[], times: number[]): number {
   const overflow = lines.length - AGENT_MAX_LINES;
   if (overflow <= 0) return 0;
@@ -171,6 +168,7 @@ export function createLoopState({
     stopAfterIteration: false,
     skipRequested: false,
     restartRequested: false,
+    restartReason: undefined,
     agentLines: [],
     agentLineTimes: [],
     stepOutputLines: stepNames.map(() => []),
@@ -258,6 +256,29 @@ function applyRowSelection(state: LoopState, row: FlatRow): void {
   state.selectedBackgroundSessionID = nextSessionID;
   state.manualStepSelection = true;
   notifyStateChange();
+}
+
+export function insertRestartAttempt(state: LoopState, stepIndex: number, reason: StepRestartReason): number {
+  const step = state.steps[stepIndex];
+  if (!step) return stepIndex;
+  step.restartReason = reason;
+  step.statusMessage = undefined;
+  step.finishedAt = Date.now();
+  const next: LoopStep = {
+    name: step.name,
+    status: "pending",
+    ...(step.title !== undefined ? { title: step.title } : {}),
+    outputLines: [],
+    outputLineTimes: [],
+    outputScrollTop: 0,
+    outputPinnedToBottom: true,
+    backgroundAgents: [],
+  };
+  state.steps.splice(stepIndex + 1, 0, next);
+  if (state.activeStepIndex !== null && state.activeStepIndex > stepIndex) state.activeStepIndex += 1;
+  if (state.selectedStepIndex !== null && state.selectedStepIndex > stepIndex) state.selectedStepIndex += 1;
+  notifyStateChange();
+  return stepIndex + 1;
 }
 
 export function selectPreviousStep(state: LoopState): FlatRow | null {
