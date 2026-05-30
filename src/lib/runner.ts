@@ -996,14 +996,17 @@ export async function runOpenCodeStep({
         pushLine(`[looper] resubscribe failed to obtain a stream (${reason})`);
         return false;
       }
-      lastEventAt = Date.now();
-      startConsume(stream);
       try {
         const msgs = await client.session.messages({ sessionID: boundSessionID, directory: repoDir });
         if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
       } catch {
         // backfill is best-effort; live events will continue to heal state
       }
+      // Backfill first so the consumer's per-part length guards are in place
+      // before live deltas from the new stream are appended. This prevents
+      // overlapping replay from double-printing assistant text.
+      lastEventAt = Date.now();
+      startConsume(stream);
       pushLine(`[looper] resubscribed to events for ${boundSessionID} (${reason})`);
       return true;
     };
@@ -1051,7 +1054,10 @@ export async function runOpenCodeStep({
             ctrl.abort();
             break;
           }
-          if (streamEnded && !(await resubscribe("stream closed; assistant still in-progress"))) {
+          const inProgressReason = streamEnded
+            ? "stream closed; assistant still in-progress"
+            : "stream stalled; assistant still in-progress";
+          if (!(await resubscribe(inProgressReason))) {
             await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
           }
           continue;

@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
-import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { CONFIG_FILE_NAME, configFilePath, DOT_CONFIG_FILE_NAME, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { detectGithubRepo } from "./lib/github.ts";
 import { type GithubWatcher, watchGithubPr } from "./lib/github-watcher.ts";
@@ -53,7 +53,9 @@ function ensureConfigDir(): void {
 function ensureConfigExists(): void {
   const path = configFilePath(configDir);
   if (existsSync(path)) return;
-  process.stderr.write(`error: missing ${CONFIG_FILE_NAME} at ${path}\n`);
+  const dotPath = join(configDir, DOT_CONFIG_FILE_NAME);
+  if (existsSync(dotPath)) return;
+  process.stderr.write(`error: missing ${CONFIG_FILE_NAME} at ${path} (or ${DOT_CONFIG_FILE_NAME} at ${dotPath})\n`);
   process.stderr.write(`Create it with at least one step. See https://github.com/ for examples.\n`);
   process.exit(2);
 }

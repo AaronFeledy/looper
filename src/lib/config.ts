@@ -5,7 +5,7 @@ import YAML from "yaml";
 import { DEFAULT_STEP_TIMEOUT_MS, type Step } from "./runner.ts";
 
 export const CONFIG_FILE_NAME = "looper.yaml";
-const DOT_CONFIG_FILE_NAME = ".looper.yaml";
+export const DOT_CONFIG_FILE_NAME = ".looper.yaml";
 
 type RawStep = {
   name?: unknown;
