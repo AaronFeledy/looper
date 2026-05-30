@@ -199,9 +199,25 @@ export async function generateWorkDescription({
     return undefined;
   } finally {
     if (titleSessionID !== undefined) {
-      void client.session
-        .delete({ sessionID: titleSessionID, directory: repoDir })
-        .catch(() => undefined);
+      // The throwaway title session runs on opencode's default model and, like
+      // any session, keeps generating server-side even if our client request
+      // was aborted. Abort it first so a cancelled/slow title generation does
+      // not linger as a running session, then delete it. Both are awaited and
+      // their failures logged so a silently-failed delete can no longer leak a
+      // session whose first message is a copy of the step's assistant output.
+      try {
+        await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
+      } catch (error) {
+        log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
+      }
+      try {
+        const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
+        if (deleted?.error) {
+          log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
+        }
+      } catch (error) {
+        log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
+      }
     }
   }
 }

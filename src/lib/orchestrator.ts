@@ -8,6 +8,8 @@ import {
   evaluatePriorSession,
   reattachOpenCodeStep,
   runOpenCodeStep,
+  sessionPendingState,
+  stopServerSession,
   waitForLoopContinuationIdle,
   type Step,
   type StepResult,
@@ -99,6 +101,12 @@ async function waitWhilePaused(state: LoopState): Promise<void> {
 const MAX_BACKGROUND_RESUMES_PER_STEP = 10;
 const MAX_FAILURE_RETRIES_PER_STEP = 2;
 const MAX_REATTACH_PER_STEP = 5;
+/**
+ * Shorter confirm-stop budget used when the loop is quitting / a stop file is
+ * present, so Ctrl-C does not feel hung waiting for opencode to confirm an
+ * abort before we tear down.
+ */
+const STOP_SESSION_QUIT_TIMEOUT_MS = 1_500;
 const FAILURE_RETRY_BASE_DELAY_MS = 2000;
 const FAILURE_RETRY_MAX_DELAY_MS = 30_000;
 
@@ -354,6 +362,27 @@ export async function runIteration({
   let startStepIndexApplied = false;
   let workDescription: string | undefined;
 
+  /**
+   * Confirm a server session is actually stopped before we create a fresh one
+   * or resume a different one. A client-side request abort never stops
+   * opencode's server-side generation; without this a retry/restart can leave
+   * the prior session running while a new one starts (two concurrent runs).
+   */
+  const stopPriorSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<void> => {
+    if (sessionID === undefined) return;
+    await stopServerSession({
+      client,
+      repoDir,
+      sessionID,
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+      log: (line) => {
+        pushAgentLine(state, line);
+        pushStepOutputLine(state, stepIdx, line);
+        notify();
+      },
+    });
+  };
+
   while (true) {
     const steps = loadSteps(configDir);
     if (steps.length === 0) throw new Error("loop.yaml must define at least one step");
@@ -558,6 +587,7 @@ export async function runIteration({
         if (waitResult === "restart") {
           const reason: StepRestartReason = state.restartReason ?? "manual";
           const previousStepIndex = currentStepIndex;
+          await stopPriorSession(waitSessionID, previousStepIndex);
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
@@ -579,6 +609,7 @@ export async function runIteration({
 
         if (waitResult === "timeout") {
           const previousStepIndex = currentStepIndex;
+          await stopPriorSession(waitSessionID, previousStepIndex);
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
@@ -617,6 +648,10 @@ export async function runIteration({
 
       if (result.status === "restart" && !state.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
+        // Confirm the prior session is actually aborted before creating the
+        // fresh restart session, so the old run can't keep generating in
+        // parallel with the new one.
+        await stopPriorSession(result.sessionID ?? state.steps[currentStepIndex]?.sessionID, currentStepIndex);
         currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
         stepIndexForTitle = currentStepIndex;
         stepStartTime = Date.now();
@@ -688,11 +723,31 @@ export async function runIteration({
         const delayMs = failureRetryDelayMs(failureRetryCount);
         const delaySeconds = Math.round(delayMs / 1000);
         const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
-        const targetSuffix =
-          hasOutput && priorSessionID !== undefined
-            ? `will resume session ${priorSessionID}`
-            : `will restart with a fresh session`;
-        if (hasOutput && priorSessionID !== undefined) {
+
+        // Decide resume vs fresh. The reattach gate above already routed a
+        // still-pending session to reattach when it could; if we reach here
+        // with a session that is still pending (or whose status we can't read),
+        // resuming would hit opencode's per-session mutex and silently drop the
+        // resume prompt, so we abort it and start fresh instead. A plain fresh
+        // retry with an existing prior session also aborts it first so it can't
+        // keep generating alongside the new session.
+        let canResume = hasOutput && priorSessionID !== undefined;
+        if (canResume && priorSessionID !== undefined) {
+          const pending = await sessionPendingState(client, repoDir, priorSessionID);
+          if (pending !== "idle") {
+            const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting and restarting fresh instead of resuming`;
+            pushAgentLine(state, line);
+            pushStepOutputLine(state, currentStepIndex, line);
+            notify();
+            await stopPriorSession(priorSessionID, currentStepIndex);
+            canResume = false;
+          }
+        } else if (priorSessionID !== undefined) {
+          await stopPriorSession(priorSessionID, currentStepIndex);
+        }
+
+        const targetSuffix = canResume ? `will resume session ${priorSessionID}` : `will restart with a fresh session`;
+        if (canResume) {
           resumeSessionID = priorSessionID;
           resumePrompt = failureResumePrompt();
         } else {
@@ -726,7 +781,17 @@ export async function runIteration({
     if (result.status === "failed") {
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
-      if (state.quitting || stopFileExists()) {
+      const stopRequested = state.quitting || stopFileExists();
+      // Terminal failure (retry exhausted / suppressed / stop requested): make
+      // sure the step's session is actually stopped so it doesn't keep running
+      // server-side after we surface the failure. Use a short budget when the
+      // user is quitting so teardown stays responsive.
+      await stopPriorSession(
+        state.steps[currentStepIndex]?.sessionID,
+        currentStepIndex,
+        stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
+      );
+      if (stopRequested) {
         markRemainingSkipped(state, currentStepIndex);
         break;
       }
