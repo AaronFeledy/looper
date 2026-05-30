@@ -7,13 +7,15 @@ import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
-import { CONFIG_FILE_NAME, configFilePath, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { CONFIG_FILE_NAME, configFilePath, DOT_CONFIG_FILE_NAME, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
+import { detectGithubRepo } from "./lib/github.ts";
+import { type GithubWatcher, watchGithubPr } from "./lib/github-watcher.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
 import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { createLoopState, notify, resetIterationNavigationState } from "./lib/state.ts";
+import { createLoopState, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
 import {
   clearStopAfterIterationFile,
   clearResumeStepFile,
@@ -30,9 +32,10 @@ import {
 } from "./lib/state-files.ts";
 import { createAgentStream } from "./tui/agent-stream.ts";
 import { createFooter } from "./tui/footer.ts";
+import { createGithubStatusPanel } from "./tui/github-status.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys } from "./tui/keys.ts";
-import { createStepList } from "./tui/step-list.ts";
+import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const configDir = process.env.LOOPER_CONFIG_DIR ? resolve(process.env.LOOPER_CONFIG_DIR) : join(repoDir, ".local", "looper");
@@ -50,7 +53,9 @@ function ensureConfigDir(): void {
 function ensureConfigExists(): void {
   const path = configFilePath(configDir);
   if (existsSync(path)) return;
-  process.stderr.write(`error: missing ${CONFIG_FILE_NAME} at ${path}\n`);
+  const dotPath = join(configDir, DOT_CONFIG_FILE_NAME);
+  if (existsSync(dotPath)) return;
+  process.stderr.write(`error: missing ${CONFIG_FILE_NAME} at ${path} (or ${DOT_CONFIG_FILE_NAME} at ${dotPath})\n`);
   process.stderr.write(`Create it with at least one step. See https://github.com/ for examples.\n`);
   process.exit(2);
 }
@@ -78,6 +83,7 @@ function resetIterationState(
   state.started = true;
   state.skipRequested = false;
   state.restartRequested = false;
+  state.restartReason = undefined;
   state.agentLines = [];
   state.stepOutputLines = steps.map(() => []);
   state.steps = steps.map((step) => ({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] }));
@@ -140,6 +146,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let branchWatcher: BranchWatcher | null = null;
   let branchSafetyTimer: ReturnType<typeof setInterval> | undefined;
+  let githubWatcher: GithubWatcher | undefined;
   let exitReason: string | undefined;
 
   const finish = (exitCode: number, reason: string): number => {
@@ -188,6 +195,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         if (state.branch === branch) return;
         state.branch = branch;
         notify();
+        // A new branch usually means a different (or absent) PR; re-query now
+        // rather than waiting up to the 15s poll.
+        githubWatcher?.refresh();
       },
     });
 
@@ -224,8 +234,26 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     const stepList = createStepList(renderer, state);
     const stream = createAgentStream(renderer, state);
 
+    const leftColumn = new BoxRenderable(renderer, {
+      id: "looper-left",
+      width: LIST_WIDTH,
+      height: "100%",
+      flexDirection: "column",
+    });
+    leftColumn.add(stepList);
+
+    const githubEnabled = await detectGithubRepo(repoDir);
+    if (githubEnabled) {
+      leftColumn.add(createGithubStatusPanel(renderer, state));
+      githubWatcher = watchGithubPr({
+        repoDir,
+        getBranch: () => state.branch,
+        onUpdate: (status) => setGithubStatus(state, status),
+      });
+    }
+
     root.add(createHeader(renderer, state));
-    body.add(stepList);
+    body.add(leftColumn);
     body.add(stream);
     root.add(body);
     root.add(createFooter(renderer, state));
@@ -264,6 +292,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       onRestart: () => {
         if (state.activeStepIndex === null) return;
         state.restartRequested = true;
+        state.restartReason = "manual";
         notify();
       },
       onStopAfterIteration: () => {
@@ -299,10 +328,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
               // step may have run `git checkout`); re-read HEAD immediately so
               // the header doesn't lag up to 5s behind reality.
               branchWatcher?.refresh();
+              githubWatcher?.refresh();
             },
             onStepFinish: ({ nextIndex, status }) => {
               if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
               branchWatcher?.refresh();
+              githubWatcher?.refresh();
             },
           },
         });
@@ -334,6 +365,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   } finally {
     cleanupKeys?.();
     backgroundAgentStreamer?.stop();
+    githubWatcher?.stop();
     if (branchSafetyTimer !== undefined) clearInterval(branchSafetyTimer);
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);

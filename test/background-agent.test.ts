@@ -5,6 +5,7 @@ import {
   clearBackgroundAgentBuffer,
   createLoopState,
   flattenRows,
+  insertRestartAttempt,
   pushBackgroundAgentLines,
   selectNextStep,
   selectPreviousStep,
@@ -32,6 +33,20 @@ describe("flattenRows", () => {
       { kind: "step", stepIndex: 1 },
       { kind: "background", stepIndex: 1, sessionID: "ses_c" },
     ]);
+  });
+
+  test("inserts restart attempts as normal step rows", () => {
+    const s = state(["build"]);
+    const nextIndex = insertRestartAttempt(s, 0, "manual");
+    syncStepBackgroundAgents(s, nextIndex, [{ sessionID: "ses_a", startedAt: 1 }]);
+
+    expect(flattenRows(s)).toEqual([
+      { kind: "step", stepIndex: 0 },
+      { kind: "step", stepIndex: 1 },
+      { kind: "background", stepIndex: 1, sessionID: "ses_a" },
+    ]);
+    expect(s.steps[0]?.restartReason).toBe("manual");
+    expect(s.steps[1]?.restartReason).toBeUndefined();
   });
 });
 

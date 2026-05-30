@@ -2,9 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 
-import type { Step } from "./runner.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, type Step } from "./runner.ts";
 
 export const CONFIG_FILE_NAME = "looper.yaml";
+export const DOT_CONFIG_FILE_NAME = ".looper.yaml";
 
 type RawStep = {
   name?: unknown;
@@ -16,11 +17,13 @@ type RawStep = {
   suffix?: unknown;
   args?: unknown;
   title?: unknown;
+  timeout?: unknown;
 };
 
 type RawConfig = {
   opencode?: unknown;
   attachUrl?: unknown;
+  timeout?: unknown;
   steps?: unknown;
 };
 
@@ -63,6 +66,22 @@ function titleValue(value: unknown, label: string): boolean | number | "branch" 
   throw new Error(`${label} must be true, false, "branch", or an integer >= 1 (seconds)`);
 }
 
+function timeoutValue(value: unknown, label: string): number {
+  if (value === undefined || value === null) return DEFAULT_STEP_TIMEOUT_MS;
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 1) throw new Error(`${label} must be an integer >= 1 (minutes) or a duration string like "60m", "1h", or "30s"`);
+    return value * 60 * 1000;
+  }
+  if (typeof value !== "string") throw new Error(`${label} must be an integer >= 1 (minutes) or a duration string like "60m", "1h", or "30s"`);
+  const match = value.trim().match(/^(\d+)(s|m|h)$/i);
+  if (!match) throw new Error(`${label} must be an integer >= 1 (minutes) or a duration string like "60m", "1h", or "30s"`);
+  const amount = Number.parseInt(match[1]!, 10);
+  if (!Number.isFinite(amount) || amount < 1) throw new Error(`${label} must be an integer >= 1 (minutes) or a duration string like "60m", "1h", or "30s"`);
+  const unit = match[2]!.toLowerCase();
+  const multiplier = unit === "s" ? 1000 : unit === "m" ? 60 * 1000 : 60 * 60 * 1000;
+  return amount * multiplier;
+}
+
 function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   const parsed = stringValue(value, label);
@@ -80,6 +99,8 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
     throw new Error(`${CONFIG_FILE_NAME} must define a mapping at steps:`);
   }
 
+  const rootTimeoutMs = timeoutValue(rawConfig.timeout, "timeout");
+
   return Object.entries(rawConfig.steps as Record<string, RawStep>).map(([key, rawStep]) => {
     if (!rawStep || typeof rawStep !== "object" || Array.isArray(rawStep)) {
       throw new Error(`steps.${key} must be a mapping`);
@@ -94,6 +115,7 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
       prefix: stringValue(rawStep.prefix, `steps.${key}.prefix`) || undefined,
       suffix: stringValue(rawStep.suffix, `steps.${key}.suffix`) || undefined,
       args: argsValue(rawStep.args, `steps.${key}.args`),
+      timeoutMs: rawStep.timeout === undefined || rawStep.timeout === null ? rootTimeoutMs : timeoutValue(rawStep.timeout, `steps.${key}.timeout`),
       title: titleValue(rawStep.title, `steps.${key}.title`),
     };
   });
@@ -104,9 +126,11 @@ export function configFilePath(configDir: string): string {
 }
 
 function loadRawConfig(configDir: string): RawConfig {
-  const configPath = configFilePath(configDir);
+  const primaryPath = configFilePath(configDir);
+  const dotPath = join(configDir, DOT_CONFIG_FILE_NAME);
+  const configPath = existsSync(primaryPath) ? primaryPath : dotPath;
   if (!existsSync(configPath)) {
-    throw new Error(`missing ${CONFIG_FILE_NAME} at ${configPath}; create it with at least one step`);
+    throw new Error(`missing ${CONFIG_FILE_NAME} at ${primaryPath} or ${DOT_CONFIG_FILE_NAME} at ${dotPath}; create it with at least one step`);
   }
 
   const rawConfig = YAML.parse(readFileSync(configPath, "utf8")) as RawConfig | null;

@@ -4,6 +4,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { loadSteps } from "./config.ts";
 import {
+  DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
   reattachOpenCodeStep,
   runOpenCodeStep,
@@ -12,7 +13,7 @@ import {
   type StepResult,
   type StepRunResult,
 } from "./runner.ts";
-import { notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep } from "./state.ts";
+import { insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
 import { extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
 
@@ -47,14 +48,20 @@ export function promptText(step: Step): string {
 }
 
 function syncStepsUiState(state: LoopState, cfgSteps: Step[], nextIndex: number, completed: LoopStep[]): void {
-  state.steps = cfgSteps.map((step, j) => {
-    if (j < nextIndex) {
-      const prev = completed[j];
-      if (prev && prev.name === step.name) return { ...prev };
-      return { name: step.name, status: "skipped" as const, finishedAt: Date.now(), outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] };
+  const rows: LoopStep[] = completed.map((step) => ({ ...step }));
+  if (rows.length === 0 && nextIndex > 0) {
+    for (let j = 0; j < nextIndex; j += 1) {
+      const step = cfgSteps[j];
+      if (!step) continue;
+      rows.push({ name: step.name, status: "skipped" as const, finishedAt: Date.now(), outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] });
     }
-    return { name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] };
-  });
+  }
+  for (let j = nextIndex; j < cfgSteps.length; j += 1) {
+    const step = cfgSteps[j];
+    if (!step) continue;
+    rows.push({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] });
+  }
+  state.steps = rows;
   notify();
 }
 
@@ -124,6 +131,11 @@ function backgroundContinuationPrompt(): string {
 
 function failureResumePrompt(): string {
   return "The previous attempt at this step failed before reporting completion. Resume from where you left off, recover from whatever error occurred, and finish the step. If the same error recurs, switch to a different approach.\n";
+}
+
+function cleanRestartPrompt(step: Step, reason: StepRestartReason): string {
+  const label = reason === "timeout" ? "timed out" : "was manually restarted";
+  return `Note: This is a clean restart in a new session because the previous attempt ${label}. The previous attempt may have been interrupted after making partial progress, so inspect the existing workspace/state and continue from any useful work rather than blindly starting over.\n\n${promptText(step)}`;
 }
 
 /**
@@ -353,16 +365,17 @@ export async function runIteration({
     if (index >= steps.length) break;
 
     syncStepsUiState(state, steps, index, completed);
+    let currentStepIndex = state.steps.length - (steps.length - index);
 
     if (stopFileExists() || state.quitting) {
-      markRemainingSkipped(state, index);
+      markRemainingSkipped(state, currentStepIndex);
       break;
     }
 
     await waitWhilePaused(state);
 
     if (stopFileExists() || state.quitting) {
-      markRemainingSkipped(state, index);
+      markRemainingSkipped(state, currentStepIndex);
       break;
     }
 
@@ -371,7 +384,7 @@ export async function runIteration({
     const step = steps[index]!;
 
     const titleConfig = step.title;
-    const stepIndexForTitle = index;
+    let stepIndexForTitle = currentStepIndex;
     const titleLog = (line: string) => {
       pushAgentLine(state, line);
       pushStepOutputLine(state, stepIndexForTitle, line);
@@ -474,6 +487,8 @@ export async function runIteration({
     let backgroundResumeCount = 0;
     let lastErrorMessage: string | undefined;
     let lastPromptMessageID: string | undefined;
+    const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+    let stepStartTime = Date.now();
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
@@ -481,12 +496,13 @@ export async function runIteration({
       } else {
         result = await runOpenCodeStep({
           state,
-          stepIndex: index,
+          stepIndex: currentStepIndex,
           prompt: resumePrompt ?? promptText(step),
           client,
           repoDir,
           step,
           sessionID: resumeSessionID,
+          timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
@@ -495,8 +511,10 @@ export async function runIteration({
         });
       }
       resumePrompt = undefined;
+      const requestedRestartReason = state.restartReason;
       state.skipRequested = false;
       state.restartRequested = false;
+      state.restartReason = undefined;
       notify();
 
       if (result.messageID !== undefined) lastPromptMessageID = result.messageID;
@@ -514,8 +532,8 @@ export async function runIteration({
           lastErrorMessage = lastErrorMessage ?? suppressReason;
           const line = `[looper] background task resume limit exceeded for session ${waitSessionID}`;
           pushAgentLine(state, line);
-          pushStepOutputLine(state, index, line);
-          const activeStep = state.steps[index];
+          pushStepOutputLine(state, currentStepIndex, line);
+          const activeStep = state.steps[currentStepIndex];
           if (activeStep) {
             activeStep.status = "failed";
             activeStep.statusMessage = undefined;
@@ -526,21 +544,49 @@ export async function runIteration({
           break;
         }
 
-        const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: index, repoDir, sessionID: waitSessionID });
+        const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
+        const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !state.quitting && !stopFileExists()) {
           resumeSessionID = waitSessionID;
           resumePrompt = backgroundContinuationPrompt();
           pushAgentLine(state, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
-          pushStepOutputLine(state, index, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
+          pushStepOutputLine(state, currentStepIndex, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
           notify();
           continue;
         }
 
         if (waitResult === "restart") {
-          resumeSessionID = state.steps[index]?.sessionID;
+          const reason: StepRestartReason = state.restartReason ?? "manual";
+          const previousStepIndex = currentStepIndex;
+          currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
+          stepIndexForTitle = currentStepIndex;
+          stepStartTime = Date.now();
+          resumeSessionID = undefined;
+          resumePrompt = cleanRestartPrompt(step, reason);
           pushAgentLine(state, `[looper] restart requested during background wait for session ${waitSessionID}`);
-          pushStepOutputLine(state, index, `[looper] restart requested during background wait for session ${waitSessionID}`);
-          const activeStep = state.steps[index];
+          pushStepOutputLine(state, previousStepIndex, `[looper] restart requested during background wait for session ${waitSessionID}`);
+          state.restartRequested = false;
+          state.restartReason = undefined;
+          const activeStep = state.steps[currentStepIndex];
+          if (activeStep) {
+            activeStep.status = "pending";
+            activeStep.statusMessage = undefined;
+            activeStep.finishedAt = undefined;
+          }
+          notify();
+          continue;
+        }
+
+        if (waitResult === "timeout") {
+          const previousStepIndex = currentStepIndex;
+          currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
+          stepIndexForTitle = currentStepIndex;
+          stepStartTime = Date.now();
+          resumeSessionID = undefined;
+          resumePrompt = cleanRestartPrompt(step, "timeout");
+          pushAgentLine(state, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
+          pushStepOutputLine(state, previousStepIndex, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
+          const activeStep = state.steps[currentStepIndex];
           if (activeStep) {
             activeStep.status = "pending";
             activeStep.statusMessage = undefined;
@@ -557,7 +603,7 @@ export async function runIteration({
           suppressReason = `background task wait ended with ${waitResult} for session ${waitSessionID}`;
           lastErrorMessage = lastErrorMessage ?? suppressReason;
         }
-        const activeStep = state.steps[index];
+        const activeStep = state.steps[currentStepIndex];
         if (activeStep) {
           activeStep.status = result.status === "skipped" ? "skipped" : "failed";
           activeStep.statusMessage = undefined;
@@ -565,12 +611,17 @@ export async function runIteration({
         }
         state.activeStepIndex = null;
         pushAgentLine(state, `[looper] background task wait ended with ${waitResult} for session ${waitSessionID}`);
-        pushStepOutputLine(state, index, `[looper] background task wait ended with ${waitResult} for session ${waitSessionID}`);
+        pushStepOutputLine(state, currentStepIndex, `[looper] background task wait ended with ${waitResult} for session ${waitSessionID}`);
         notify();
       }
 
       if (result.status === "restart" && !state.quitting && !stopFileExists()) {
-        resumeSessionID = state.steps[index]?.sessionID;
+        const reason = result.restartReason ?? requestedRestartReason ?? "manual";
+        currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
+        stepIndexForTitle = currentStepIndex;
+        stepStartTime = Date.now();
+        resumeSessionID = undefined;
+        resumePrompt = cleanRestartPrompt(step, reason);
         continue;
       }
 
@@ -585,12 +636,12 @@ export async function runIteration({
         if (skipReason !== undefined) {
           const line = `[looper] ${step.name} failed: ${errReason} \u2014 not retrying: ${skipReason}`;
           pushAgentLine(state, line);
-          pushStepOutputLine(state, index, line);
+          pushStepOutputLine(state, currentStepIndex, line);
           notify();
           break;
         }
 
-        const priorSessionForCheck = state.steps[index]?.sessionID;
+        const priorSessionForCheck = state.steps[currentStepIndex]?.sessionID;
         if (
           priorSessionForCheck !== undefined &&
           lastPromptMessageID !== undefined &&
@@ -614,10 +665,10 @@ export async function runIteration({
                 ? "assistant message completed server-side despite client error"
                 : "assistant message still in-progress";
             pushAgentLine(state, `[looper] ${step.name} reattaching (${reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
-            pushStepOutputLine(state, index, `[looper] ${step.name} reattaching (${reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
+            pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pendingResult = await reattachOpenCodeStep({
               state,
-              stepIndex: index,
+              stepIndex: currentStepIndex,
               client,
               repoDir,
               step,
@@ -632,8 +683,8 @@ export async function runIteration({
         }
 
         failureRetryCount += 1;
-        const priorSessionID = state.steps[index]?.sessionID;
-        const hasOutput = (state.steps[index]?.outputLines.length ?? 0) > 0;
+        const priorSessionID = state.steps[currentStepIndex]?.sessionID;
+        const hasOutput = (state.steps[currentStepIndex]?.outputLines.length ?? 0) > 0;
         const delayMs = failureRetryDelayMs(failureRetryCount);
         const delaySeconds = Math.round(delayMs / 1000);
         const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
@@ -650,8 +701,8 @@ export async function runIteration({
         }
         const waitingLine = `[looper] ${step.name} failed: ${errReason} \u2014 waiting ${delaySeconds}s before retry (${attemptTag}); ${targetSuffix}`;
         pushAgentLine(state, waitingLine);
-        pushStepOutputLine(state, index, waitingLine);
-        const activeStep = state.steps[index];
+        pushStepOutputLine(state, currentStepIndex, waitingLine);
+        const activeStep = state.steps[currentStepIndex];
         if (activeStep) {
           activeStep.status = "pending";
           activeStep.statusMessage = `retry in ${delaySeconds}s`;
@@ -662,7 +713,7 @@ export async function runIteration({
         if (!(state.quitting || stopFileExists() || state.skipRequested || state.restartRequested)) {
           const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
           pushAgentLine(state, retryingLine);
-          pushStepOutputLine(state, index, retryingLine);
+          pushStepOutputLine(state, currentStepIndex, retryingLine);
           if (activeStep) activeStep.statusMessage = undefined;
           notify();
         }
@@ -676,7 +727,7 @@ export async function runIteration({
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
       if (state.quitting || stopFileExists()) {
-        markRemainingSkipped(state, index);
+        markRemainingSkipped(state, currentStepIndex);
         break;
       }
       const reason = lastErrorMessage ?? "unknown error (no message reported)";
@@ -706,8 +757,7 @@ export async function runIteration({
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status });
 
-    const snapshot = state.steps[index];
-    if (snapshot) completed[index] = { ...snapshot };
+    completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
 
     index += 1;
   }

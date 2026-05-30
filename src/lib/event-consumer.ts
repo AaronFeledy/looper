@@ -5,6 +5,8 @@ export type EventConsumerCallbacks = {
   pushLines?: (lines: string[]) => void;
   onSessionError?: (message: string) => void;
   onFirstAssistantContent?: () => void;
+  /** Fires for every event off the stream (before any session filter); a liveness signal for stall detection. */
+  onActivity?: () => void;
 };
 
 type TextPartState = {
@@ -197,11 +199,16 @@ function handlePartDelta(
   flushNewlines(state, push);
 }
 
-export async function consumeSessionEvents(
-  stream: AsyncIterable<Event>,
+export type SessionEventConsumer = {
+  consume: (stream: AsyncIterable<Event>) => Promise<void>;
+  backfill: (messages: { info: Message; parts: Part[] }[]) => void;
+  flush: () => void;
+};
+
+export function createSessionEventConsumer(
   sessionID: string,
   callbacks: EventConsumerCallbacks,
-): Promise<void> {
+): SessionEventConsumer {
   const parts = new Map<string, PartState>();
   const messageRoles = new Map<string, "user" | "assistant">();
   const partMessages = new Map<string, string>();
@@ -212,6 +219,7 @@ export async function consumeSessionEvents(
     for (const line of lines) push(line);
   });
   const onFirstAssistantContent = callbacks.onFirstAssistantContent;
+  const onActivity = callbacks.onActivity;
   let firstContentFired = false;
   const fireFirstContent = (): void => {
     if (firstContentFired || onFirstAssistantContent === undefined) return;
@@ -245,10 +253,11 @@ export async function consumeSessionEvents(
     pendingPartDeltas.delete(messageID);
   };
 
-  for await (const event of stream) {
+  const handleEvent = (event: Event): void => {
+    onActivity?.();
     const evSid = eventSessionID(event);
     if (debug) push(`[debug] event=${event.type} sid=${evSid ?? "-"}`);
-    if (evSid !== undefined && evSid !== sessionID) continue;
+    if (evSid !== undefined && evSid !== sessionID) return;
 
     switch (event.type) {
       case "message.updated": {
@@ -305,14 +314,48 @@ export async function consumeSessionEvents(
       default:
         break;
     }
-  }
+  };
 
-  for (const [partID, state] of parts) {
-    if (state.kind !== "text" && state.kind !== "reasoning") continue;
-    const messageID = partMessages.get(partID);
-    if (messageID && roleForPart(messageID) === "user") continue;
-    flushRemaining(state, push);
-  }
+  return {
+    consume: async (stream: AsyncIterable<Event>): Promise<void> => {
+      for await (const event of stream) handleEvent(event);
+    },
+    backfill: (messages: { info: Message; parts: Part[] }[]): void => {
+      onActivity?.();
+      for (const entry of messages) {
+        const info = entry.info;
+        messageRoles.set(info.id, info.role);
+        if (info.role !== "assistant") {
+          dropPendingUserParts(info.id);
+          continue;
+        }
+        for (const part of entry.parts) {
+          partMessages.set(part.id, part.messageID);
+          handlePartUpdate(parts, part, push, pushLines);
+          if (part.type === "text") fireFirstContent();
+        }
+        replayPendingAssistantParts(info.id);
+      }
+    },
+    flush: (): void => {
+      for (const [partID, state] of parts) {
+        if (state.kind !== "text" && state.kind !== "reasoning") continue;
+        const messageID = partMessages.get(partID);
+        if (messageID && roleForPart(messageID) === "user") continue;
+        flushRemaining(state, push);
+      }
+    },
+  };
+}
+
+export async function consumeSessionEvents(
+  stream: AsyncIterable<Event>,
+  sessionID: string,
+  callbacks: EventConsumerCallbacks,
+): Promise<void> {
+  const consumer = createSessionEventConsumer(sessionID, callbacks);
+  await consumer.consume(stream);
+  consumer.flush();
 }
 
 export function renderSessionMessages(messages: { info: Message; parts: Part[] }[]): string[] {
