@@ -8,6 +8,35 @@ export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "
 
 export type ScrollIntent = { direction: ScrollDirection; stepIndex: number; seq: number };
 
+export type GithubCiOverall = "none" | "pending" | "passing" | "failing";
+
+export type GithubPr = {
+  number: number;
+  title: string;
+  /** Upper-cased PR state: OPEN | MERGED | CLOSED. */
+  state: string;
+  isDraft: boolean;
+  url: string;
+  ciOverall: GithubCiOverall;
+  ciPassing: number;
+  ciFailing: number;
+  ciPending: number;
+  ciTotal: number;
+};
+
+/**
+ * GitHub PR status for the current branch.
+ * - `loading`: detection succeeded but the first query hasn't returned yet
+ * - `no-pr`: GitHub repo but no PR is associated with the current branch
+ * - `error`: `gh` failed (auth/network); surfaced as a muted hint
+ * - `pr`: an associated PR with computed CI status
+ */
+export type GithubStatus =
+  | { kind: "loading" }
+  | { kind: "no-pr" }
+  | { kind: "error"; message: string }
+  | { kind: "pr"; pr: GithubPr };
+
 /**
  * A live child opencode session spawned by a step's parent session (e.g. via
  * the task tool). Rendered as an indented sub-row beneath its parent step.
@@ -70,6 +99,7 @@ export type LoopState = {
   agentLineTimes: number[];
   stepOutputLines: string[][];
   scrollIntent: ScrollIntent | null;
+  github: GithubStatus;
 };
 
 export type FlatRow =
@@ -173,7 +203,14 @@ export function createLoopState({
     agentLineTimes: [],
     stepOutputLines: stepNames.map(() => []),
     scrollIntent: null,
+    github: { kind: "loading" },
   };
+}
+
+export function setGithubStatus(state: LoopState, status: GithubStatus): void {
+  if (JSON.stringify(state.github) === JSON.stringify(status)) return;
+  state.github = status;
+  notifyStateChange();
 }
 
 let scrollIntentSeq = 0;
