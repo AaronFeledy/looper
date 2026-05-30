@@ -4,7 +4,7 @@ import type { BackgroundAgent, FlatRow, LoopState, LoopStep, StepStatus } from "
 import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const LIST_WIDTH = 28;
+export const LIST_WIDTH = 28;
 const LIST_BORDER = 2;
 const LIST_PADDING_X = 1;
 const ROW_WIDTH = LIST_WIDTH - LIST_BORDER - LIST_PADDING_X * 2;
@@ -142,7 +142,8 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
   const list = new BoxRenderable(renderer, {
     id: "loop-step-list",
     width: LIST_WIDTH,
-    height: "100%",
+    flexGrow: 1,
+    minHeight: 0,
     border: true,
     borderStyle: "rounded",
     borderColor: "#45475a",
