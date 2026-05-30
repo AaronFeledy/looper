@@ -90,6 +90,16 @@ const EVENT_CONSUMER_CLOSE_TIMEOUT_MS = 2_000;
 const EVENT_WATCHDOG_POLL_MS = positiveIntegerEnv("LOOPER_EVENT_WATCHDOG_POLL_MS", 15_000);
 const EVENT_STALL_THRESHOLD_MS = positiveIntegerEnv("LOOPER_EVENT_STALL_MS", 45_000);
 const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS", 1_000);
+/**
+ * How long `stopServerSession` waits for opencode to confirm (via
+ * `session.status`) that an aborted session is no longer pending before it
+ * gives up and proceeds anyway. Aborting the client request never stops
+ * server-side generation — only `session.abort` does, and that is async on
+ * the server — so callers about to create a NEW session for a step must
+ * confirm the old one actually stopped to avoid two concurrent generations.
+ */
+const STOP_SESSION_CONFIRM_TIMEOUT_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", 10_000);
+const STOP_SESSION_CONFIRM_POLL_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_POLL_MS", 250);
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -301,10 +311,116 @@ function isPendingSessionStatus(status: SessionStatus | undefined): boolean {
   return status?.type === "busy" || status?.type === "retry";
 }
 
-async function sessionStillPending(client: OpencodeClient, repoDir: string, sessionID: string): Promise<boolean> {
+/**
+ * Legacy boolean pending check. Treats a `session.status` error as "not
+ * pending" so the continuation-record waiters fall through rather than spin.
+ * Orchestration session-lifecycle boundaries must use {@link sessionPendingState}
+ * instead, which preserves the "unknown" case (a status error must NOT be read
+ * as "stopped" — doing so would re-open the resume-into-busy-session bug
+ * under transient status flakiness).
+ */
+export async function sessionStillPending(client: OpencodeClient, repoDir: string, sessionID: string): Promise<boolean> {
   const result = await client.session.status({ directory: repoDir });
   if (result.error) return false;
   return isPendingSessionStatus(result.data?.[sessionID]);
+}
+
+export type SessionPendingState = "pending" | "idle" | "unknown";
+
+/**
+ * Tri-state pending check for session-lifecycle decisions. Distinguishes a
+ * confirmed-idle session from one whose status we could not read. Callers that
+ * are about to resume or create a session must treat `"unknown"` like
+ * `"pending"` (do not resume / do not create a fresh session yet).
+ */
+export async function sessionPendingState(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+): Promise<SessionPendingState> {
+  try {
+    const result = await client.session.status({ directory: repoDir });
+    if (result.error) return "unknown";
+    return isPendingSessionStatus(result.data?.[sessionID]) ? "pending" : "idle";
+  } catch {
+    return "unknown";
+  }
+}
+
+const DEADLINE_EXCEEDED = Symbol("deadline-exceeded");
+
+/** Race a promise against a deadline. Returns the sentinel if it does not settle in time. */
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typeof DEADLINE_EXCEEDED> {
+  if (ms <= 0) return DEADLINE_EXCEEDED;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof DEADLINE_EXCEEDED>((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE_EXCEEDED), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Tell opencode to abort `sessionID` and wait until the server confirms it is
+ * no longer pending (or the timeout elapses). Returns `true` only when the
+ * session is CONFIRMED stopped; `false` if it was still pending/unknown at the
+ * deadline (or the abort/status calls hung).
+ *
+ * This is the safe precondition for creating a NEW session for a step, or for
+ * resuming one: a client-side request abort (AbortController) never stops
+ * opencode's server-side generation — only `session.abort` does, and it is
+ * async server-side. Without confirmation, a retry/restart can leave the prior
+ * session generating while a fresh one starts (two concurrent runs), and
+ * resuming a still-busy session silently drops the resume prompt (opencode's
+ * per-session mutex persists the message but ignores its generation).
+ *
+ * The ENTIRE operation — the abort call and every status poll — is bounded
+ * by `timeoutMs` so a hung HTTP call can never deadlock the loop. Polls
+ * `session.status` only (never `session.messages`) so it is cheap and never
+ * perturbs message history. A `false` return means "could not confirm
+ * stopped"; callers should treat that as a retryable condition, not as
+ * permission to assume the session is gone.
+ */
+export async function stopServerSession({
+  client,
+  repoDir,
+  sessionID,
+  timeoutMs = STOP_SESSION_CONFIRM_TIMEOUT_MS,
+  log,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  timeoutMs?: number;
+  log?: (line: string) => void;
+}): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const remaining = (): number => deadline - Date.now();
+
+  try {
+    const aborted = await withDeadline(client.session.abort({ sessionID, directory: repoDir }), remaining());
+    if (aborted === DEADLINE_EXCEEDED) {
+      log?.(`[looper] session.abort for ${sessionID} did not return within ${timeoutMs}ms; could not confirm stop`);
+      return false;
+    }
+    if (aborted?.error) log?.(`[looper] session.abort failed for ${sessionID}: ${formatRequestError(aborted.error)}`);
+  } catch (error) {
+    log?.(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
+  }
+
+  while (true) {
+    const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
+    const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
+    if (state === "idle") return true;
+    if (remaining() <= 0) {
+      log?.(`[looper] session ${sessionID} still ${state} ${timeoutMs}ms after abort; could not confirm stop`);
+      return false;
+    }
+    await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, Math.max(1, remaining())));
+  }
 }
 
 async function waitForActiveLoopContinuationRecord({
