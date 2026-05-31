@@ -94,7 +94,7 @@ Mark one step per iteration (typically your build step) with `title` to overwrit
 
 The description is reused for every subsequent step in the same iteration (e.g. `Review: <description>`), does not persist across iterations, and is not affected by skipped or failed steps. Set `title` on at most one step per iteration &mdash; later entries overwrite the description.
 
-Title generation runs against opencode's default agent + model unless you set `opencode.title.{agent,model,variant}` in `looper.yaml`. Any subset of those three may be set; unset fields fall through to opencode's default. The title prompt is short and the work-log input is bounded, so a fast/cheap model is recommended. Looper logs which agent + model + variant actually ran each title call (`[looper] title gen used agent=… model=…/… cost=…`) so a stale default is visible without enabling debug events.
+Set `opencode.title.{agent,model,variant}` in `looper.yaml` to control the title-generation session; any subset may be set. When `model` is unset, looper auto-picks a cheap model (opencode's `small_model`, else the cheapest non-reasoning model for the step's provider). Looper logs the model that ran each call (`[looper] title gen used agent=… model=…/… cost=…`).
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
