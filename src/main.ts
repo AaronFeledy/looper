@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
-import { CONFIG_FILE_NAME, configFilePath, DOT_CONFIG_FILE_NAME, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { detectGithubRepo } from "./lib/github.ts";
 import { type GithubWatcher, watchGithubPr } from "./lib/github-watcher.ts";
@@ -38,11 +38,25 @@ import { bindKeys } from "./tui/keys.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
-const configDir = process.env.LOOPER_CONFIG_DIR ? resolve(process.env.LOOPER_CONFIG_DIR) : join(repoDir, ".local", "looper");
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
 const opencodeBin = process.env.OPENCODE_BIN ?? "opencode";
 
-initStatePaths({ configDir });
+// Auto-detected config-dir candidates, in resolution order. The first that
+// already holds a config file wins; otherwise we default to the first (.looper).
+const CONFIG_DIR_CANDIDATES = [
+  join(repoDir, ".looper"),
+  join(repoDir, ".local", "looper"),
+  join(repoDir, ".local", ".looper"),
+];
+
+function resolveConfigDir(override: string | undefined): string {
+  if (override !== undefined) return resolve(override);
+  if (process.env.LOOPER_CONFIG_DIR) return resolve(process.env.LOOPER_CONFIG_DIR);
+  const existing = CONFIG_DIR_CANDIDATES.find((candidate) => findConfigFile(candidate) !== undefined);
+  return existing ?? CONFIG_DIR_CANDIDATES[0]!;
+}
+
+let configDir: string;
 
 function ensureConfigDir(): void {
   if (!existsSync(configDir)) {
@@ -51,11 +65,8 @@ function ensureConfigDir(): void {
 }
 
 function ensureConfigExists(): void {
-  const path = configFilePath(configDir);
-  if (existsSync(path)) return;
-  const dotPath = join(configDir, DOT_CONFIG_FILE_NAME);
-  if (existsSync(dotPath)) return;
-  process.stderr.write(`error: missing ${CONFIG_FILE_NAME} at ${path} (or ${DOT_CONFIG_FILE_NAME} at ${dotPath})\n`);
+  if (findConfigFile(configDir) !== undefined) return;
+  process.stderr.write(`error: missing ${CONFIG_FILE_NAMES[0]} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")})\n`);
   process.stderr.write(`Create it with at least one step. See https://github.com/ for examples.\n`);
   process.exit(2);
 }
@@ -392,6 +403,8 @@ async function main(): Promise<number> {
     throw error;
   }
 
+  configDir = resolveConfigDir(options.configDir);
+  initStatePaths({ configDir });
   ensureConfigDir();
   ensureConfigExists();
 

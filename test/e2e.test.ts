@@ -167,7 +167,9 @@ test("bin wrapper resolves through symlinks and prints help", async () => {
   const exitCode = await proc.exited;
   expect(exitCode).toBe(0);
   expect(out).toContain("Looper - iterative OpenCode step runner");
-  expect(out).toContain(".local/looper/looper.yaml");
+  expect(out).toContain("--config-dir");
+  expect(out).toContain(".looper");
+  expect(out).toContain("looper.yml");
 });
 
 test("fails fast with exit 2 when no config is present, and auto-creates the config dir", async () => {
@@ -183,8 +185,27 @@ test("fails fast with exit 2 when no config is present, and auto-creates the con
   const err = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
   expect(exitCode).toBe(2);
-  expect(err).toContain("missing looper.yaml");
-  expect(existsSync(join(emptyDir, ".local", "looper"))).toBe(true);
+  expect(err).toContain("missing looper.yml");
+  expect(existsSync(join(emptyDir, ".looper"))).toBe(true);
+});
+
+test("--config-dir overrides config-dir detection and is auto-created", async () => {
+  const repoDir = join(SCRATCH, "config-dir-flag");
+  const customDir = join(repoDir, "custom-looper");
+  mkdirSync(repoDir, { recursive: true });
+  const proc = spawn({
+    cmd: ["bun", MAIN_ENTRY, "--config-dir", customDir, "--start"],
+    cwd: repoDir,
+    env: { ...process.env, NO_COLOR: "1" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const err = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  expect(exitCode).toBe(2);
+  expect(err).toContain(customDir);
+  expect(existsSync(customDir)).toBe(true);
+  expect(existsSync(join(repoDir, ".looper"))).toBe(false);
 });
 
 test("loads an existing OpenCode server URL from looper.yaml", () => {
@@ -274,6 +295,14 @@ test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
   );
   expect(resolveAttachUrl(parseArgs(["--attach"]), undefined, "http://default.local")).toBe("http://default.local");
   expect(resolveAttachUrl(parseArgs([]), undefined, "http://default.local")).toBeUndefined();
+});
+
+test("parses --config-dir in both = and space forms", () => {
+  expect(parseArgs([]).configDir).toBeUndefined();
+  expect(parseArgs(["--config-dir=/tmp/looper-cfg"]).configDir).toBe("/tmp/looper-cfg");
+  expect(parseArgs(["--config-dir", "/tmp/looper-cfg"]).configDir).toBe("/tmp/looper-cfg");
+  expect(() => parseArgs(["--config-dir"])).toThrow(/--config-dir requires a path/);
+  expect(() => parseArgs(["--config-dir="])).toThrow(/config dir cannot be empty/);
 });
 
 test("startOrAttachServer returns an attached handle without spawning opencode", async () => {
