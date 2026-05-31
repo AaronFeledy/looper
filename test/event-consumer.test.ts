@@ -18,6 +18,22 @@ function assistantMessageUpdated(): Event {
   } as unknown as Event;
 }
 
+function assistantMessageErrored(message: string): Event {
+  return {
+    type: "message.updated",
+    properties: { info: { id: MID, role: "assistant", error: { name: "APIError", data: { message } } } },
+  } as unknown as Event;
+}
+
+function assistantMessageAborted(): Event {
+  return {
+    type: "message.updated",
+    properties: {
+      info: { id: MID, role: "assistant", error: { name: "MessageAbortedError", data: { message: "aborted" } } },
+    },
+  } as unknown as Event;
+}
+
 function partDelta(field: string, delta: string): Event {
   return {
     type: "message.part.delta",
@@ -113,5 +129,38 @@ describe("onFirstAssistantContent", () => {
       onFirstAssistantContent: () => { fired += 1; },
     });
     expect(fired).toBe(0);
+  });
+});
+
+describe("assistant message errors", () => {
+  test("prints assistant info.error from message.updated", async () => {
+    const lines: string[] = [];
+    await consumeSessionEvents(makeStream([assistantMessageErrored("provider rejected request")]), SID, {
+      pushLine: (line) => lines.push(line),
+    });
+
+    expect(lines.some((line) => line.includes("assistant error") && line.includes("APIError") && line.includes("provider rejected request"))).toBe(true);
+  });
+
+  test("fires onSessionError for a genuine assistant error", async () => {
+    const errors: string[] = [];
+    await consumeSessionEvents(makeStream([assistantMessageErrored("provider rejected request")]), SID, {
+      pushLine: () => {},
+      onSessionError: (message) => errors.push(message),
+    });
+
+    expect(errors).toEqual(["APIError: provider rejected request"]);
+  });
+
+  test("does not fire onSessionError or print a failure for an aborted assistant message", async () => {
+    const lines: string[] = [];
+    const errors: string[] = [];
+    await consumeSessionEvents(makeStream([assistantMessageAborted()]), SID, {
+      pushLine: (line) => lines.push(line),
+      onSessionError: (message) => errors.push(message),
+    });
+
+    expect(errors).toEqual([]);
+    expect(lines.some((line) => line.includes("assistant error"))).toBe(false);
   });
 });
