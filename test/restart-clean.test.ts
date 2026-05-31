@@ -97,6 +97,46 @@ function makeRestartClient({
   };
 }
 
+function makeFailureRetryClient({ repoDir }: { repoDir: string }): {
+  client: OpencodeClient;
+  createdSessionIDs: string[];
+  promptTexts: string[];
+} {
+  const sessionIDs = ["ses_failed", "ses_retry", "ses_done"];
+  const createdSessionIDs: string[] = [];
+  const promptTexts: string[] = [];
+
+  const client = {
+    session: {
+      create: async () => {
+        const id = sessionIDs[createdSessionIDs.length];
+        if (id === undefined) throw new Error("unexpected extra session.create");
+        createdSessionIDs.push(id);
+        return { data: { id } };
+      },
+      prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
+        promptTexts.push(params.parts.map((part) => part.text).join("\n"));
+        if (params.sessionID === "ses_failed") throw new Error("provider rejected request");
+        writeIdleContinuationRecord(repoDir, params.sessionID);
+        return { data: {} };
+      },
+      status: async () => ({ data: { ses_failed: { type: "idle" }, ses_retry: { type: "idle" }, ses_done: { type: "idle" } } }),
+      messages: async () => ({ data: [] }),
+      children: async () => ({ data: [] }),
+      abort: async () => ({ data: {} }),
+    },
+    event: {
+      subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
+        stream: (async function* (): AsyncGenerator<never> {
+          await waitForAbort(options.signal);
+        })(),
+      }),
+    },
+  } as unknown as OpencodeClient;
+
+  return { client, createdSessionIDs, promptTexts };
+}
+
 describe("clean manual and timeout restarts", () => {
   let scratch: string | undefined;
 
@@ -158,4 +198,21 @@ describe("clean manual and timeout restarts", () => {
     expect(state.steps.map((step) => step.restartReason)).toEqual(["timeout", undefined]);
     expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
   });
+
+  test("failure retry inserts a new step row and tells the new session where to tail context", async () => {
+    const { repoDir, configDir, state } = setup("1h");
+    const stub = makeFailureRetryClient({ repoDir });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    expect(stub.createdSessionIDs).toEqual(["ses_failed", "ses_retry"]);
+    expect(state.steps.map((step) => step.sessionID)).toEqual(["ses_failed", "ses_retry"]);
+    expect(state.steps.map((step) => step.status)).toEqual(["failed", "done"]);
+    expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
+    expect(stub.promptTexts[1]).toContain("This is a retry");
+    expect(stub.promptTexts[1]).toContain("ses_failed");
+    expect(stub.promptTexts[1]).toContain("tail");
+    expect(stub.promptTexts[1]).toContain("build from scratch\n");
+  }, 15000);
 });

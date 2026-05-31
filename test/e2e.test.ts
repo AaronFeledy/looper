@@ -301,21 +301,28 @@ test("runIteration retries session errors twice before surfacing terminal failur
   } as unknown as OpencodeClient;
   const state = createLoopState({ maxIterations: 1, stepNames: ["Sync"] });
 
-  await expect(runIteration({
-    state,
-    iteration: 1,
-    client,
-    repoDir: retryDir,
-    configDir,
-  })).rejects.toBeInstanceOf(StepFailureError);
+  let failed: unknown;
+  try {
+    await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: retryDir,
+      configDir,
+    });
+  } catch (error) {
+    failed = error;
+  }
+  expect(failed).toBeInstanceOf(StepFailureError);
 
   expect(promptCount).toBe(3);
-  expect(state.steps[0]?.status).toBe("failed");
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
+  expect(state.steps.map((step) => step.status)).toEqual(["failed", "failed", "failed"]);
+  const outputLines = state.steps.flatMap((step) => step.outputLines);
+  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
 }, 15000);
 
 test("reattach honors an older session-scoped active continuation record", async () => {

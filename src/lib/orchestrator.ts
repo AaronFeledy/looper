@@ -15,7 +15,7 @@ import {
   type StepResult,
   type StepRunResult,
 } from "./runner.ts";
-import { insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
+import { insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
 import { extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
 
@@ -137,8 +137,11 @@ function backgroundContinuationPrompt(): string {
   return "Background agents are done. Check their results, incorporate what you learned, and continue this step until it is complete. If more background tasks are needed, wait for them before reporting completion.\n";
 }
 
-function failureResumePrompt(): string {
-  return "The previous attempt at this step failed before reporting completion. Resume from where you left off, recover from whatever error occurred, and finish the step. If the same error recurs, switch to a different approach.\n";
+function failureRetryPrompt(step: Step, failedSessionID: string | undefined): string {
+  const sessionLine = failedSessionID === undefined
+    ? "The failed session id was not recorded."
+    : `The failed session id was ${failedSessionID}. tail or inspect that session for context on where the previous attempt left off.`;
+  return `Note: This is a retry in a new session because the previous attempt failed. ${sessionLine} Inspect the existing workspace/state and continue from any useful work rather than blindly starting over.\n\n${promptText(step)}`;
 }
 
 function cleanRestartPrompt(step: Step, reason: StepRestartReason): string {
@@ -719,44 +722,30 @@ export async function runIteration({
 
         failureRetryCount += 1;
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
-        const hasOutput = (state.steps[currentStepIndex]?.outputLines.length ?? 0) > 0;
         const delayMs = failureRetryDelayMs(failureRetryCount);
         const delaySeconds = Math.round(delayMs / 1000);
         const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
 
-        // Decide resume vs fresh. The reattach gate above already routed a
-        // still-pending session to reattach when it could; if we reach here
-        // with a session that is still pending (or whose status we can't read),
-        // resuming would hit opencode's per-session mutex and silently drop the
-        // resume prompt, so we abort it and start fresh instead. A plain fresh
-        // retry with an existing prior session also aborts it first so it can't
-        // keep generating alongside the new session.
-        let canResume = hasOutput && priorSessionID !== undefined;
-        if (canResume && priorSessionID !== undefined) {
+        if (priorSessionID !== undefined) {
           const pending = await sessionPendingState(client, repoDir, priorSessionID);
           if (pending !== "idle") {
-            const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting and restarting fresh instead of resuming`;
+            const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting before retrying in a fresh session`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
-            await stopPriorSession(priorSessionID, currentStepIndex);
-            canResume = false;
           }
-        } else if (priorSessionID !== undefined) {
           await stopPriorSession(priorSessionID, currentStepIndex);
         }
 
-        const targetSuffix = canResume ? `will resume session ${priorSessionID}` : `will restart with a fresh session`;
-        if (canResume) {
-          resumeSessionID = priorSessionID;
-          resumePrompt = failureResumePrompt();
-        } else {
-          resumeSessionID = undefined;
-          resumePrompt = undefined;
-        }
+        const targetSuffix = `will retry with a fresh session`;
+        const failedStepIndex = currentStepIndex;
+        currentStepIndex = insertFailureRetryAttempt(state, currentStepIndex);
+        stepIndexForTitle = currentStepIndex;
+        resumeSessionID = undefined;
+        resumePrompt = failureRetryPrompt(step, priorSessionID);
         const waitingLine = `[looper] ${step.name} failed: ${errReason} \u2014 waiting ${delaySeconds}s before retry (${attemptTag}); ${targetSuffix}`;
         pushAgentLine(state, waitingLine);
-        pushStepOutputLine(state, currentStepIndex, waitingLine);
+        pushStepOutputLine(state, failedStepIndex, waitingLine);
         const activeStep = state.steps[currentStepIndex];
         if (activeStep) {
           activeStep.status = "pending";
