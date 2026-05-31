@@ -28,7 +28,7 @@ This file is for non-obvious repo context only. Keep it short and current.
 
 ## Gotchas
 
-- Path semantics: `repoDir = process.cwd()`, `configDir = $PWD/.local/looper`. State files live in `configDir`. The CLI auto-creates `configDir` but fails with exit 2 if `looper.yaml` is missing.
+- Path semantics: `repoDir = process.cwd()`. `configDir` is resolved (in `main.ts`) from `--config-dir`, else `LOOPER_CONFIG_DIR`, else the first of `$PWD/.looper`, `$PWD/.local/looper`, `$PWD/.local/.looper` that already holds a config file, else defaults to `$PWD/.looper`. State files live in `configDir`. The CLI auto-creates `configDir` but fails with exit 2 if no config file is present. Config file resolution prefers `looper.yml`, then `looper.yaml`, `.looper.yml`, `.looper.yaml` (see `CONFIG_FILE_NAMES`/`findConfigFile` in `config.ts`).
 - `bin/looper` is a bash wrapper that resolves symlinks itself; symlink it from `~/.local/bin/looper` and it still finds `src/main.ts`.
 - `noUncheckedIndexedAccess: true` is on. `frames[i]` from a literal array still needs `!`.
 - Runner's `LOOPER_CONTINUATION_EXIT_GRACE_MS` window decides how long to wait after an opencode step ends for a background-task record. Don't shorten it in tests unless you mock the file.

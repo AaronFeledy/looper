@@ -1,6 +1,7 @@
 export type Options = {
   attach: boolean;
   attachUrl?: string;
+  configDir?: string;
   continueFromLastStep: boolean;
   maxIterations: number;
   start: boolean;
@@ -17,15 +18,17 @@ export class HelpRequested extends Error {
 
 export function usage() {
   return `Looper - iterative OpenCode step runner
-Usage: looper [--attach[=url]] [--start|--continue] [--wait[=minutes]|--wait minutes] [max_iterations]
+Usage: looper [--attach[=url]] [--config-dir=path|--config-dir path] [--start|--continue] [--wait[=minutes]|--wait minutes] [max_iterations]
 
 Flags:
-  --attach[=url]   Connect to an existing opencode server. Without a URL, uses looper.yaml, OPENCODE_ATTACH_URL, or the local default.
-  --start          Start immediately. Without this, the TUI waits for [g]o.
-  --continue       Start immediately from the last saved step checkpoint.
-  --wait[=minutes] Wait between iterations. Without minutes, wait for the previous iteration duration.
+  --attach[=url]      Connect to an existing opencode server. Without a URL, uses looper.yml, OPENCODE_ATTACH_URL, or the local default.
+  --config-dir=path   Use this directory for config, prompts, and state files. Overrides auto-detection and LOOPER_CONFIG_DIR.
+  --start             Start immediately. Without this, the TUI waits for [g]o.
+  --continue          Start immediately from the last saved step checkpoint.
+  --wait[=minutes]    Wait between iterations. Without minutes, wait for the previous iteration duration.
 
-Looper looks for its config and prompts under \$PWD/.local/looper/looper.yaml.
+Without --config-dir, looper looks for its config dir under \$PWD in this order: .looper, .local/looper, .local/.looper.
+If none contain a config file it defaults to .looper. The config file is looper.yml (falling back to looper.yaml, .looper.yml, .looper.yaml).
 State files (.looper-stop, .looper-resume-step.json, .last-branch) live in the same directory.
 A step can stop the loop by creating .looper-stop in that directory.
 `;
@@ -42,6 +45,7 @@ function parsePositiveInteger(value: string, label: string, { allowZero = false 
 export function parseArgs(argv: string[]): Options {
   let attach = false;
   let attachUrl: string | undefined;
+  let configDir: string | undefined;
   let continueFromLastStep = false;
   let maxIterations = 100;
   let start = false;
@@ -63,6 +67,20 @@ export function parseArgs(argv: string[]): Options {
       attach = true;
       attachUrl = arg.slice("--attach=".length);
       if (attachUrl.length === 0) throw new Error("attach URL cannot be empty");
+      continue;
+    }
+
+    if (arg === "--config-dir") {
+      const nextArg = argv[index + 1];
+      if (nextArg === undefined || nextArg.length === 0 || nextArg.startsWith("-")) throw new Error("--config-dir requires a path");
+      configDir = nextArg;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith("--config-dir=")) {
+      configDir = arg.slice("--config-dir=".length);
+      if (configDir.length === 0) throw new Error("config dir cannot be empty");
       continue;
     }
 
@@ -103,7 +121,7 @@ export function parseArgs(argv: string[]): Options {
     throw new Error(`unknown argument '${arg}'`);
   }
 
-  return { attach, attachUrl, continueFromLastStep, maxIterations, start, waitProvided, waitDuration };
+  return { attach, attachUrl, ...(configDir !== undefined ? { configDir } : {}), continueFromLastStep, maxIterations, start, waitProvided, waitDuration };
 }
 
 export function resolveAttachUrl(options: Options, configUrl: string | undefined, defaultAttachUrl: string): string | undefined {

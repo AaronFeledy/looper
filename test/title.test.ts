@@ -198,6 +198,26 @@ describe("config timeout parsing", () => {
     expect(loadSteps(dir)[0]?.timeoutMs).toBe(60 * 60 * 1000);
   });
 
+  test("loads looper.yml", () => {
+    writeFileSync(join(dir, "looper.yml"), "timeout: 2h\nsteps:\n  build:\n    prompt: build.md\n");
+    expect(loadSteps(dir)[0]?.timeoutMs).toBe(2 * 60 * 60 * 1000);
+  });
+
+  test("prefers looper.yml over looper.yaml", () => {
+    writeFileSync(join(dir, "looper.yml"), "timeout: 2h\nsteps:\n  build:\n    prompt: build.md\n");
+    writeFileSync(join(dir, "looper.yaml"), "timeout: 1h\nsteps:\n  build:\n    prompt: build.md\n");
+    expect(loadSteps(dir)[0]?.timeoutMs).toBe(2 * 60 * 60 * 1000);
+  });
+
+  test("falls back to looper.yaml when looper.yml is absent", () => {
+    writeFileSync(join(dir, "looper.yaml"), "timeout: 1h\nsteps:\n  build:\n    prompt: build.md\n");
+    expect(loadSteps(dir)[0]?.timeoutMs).toBe(60 * 60 * 1000);
+  });
+
+  test("reports missing config with the looked-for candidates", () => {
+    expect(() => loadSteps(dir)).toThrow(/missing looper\.yml.*looper\.yaml/s);
+  });
+
   test("applies root timeout and lets steps override it", () => {
     writeFileSync(
       join(dir, "looper.yaml"),

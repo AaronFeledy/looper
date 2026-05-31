@@ -4,8 +4,11 @@ import YAML from "yaml";
 
 import { DEFAULT_STEP_TIMEOUT_MS, type Step } from "./runner.ts";
 
-export const CONFIG_FILE_NAME = "looper.yaml";
-export const DOT_CONFIG_FILE_NAME = ".looper.yaml";
+// Config file name candidates, in resolution order. `.yml` is preferred over
+// `.yaml`; dot-prefixed variants are last-resort fallbacks.
+export const CONFIG_FILE_NAMES = ["looper.yml", "looper.yaml", ".looper.yml", ".looper.yaml"] as const;
+// Preferred / default file name, used in messages and when creating a config.
+export const CONFIG_FILE_NAME = CONFIG_FILE_NAMES[0];
 
 type RawStep = {
   name?: unknown;
@@ -137,16 +140,25 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
   });
 }
 
+/** Absolute paths of every candidate config file in `configDir`, in resolution order. */
+export function configCandidatePaths(configDir: string): string[] {
+  return CONFIG_FILE_NAMES.map((name) => join(configDir, name));
+}
+
+/** First existing config file in `configDir`, or undefined if none exist. */
+export function findConfigFile(configDir: string): string | undefined {
+  return configCandidatePaths(configDir).find((candidate) => existsSync(candidate));
+}
+
+/** Resolved existing config path, or the default (preferred) path when none exist. */
 export function configFilePath(configDir: string): string {
-  return join(configDir, CONFIG_FILE_NAME);
+  return findConfigFile(configDir) ?? join(configDir, CONFIG_FILE_NAME);
 }
 
 function loadRawConfig(configDir: string): RawConfig {
-  const primaryPath = configFilePath(configDir);
-  const dotPath = join(configDir, DOT_CONFIG_FILE_NAME);
-  const configPath = existsSync(primaryPath) ? primaryPath : dotPath;
-  if (!existsSync(configPath)) {
-    throw new Error(`missing ${CONFIG_FILE_NAME} at ${primaryPath} or ${DOT_CONFIG_FILE_NAME} at ${dotPath}; create it with at least one step`);
+  const configPath = findConfigFile(configDir);
+  if (configPath === undefined) {
+    throw new Error(`missing ${CONFIG_FILE_NAME} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")}); create it with at least one step`);
   }
 
   const rawConfig = YAML.parse(readFileSync(configPath, "utf8")) as RawConfig | null;
