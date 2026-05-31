@@ -205,6 +205,68 @@ test("loads an existing OpenCode server URL from looper.yaml", () => {
   expect(loadRuntimeConfig(configDir).opencodeServerUrl).toBe("http://127.0.0.1:4096");
 });
 
+test("parses opencode.title agent/model/variant overrides", () => {
+  const configDir = join(SCRATCH, "config-title-override");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title:",
+      "    agent: build",
+      "    model: openai/gpt-5.5-nano",
+      "    variant: low",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).title).toEqual({
+    agent: "build",
+    model: "openai/gpt-5.5-nano",
+    variant: "low",
+  });
+});
+
+test("omits opencode.title from runtime config when no fields are set", () => {
+  const configDir = join(SCRATCH, "config-title-empty");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title: {}",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).title).toBeUndefined();
+});
+
+test("rejects non-string opencode.title.model", () => {
+  const configDir = join(SCRATCH, "config-title-bad");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title:",
+      "    model: 123",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(() => loadRuntimeConfig(configDir)).toThrow(/opencode\.title\.model must be a string/);
+});
+
 test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
   expect(resolveAttachUrl(parseArgs([]), "http://127.0.0.1:4096", "http://default.local")).toBe("http://127.0.0.1:4096");
   expect(resolveAttachUrl(parseArgs(["--attach=http://127.0.0.1:5000"]), "http://127.0.0.1:4096", "http://default.local")).toBe(

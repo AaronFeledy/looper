@@ -1,7 +1,7 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
-import { loadSteps } from "./config.ts";
+import { loadSteps, type TitleGenConfig } from "./config.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
 import { createLoopState, notify, subscribe, type LoopState } from "./state.ts";
@@ -22,6 +22,7 @@ export type FallbackOptions = {
   configDir: string;
   opencodeBin: string;
   attachUrl?: string;
+  titleGenConfig?: TitleGenConfig;
   currentBranch: () => Promise<string>;
 };
 
@@ -110,6 +111,7 @@ export async function runNonTty({
   configDir,
   opencodeBin,
   attachUrl,
+  titleGenConfig,
   currentBranch,
 }: FallbackOptions): Promise<void> {
   clearStopFile();
@@ -127,7 +129,14 @@ export async function runNonTty({
   const client = createOpencodeClient({ baseUrl: server.url });
 
   try {
-    await runNonTtyIterations({ options, repoDir, configDir, client, currentBranch });
+    await runNonTtyIterations({
+      options,
+      repoDir,
+      configDir,
+      client,
+      ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
+      currentBranch,
+    });
   } finally {
     await server.close();
   }
@@ -138,12 +147,14 @@ async function runNonTtyIterations({
   repoDir,
   configDir,
   client,
+  titleGenConfig,
   currentBranch,
 }: {
   options: Options;
   repoDir: string;
   configDir: string;
   client: ReturnType<typeof createOpencodeClient>;
+  titleGenConfig?: TitleGenConfig;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
   for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
@@ -182,6 +193,7 @@ async function runNonTtyIterations({
       repoDir,
       configDir,
       startStepIndex,
+      ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
       hooks: {
         onStepBegin: ({ step, index, totalSteps }) => {
           saveResumeStep(loadSteps(configDir), index);

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { loadSteps } from "./config.ts";
+import { loadSteps, type TitleGenConfig } from "./config.ts";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
@@ -90,6 +90,7 @@ export type RunIterationOptions = {
   configDir: string;
   startStepIndex?: number;
   hooks?: RunIterationHooks;
+  titleGenConfig?: TitleGenConfig;
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -222,6 +223,7 @@ class TitleCoordinator {
     /** Apply the generated title (state mutation + opencode session.update). Called eagerly the moment generation succeeds, NOT at step end — so TUI and opencode update mid-step. */
     private readonly applyTitle: (desc: string) => Promise<void>,
     private readonly log: (line: string) => void,
+    private readonly titleGenConfig: TitleGenConfig | undefined,
   ) {
     this.initialBranch = mode.kind === "branch" ? getBranch() : undefined;
     if (mode.kind === "branch") {
@@ -328,6 +330,7 @@ class TitleCoordinator {
         repoDir: this.repoDir,
         contextText: text,
         ...(branchHint !== undefined ? { branchHint } : {}),
+        ...(this.titleGenConfig !== undefined ? { config: this.titleGenConfig } : {}),
         signal: this.controller.signal,
         log: this.log,
       });
@@ -359,6 +362,7 @@ export async function runIteration({
   configDir,
   startStepIndex = 0,
   hooks,
+  titleGenConfig,
 }: RunIterationOptions): Promise<"complete" | "stopped"> {
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
@@ -460,6 +464,7 @@ export async function runIteration({
             () => state.branch,
             applyTitle,
             titleLog,
+            titleGenConfig,
           );
 
     // Step has no own title config but the iteration already has a description
