@@ -27,8 +27,22 @@ type RawConfig = {
   steps?: unknown;
 };
 
+/**
+ * Optional overrides for the throwaway session that generates step titles.
+ * Title generation runs against opencode's default agent + model unless one of
+ * these is set in `looper.yaml` under `opencode.title:`. Recommended: a fast,
+ * cheap model — the title prompt is short and the work-log input is bounded
+ * by what opencode's title agent itself would summarize.
+ */
+export type TitleGenConfig = {
+  agent?: string;
+  model?: string;
+  variant?: string;
+};
+
 export type RuntimeConfig = {
   opencodeServerUrl?: string;
+  title?: TitleGenConfig;
 };
 
 function titleFromKey(key: string): string {
@@ -138,18 +152,40 @@ function loadRawConfig(configDir: string): RawConfig {
   return rawConfig;
 }
 
+function parseTitleConfig(value: unknown): TitleGenConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${CONFIG_FILE_NAME}.opencode.title must be a mapping`);
+  }
+  const raw = value as { agent?: unknown; model?: unknown; variant?: unknown };
+  const agent = optionalNonEmptyStringValue(raw.agent, "opencode.title.agent");
+  const model = optionalNonEmptyStringValue(raw.model, "opencode.title.model");
+  const variant = optionalNonEmptyStringValue(raw.variant, "opencode.title.variant");
+  if (agent === undefined && model === undefined && variant === undefined) return undefined;
+  return {
+    ...(agent !== undefined ? { agent } : {}),
+    ...(model !== undefined ? { model } : {}),
+    ...(variant !== undefined ? { variant } : {}),
+  };
+}
+
 export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
+  let title: TitleGenConfig | undefined;
   if (rawConfig.opencode !== undefined) {
     if (!rawConfig.opencode || typeof rawConfig.opencode !== "object" || Array.isArray(rawConfig.opencode)) {
       throw new Error(`${CONFIG_FILE_NAME}.opencode must be a mapping`);
     }
-    const opencode = rawConfig.opencode as { serverUrl?: unknown };
+    const opencode = rawConfig.opencode as { serverUrl?: unknown; title?: unknown };
     opencodeServerUrl = optionalNonEmptyStringValue(opencode.serverUrl, "opencode.serverUrl");
+    title = parseTitleConfig(opencode.title);
   }
   opencodeServerUrl ??= optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl");
-  return { opencodeServerUrl };
+  return {
+    ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
+    ...(title !== undefined ? { title } : {}),
+  };
 }
 
 export function loadSteps(configDir: string): Step[] {

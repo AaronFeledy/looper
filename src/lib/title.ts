@@ -1,6 +1,14 @@
 import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
+import type { TitleGenConfig } from "./config.ts";
 import { createOpencodeID } from "./runner.ts";
+
+function parseTitleModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
+  if (!model) return undefined;
+  const slash = model.indexOf("/");
+  if (slash <= 0 || slash === model.length - 1) return undefined;
+  return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
+}
 
 const TITLE_MAX_CHARS = 100;
 
@@ -139,6 +147,7 @@ export async function generateWorkDescription({
   repoDir,
   contextText,
   branchHint,
+  config,
   signal,
   log,
 }: {
@@ -152,6 +161,12 @@ export async function generateWorkDescription({
    * in.
    */
   branchHint?: string;
+  /**
+   * Optional agent/model/variant overrides from `opencode.title:` in
+   * looper.yaml. Each field is forwarded independently; unspecified fields
+   * fall through to opencode's defaults.
+   */
+  config?: TitleGenConfig;
   signal?: AbortSignal;
   log?: (line: string) => void;
 }): Promise<string | undefined> {
@@ -160,10 +175,16 @@ export async function generateWorkDescription({
   if (signal?.aborted) return undefined;
   const branchLine = branchHint && branchHint.length > 0 ? `[branch: ${branchHint}]\n\n` : "";
   const userMessage = `${branchLine}${trimmed}`;
+  const titleAgent = config?.agent;
+  const titleModel = parseTitleModel(config?.model);
+  const titleVariant = config?.variant;
 
   let titleSessionID: string | undefined;
   try {
-    const created = await client.session.create({ directory: repoDir }, { signal });
+    const created = await client.session.create(
+      { directory: repoDir, ...(titleAgent ? { agent: titleAgent } : {}) },
+      { signal },
+    );
     if (created.error || !created.data?.id) {
       log?.(`[looper] title gen: session.create failed: ${formatError(created.error)}`);
       return undefined;
@@ -177,6 +198,9 @@ export async function generateWorkDescription({
         messageID: createOpencodeID("msg"),
         parts: [{ type: "text", text: userMessage }],
         system: TITLE_PROMPT,
+        ...(titleAgent ? { agent: titleAgent } : {}),
+        ...(titleModel ? { model: titleModel } : {}),
+        ...(titleVariant ? { variant: titleVariant } : {}),
       },
       { signal },
     );
@@ -223,11 +247,11 @@ export async function generateWorkDescription({
 }
 
 /**
- * Title generation runs against whatever default agent + model the opencode
- * server is configured with. Surface that so users notice if it's a
- * heavyweight default. Wrapped in try/catch because this is purely
- * diagnostic — a malformed response must not throw past the caller and
- * discard the successfully generated title.
+ * Log which agent + model + variant actually ran the title prompt so a
+ * mis-configured `opencode.title:` (or a missing override that fell through
+ * to a heavyweight default) is visible without enabling debug events. Wrapped
+ * in try/catch because this is purely diagnostic — a malformed response must
+ * not throw past the caller and discard the successfully generated title.
  */
 function logTitleAgentUsage(info: Message, log: ((line: string) => void) | undefined): void {
   if (log === undefined) return;
