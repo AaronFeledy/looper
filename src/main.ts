@@ -124,8 +124,10 @@ function stopReason(): string {
   return readStopFile() ?? readStopAfterIterationFile() ?? "stop requested";
 }
 
-function resolveAttachUrl(options: ReturnType<typeof parseArgs>): string | undefined {
-  const runtimeConfig = loadRuntimeConfig(configDir);
+function resolveAttachUrl(
+  options: ReturnType<typeof parseArgs>,
+  runtimeConfig: ReturnType<typeof loadRuntimeConfig>,
+): string | undefined {
   return resolveConfiguredAttachUrl(options, runtimeConfig.opencodeServerUrl, opencodeAttachUrl);
 }
 
@@ -209,7 +211,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       branchSafetyTimer.unref?.();
     }
 
-    const attachUrl = resolveAttachUrl(options);
+    const runtimeConfig = loadRuntimeConfig(configDir);
+    const attachUrl = resolveAttachUrl(options, runtimeConfig);
     server = await startOrAttachServer({ opencodeBin, attachUrl });
     const client = createOpencodeClient({ baseUrl: server.url });
 
@@ -321,6 +324,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           repoDir,
           configDir,
           startStepIndex: iteration === 1 ? firstIterationStartStepIndex : 0,
+          ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
           hooks: {
             onStepBegin: ({ index }) => {
               saveResumeStep(loadSteps(configDir), index);
@@ -398,12 +402,14 @@ async function main(): Promise<number> {
       return 0;
     }
 
+    const runtimeConfig = loadRuntimeConfig(configDir);
     await runNonTty({
       options,
       repoDir,
       configDir,
       opencodeBin,
-      attachUrl: resolveAttachUrl(options),
+      attachUrl: resolveAttachUrl(options, runtimeConfig),
+      ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
       currentBranch,
     });
     return Number(process.exitCode ?? 0);

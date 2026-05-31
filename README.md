@@ -52,6 +52,10 @@ CLI flags:
 ```yaml
 opencode:
   serverUrl: http://127.0.0.1:4096  # optional: connect to an existing OpenCode server instead of spawning one
+  title:                            # optional: override agent/model/variant used by the title-generation session
+    agent: build
+    model: openai/gpt-5.5-nano
+    variant: low
 # attachUrl: http://127.0.0.1:4096  # top-level alias for opencode.serverUrl; used only if opencode.serverUrl is unset
 
 steps:
@@ -90,7 +94,7 @@ Mark one step per iteration (typically your build step) with `title` to overwrit
 
 The description is reused for every subsequent step in the same iteration (e.g. `Review: <description>`), does not persist across iterations, and is not affected by skipped or failed steps. Set `title` on at most one step per iteration &mdash; later entries overwrite the description.
 
-Title generation runs against the opencode server's default agent + model; looper logs which one it used. Switch the default to something cheap if you don't want to pay for it.
+Title generation runs against opencode's default agent + model unless you set `opencode.title.{agent,model,variant}` in `looper.yaml`. Any subset of those three may be set; unset fields fall through to opencode's default. The title prompt is short and the work-log input is bounded, so a fast/cheap model is recommended. Looper logs which agent + model + variant actually ran each title call (`[looper] title gen used agent=… model=…/… cost=…`) so a stale default is visible without enabling debug events.
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
