@@ -29,10 +29,12 @@ type RawConfig = {
 
 /**
  * Optional overrides for the throwaway session that generates step titles.
- * Title generation runs against opencode's default agent + model unless one of
- * these is set in `looper.yaml` under `opencode.title:`. Recommended: a fast,
- * cheap model — the title prompt is short and the work-log input is bounded
- * by what opencode's title agent itself would summarize.
+ * Title generation runs against opencode's default agent unless overridden
+ * here under `opencode.title:`. When `model` is unset, looper reproduces
+ * opencode's own title-model resolution: `small_model` if set, else a
+ * cheap-model heuristic scoped to the step's provider (see
+ * `resolveDefaultTitleModel` in title.ts), else opencode's default `model`.
+ * Set `model` here to force a specific model regardless.
  */
 export type TitleGenConfig = {
   agent?: string;

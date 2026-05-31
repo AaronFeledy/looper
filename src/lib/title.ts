@@ -10,6 +10,139 @@ function parseTitleModel(model: string | undefined): { providerID: string; model
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
 }
 
+/**
+ * Curated cheap/fast model name fragments, in opencode's own preference order
+ * (sst/opencode @ packages/opencode/src/provider/provider.ts `getSmallModel`,
+ * v1.15.13). Matched as substrings against a provider's available model ids.
+ * Kept inline because opencode doesn't expose its resolved small model via the
+ * config API — only the raw (often unset) `small_model` field.
+ */
+const PRIORITY_SMALL_MODELS = [
+  "claude-haiku-4-5",
+  "claude-haiku-4.5",
+  "3-5-haiku",
+  "3.5-haiku",
+  "gemini-3-flash",
+  "gemini-2.5-flash",
+  "gpt-5-nano",
+] as const;
+
+type ResolvedModel = { providerID: string; modelID: string };
+
+function modelTotalCost(model: { cost?: { input?: number; output?: number } }): number {
+  return (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
+}
+
+/**
+ * Pick a cheap title model the way opencode resolves its hidden title agent
+ * when `small_model` is unset: scope to the provider that ran the step, prefer
+ * opencode's curated cheap-model names, then fall back to the cheapest
+ * non-reasoning model that provider offers. opencode's `getSmallModel`
+ * heuristic isn't reachable via the public API, so this reproduces it from the
+ * provider/model list (which exposes per-model `reasoning` + `cost`).
+ *
+ * Returns undefined (caller falls through to opencode's heavyweight default)
+ * when the provider can't be determined, the list can't be read, or no
+ * suitable model exists.
+ */
+async function resolveHeuristicTitleModel({
+  client,
+  repoDir,
+  providerID,
+  signal,
+  log,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  providerID: string;
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+}): Promise<ResolvedModel | undefined> {
+  try {
+    const result = await client.provider.list({ directory: repoDir }, { signal });
+    if (result.error || !result.data) {
+      log?.(`[looper] title gen: provider.list failed: ${formatError(result.error)}`);
+      return undefined;
+    }
+    const provider = result.data.all.find((p) => p.id === providerID);
+    if (!provider) return undefined;
+    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
+    for (const fragment of PRIORITY_SMALL_MODELS) {
+      const match = models.find((m) => m.id.includes(fragment));
+      if (match) return { providerID: provider.id, modelID: match.id };
+    }
+    const nonReasoning = models.filter((m) => m.capabilities.reasoning === false);
+    if (nonReasoning.length === 0) return undefined;
+    const cheapest = nonReasoning.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
+    return { providerID: provider.id, modelID: cheapest.id };
+  } catch (error) {
+    if (isAbort(error)) return undefined;
+    log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the default title model when neither `opencode.title.model` nor a
+ * caller override applies. Mirrors opencode's title-agent model resolution
+ * (v1.15.13): opencode's configured `small_model` first, then a cheap-model
+ * heuristic scoped to the provider that ran the step. Looper rolls its own
+ * title session (opencode's hidden title agent rejects the public prompt API),
+ * so without this the throwaway session inherits opencode's heavyweight
+ * default `model`.
+ *
+ * Best-effort: returns undefined (caller falls through to opencode's default)
+ * if nothing suitable can be resolved.
+ */
+async function resolveDefaultTitleModel({
+  client,
+  repoDir,
+  providerID,
+  signal,
+  log,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  providerID?: string;
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+}): Promise<ResolvedModel | undefined> {
+  try {
+    const result = await client.config.get({ directory: repoDir }, { signal });
+    if (!result.error && result.data) {
+      const configured = parseTitleModel(result.data.small_model);
+      if (configured) return configured;
+    } else {
+      log?.(`[looper] title gen: config.get failed: ${formatError(result.error)}`);
+    }
+  } catch (error) {
+    if (isAbort(error)) return undefined;
+    log?.(`[looper] title gen: config.get threw: ${formatError(error)}`);
+  }
+  if (providerID === undefined || providerID.length === 0) return undefined;
+  return resolveHeuristicTitleModel({ client, repoDir, providerID, signal, log });
+}
+
+/**
+ * Provider/model of the most recent assistant message — i.e. the model that
+ * actually ran the step. Used to scope the cheap-title-model heuristic to the
+ * same provider, matching how opencode's title agent uses the step's provider.
+ */
+export function extractAssistantModel(
+  entries: Array<{ info: Message; parts: Part[] }>,
+): ResolvedModel | undefined {
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    const info = entries[i]?.info;
+    if (info?.role !== "assistant") continue;
+    const providerID = info.providerID;
+    const modelID = info.modelID;
+    if (typeof providerID === "string" && providerID.length > 0 && typeof modelID === "string" && modelID.length > 0) {
+      return { providerID, modelID };
+    }
+  }
+  return undefined;
+}
+
 const TITLE_MAX_CHARS = 100;
 
 /**
@@ -148,6 +281,7 @@ export async function generateWorkDescription({
   contextText,
   branchHint,
   config,
+  sessionProviderID,
   signal,
   log,
 }: {
@@ -167,6 +301,12 @@ export async function generateWorkDescription({
    * fall through to opencode's defaults.
    */
   config?: TitleGenConfig;
+  /**
+   * Provider that ran the step (from the step session's assistant messages).
+   * Scopes the cheap-title-model heuristic to the same provider when no
+   * explicit title model is configured.
+   */
+  sessionProviderID?: string;
   signal?: AbortSignal;
   log?: (line: string) => void;
 }): Promise<string | undefined> {
@@ -176,8 +316,16 @@ export async function generateWorkDescription({
   const branchLine = branchHint && branchHint.length > 0 ? `[branch: ${branchHint}]\n\n` : "";
   const userMessage = `${branchLine}${trimmed}`;
   const titleAgent = config?.agent;
-  const titleModel = parseTitleModel(config?.model);
   const titleVariant = config?.variant;
+  const titleModel =
+    parseTitleModel(config?.model) ??
+    (await resolveDefaultTitleModel({
+      client,
+      repoDir,
+      ...(sessionProviderID !== undefined ? { providerID: sessionProviderID } : {}),
+      signal,
+      log,
+    }));
 
   let titleSessionID: string | undefined;
   try {

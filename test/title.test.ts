@@ -276,6 +276,11 @@ describe("title orchestration", () => {
     capturedUpdates: Array<{ sessionID: string; title: string }>;
     capturedDeletes: string[];
     capturedTitlePrompts?: string[];
+    capturedTitleModels?: Array<{ providerID: string; modelID: string } | undefined>;
+    smallModel?: string;
+    stepProviderID?: string;
+    stepModelID?: string;
+    providerList?: { all: Array<{ id: string; models: Record<string, unknown> }> };
     /** Runs after the stream yields its events; lets tests mutate state mid-step (e.g., flip the branch) and then sleep so background timers can fire before the step completes. */
     streamPostHook?: () => Promise<void>;
   }): OpencodeClient {
@@ -300,6 +305,12 @@ describe("title orchestration", () => {
       if (opts.streamPostHook !== undefined) await opts.streamPostHook();
     }
     return {
+      config: {
+        get: async () => ({ data: opts.smallModel !== undefined ? { small_model: opts.smallModel } : {} }),
+      },
+      provider: {
+        list: async () => ({ data: opts.providerList ?? { all: [], default: {}, connected: [] } }),
+      },
       event: {
         subscribe: async () => ({ stream: stream() }),
       },
@@ -325,11 +336,13 @@ describe("title orchestration", () => {
         prompt: async (params: {
           sessionID: string;
           agent?: string;
+          model?: { providerID: string; modelID: string };
           parts?: Array<{ type: string; text?: string }>;
         }) => {
           if (params.sessionID === opts.titleSessionID) {
             const text = params.parts?.[0]?.text ?? "";
             opts.capturedTitlePrompts?.push(text);
+            opts.capturedTitleModels?.push(params.model);
             return {
               data: {
                 info: { role: "assistant" },
@@ -344,7 +357,11 @@ describe("title orchestration", () => {
             return {
               data: [
                 {
-                  info: { role: "assistant" },
+                  info: {
+                    role: "assistant",
+                    ...(opts.stepProviderID !== undefined ? { providerID: opts.stepProviderID } : {}),
+                    ...(opts.stepModelID !== undefined ? { modelID: opts.stepModelID } : {}),
+                  },
                   parts: [{ type: "text", text: buildAssistantText }],
                 },
               ],
@@ -388,6 +405,115 @@ describe("title orchestration", () => {
     expect(deletes).toContain("ses_title");
     expect(state.steps[0]?.title).toBe("Widget X export");
     expect(state.steps[1]?.title).toBe("Widget X export");
+  });
+
+  test("defaults title model to opencode small_model when none configured", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      smallModel: "openai/gpt-5.5-nano",
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5.5-nano" });
+  });
+
+  test("falls back to default model when small_model is unset", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual(undefined);
+  });
+
+  function model(id: string, reasoning: boolean, cost: number): Record<string, unknown> {
+    return { id, providerID: "anthropic", capabilities: { reasoning }, cost: { input: cost, output: cost }, status: "active" };
+  }
+
+  test("hybrid: prefers opencode's curated cheap model in the step's provider", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-opus-4-8": model("claude-opus-4-8", true, 15),
+              "claude-haiku-4-5": model("claude-haiku-4-5", false, 1),
+              "claude-3-5-haiku": model("claude-3-5-haiku", false, 0.5),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+  });
+
+  test("hybrid: falls back to cheapest non-reasoning model when no curated match", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "big-reasoner",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "big-reasoner": model("big-reasoner", true, 20),
+              "mid-chat": model("mid-chat", false, 3),
+              "cheap-chat": model("cheap-chat", false, 0.25),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "cheap-chat" });
   });
 
   test("non-trivial branch is injected into the title prompt", async () => {
