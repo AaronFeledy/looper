@@ -72,7 +72,7 @@ export function parseArgs(argv: string[]): Options {
 
     if (arg === "--config-dir") {
       const nextArg = argv[index + 1];
-      if (nextArg === undefined || nextArg.startsWith("-")) throw new Error("--config-dir requires a path");
+      if (nextArg === undefined || nextArg.length === 0 || nextArg.startsWith("-")) throw new Error("--config-dir requires a path");
       configDir = nextArg;
       index += 1;
       continue;

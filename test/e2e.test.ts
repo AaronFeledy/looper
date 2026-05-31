@@ -302,6 +302,7 @@ test("parses --config-dir in both = and space forms", () => {
   expect(parseArgs(["--config-dir=/tmp/looper-cfg"]).configDir).toBe("/tmp/looper-cfg");
   expect(parseArgs(["--config-dir", "/tmp/looper-cfg"]).configDir).toBe("/tmp/looper-cfg");
   expect(() => parseArgs(["--config-dir"])).toThrow(/--config-dir requires a path/);
+  expect(() => parseArgs(["--config-dir", ""])).toThrow(/--config-dir requires a path/);
   expect(() => parseArgs(["--config-dir="])).toThrow(/config dir cannot be empty/);
 });
 
