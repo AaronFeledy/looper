@@ -48,6 +48,25 @@ function color(code: string, text: string): string {
   return `\u001b[${code}m${text}\u001b[0m`;
 }
 
+/** opencode assistant errors that represent a deliberate abort, not a step failure. */
+function isAbortMessageError(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as { name?: unknown }).name === "MessageAbortedError";
+}
+
+function formatMessageError(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const record = error as Record<string, unknown>;
+  const name = typeof record.name === "string" && record.name.length > 0 ? record.name : "Error";
+  const data = record.data;
+  const message =
+    data && typeof data === "object" && "message" in data
+      ? String((data as { message: unknown }).message)
+      : "message" in record
+        ? String(record.message)
+        : undefined;
+  return message === undefined || message === name ? name : `${name}: ${message}`;
+}
+
 function sectionTimestamp(): string {
   return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
     .format(new Date())
@@ -214,6 +233,7 @@ export function createSessionEventConsumer(
   const partMessages = new Map<string, string>();
   const pendingPartUpdates = new Map<string, Part[]>();
   const pendingPartDeltas = new Map<string, PendingPartDelta[]>();
+  const printedMessageErrors = new Set<string>();
   const push = callbacks.pushLine;
   const pushLines = callbacks.pushLines ?? ((lines: string[]) => {
     for (const line of lines) push(line);
@@ -229,6 +249,20 @@ export function createSessionEventConsumer(
   const debug = process.env.LOOPER_DEBUG_EVENTS === "1";
 
   const roleForPart = (messageID: string): "user" | "assistant" | undefined => messageRoles.get(messageID);
+
+  const printAssistantMessageError = (info: Message): void => {
+    if (info.role !== "assistant" || printedMessageErrors.has(info.id)) return;
+    const error = (info as { error?: unknown }).error;
+    const message = formatMessageError(error);
+    if (message === undefined) return;
+    printedMessageErrors.add(info.id);
+    if (isAbortMessageError(error)) {
+      push(`${ui.dim(`(aborted) ${message}`)}`);
+      return;
+    }
+    push(`${ui.red("✗ assistant error")} ${message}`);
+    callbacks.onSessionError?.(message);
+  };
 
   const replayPendingAssistantParts = (messageID: string): void => {
     if (roleForPart(messageID) !== "assistant") return;
@@ -262,6 +296,7 @@ export function createSessionEventConsumer(
     switch (event.type) {
       case "message.updated": {
         messageRoles.set(event.properties.info.id, event.properties.info.role);
+        printAssistantMessageError(event.properties.info);
         replayPendingAssistantParts(event.properties.info.id);
         dropPendingUserParts(event.properties.info.id);
         break;
@@ -325,6 +360,7 @@ export function createSessionEventConsumer(
       for (const entry of messages) {
         const info = entry.info;
         messageRoles.set(info.id, info.role);
+        printAssistantMessageError(info);
         if (info.role !== "assistant") {
           dropPendingUserParts(info.id);
           continue;

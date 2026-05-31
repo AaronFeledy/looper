@@ -205,6 +205,68 @@ test("loads an existing OpenCode server URL from looper.yaml", () => {
   expect(loadRuntimeConfig(configDir).opencodeServerUrl).toBe("http://127.0.0.1:4096");
 });
 
+test("parses opencode.title agent/model/variant overrides", () => {
+  const configDir = join(SCRATCH, "config-title-override");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title:",
+      "    agent: build",
+      "    model: openai/gpt-5.5-nano",
+      "    variant: low",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).title).toEqual({
+    agent: "build",
+    model: "openai/gpt-5.5-nano",
+    variant: "low",
+  });
+});
+
+test("omits opencode.title from runtime config when no fields are set", () => {
+  const configDir = join(SCRATCH, "config-title-empty");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title: {}",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).title).toBeUndefined();
+});
+
+test("rejects non-string opencode.title.model", () => {
+  const configDir = join(SCRATCH, "config-title-bad");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "opencode:",
+      "  title:",
+      "    model: 123",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(() => loadRuntimeConfig(configDir)).toThrow(/opencode\.title\.model must be a string/);
+});
+
 test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
   expect(resolveAttachUrl(parseArgs([]), "http://127.0.0.1:4096", "http://default.local")).toBe("http://127.0.0.1:4096");
   expect(resolveAttachUrl(parseArgs(["--attach=http://127.0.0.1:5000"]), "http://127.0.0.1:4096", "http://default.local")).toBe(
@@ -301,21 +363,28 @@ test("runIteration retries session errors twice before surfacing terminal failur
   } as unknown as OpencodeClient;
   const state = createLoopState({ maxIterations: 1, stepNames: ["Sync"] });
 
-  await expect(runIteration({
-    state,
-    iteration: 1,
-    client,
-    repoDir: retryDir,
-    configDir,
-  })).rejects.toBeInstanceOf(StepFailureError);
+  let failed: unknown;
+  try {
+    await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: retryDir,
+      configDir,
+    });
+  } catch (error) {
+    failed = error;
+  }
+  expect(failed).toBeInstanceOf(StepFailureError);
 
   expect(promptCount).toBe(3);
-  expect(state.steps[0]?.status).toBe("failed");
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
-  expect(state.steps[0]?.outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
+  expect(state.steps.map((step) => step.status)).toEqual(["failed", "failed", "failed"]);
+  const outputLines = state.steps.flatMap((step) => step.outputLines);
+  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
 }, 15000);
 
 test("reattach honors an older session-scoped active continuation record", async () => {

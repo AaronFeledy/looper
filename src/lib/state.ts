@@ -319,6 +319,29 @@ export function insertRestartAttempt(state: LoopState, stepIndex: number, reason
   return stepIndex + 1;
 }
 
+export function insertFailureRetryAttempt(state: LoopState, stepIndex: number): number {
+  const step = state.steps[stepIndex];
+  if (!step) return stepIndex;
+  step.status = "failed";
+  step.statusMessage = undefined;
+  step.finishedAt = Date.now();
+  const next: LoopStep = {
+    name: step.name,
+    status: "pending",
+    ...(step.title !== undefined ? { title: step.title } : {}),
+    outputLines: [],
+    outputLineTimes: [],
+    outputScrollTop: 0,
+    outputPinnedToBottom: true,
+    backgroundAgents: [],
+  };
+  state.steps.splice(stepIndex + 1, 0, next);
+  if (state.activeStepIndex !== null && state.activeStepIndex > stepIndex) state.activeStepIndex += 1;
+  if (state.selectedStepIndex !== null && state.selectedStepIndex > stepIndex) state.selectedStepIndex += 1;
+  notifyStateChange();
+  return stepIndex + 1;
+}
+
 export function selectPreviousStep(state: LoopState): FlatRow | null {
   const rows = flattenRows(state);
   if (rows.length === 0) return null;

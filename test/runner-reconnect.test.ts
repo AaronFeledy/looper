@@ -17,6 +17,22 @@ function assistantUpdated(): Event {
   return { type: "message.updated", properties: { info: { id: MID, role: "assistant" } } } as unknown as Event;
 }
 
+function assistantDone(parentID: string): { info: unknown; parts: unknown[] } {
+  return { info: { id: "msg_done", role: "assistant", parentID, time: { completed: Date.now() } }, parts: [] };
+}
+
+function assistantFatalError(): { info: unknown; parts: unknown[] } {
+  return {
+    info: {
+      id: "msg_later_error",
+      role: "assistant",
+      parentID: "msg_auto_continue",
+      error: { name: "APIError", data: { message: "thinking blocks cannot be modified", isRetryable: false } },
+    },
+    parts: [],
+  };
+}
+
 function textPartUpdated(text: string): Event {
   return {
     type: "message.part.updated",
@@ -186,4 +202,48 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(result.restartReason).toBe("timeout");
     expect(abortCalled).toBe(true);
   });
+
+  test("fails instead of waiting when a later assistant has a non-retryable error", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-fatal-later-"));
+    let promptMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }, options: { signal: AbortSignal }) => {
+          promptMessageID = params.messageID;
+          await new Promise<void>((resolve) => {
+            if (options.signal.aborted) return resolve();
+            options.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          throw error;
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantDone(promptMessageID), assistantFatalError()] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("thinking blocks cannot be modified");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("thinking blocks cannot be modified"))).toBe(true);
+  }, 25000);
 });

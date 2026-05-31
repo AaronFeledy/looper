@@ -673,6 +673,20 @@ export type AssistantClassification =
   | { kind: "in-progress" }
   | { kind: "missing" };
 
+function assistantErrorMessage(error: unknown): string | undefined {
+  if (!isRecord(error)) return undefined;
+  const name = stringValue(error.name) ?? "Error";
+  const data = isRecord(error.data) ? error.data : null;
+  const message = data && "message" in data ? String(data.message) : stringValue(error.message);
+  return message === undefined || message === name ? name : `${name}: ${message}`;
+}
+
+function isNonRetryableAssistantError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const data = isRecord(error.data) ? error.data : null;
+  return data?.isRetryable === false;
+}
+
 async function classifyAssistantForMessage(
   client: OpencodeClient,
   repoDir: string,
@@ -686,23 +700,25 @@ async function classifyAssistantForMessage(
     return { kind: "missing" };
   }
   if (result.error || !result.data) return { kind: "missing" };
+  let tracked: AssistantClassification | undefined;
+  let terminalError: AssistantClassification | undefined;
   for (const entry of result.data) {
     const info = entry.info;
     if (info.role !== "assistant") continue;
-    if (info.parentID !== parentMessageID) continue;
-    if (info.error) {
-      const err = info.error;
-      const data = err.data;
-      const message =
-        data && typeof data === "object" && "message" in data
-          ? String((data as { message: unknown }).message)
-          : err.name;
-      return { kind: "failed", errorMessage: `${err.name}: ${message}` };
+    const error = (info as { error?: unknown }).error;
+    const errorMessage = assistantErrorMessage(error);
+    if (errorMessage !== undefined && isNonRetryableAssistantError(error)) {
+      terminalError ??= { kind: "failed", errorMessage };
     }
-    if (info.time.completed !== undefined) return { kind: "done" };
-    return { kind: "in-progress" };
+    if (info.parentID !== parentMessageID) continue;
+    if (errorMessage !== undefined) {
+      tracked = { kind: "failed", errorMessage };
+      continue;
+    }
+    tracked = info.time.completed !== undefined ? { kind: "done" } : { kind: "in-progress" };
   }
-  return { kind: "missing" };
+  if (terminalError !== undefined) return terminalError;
+  return tracked ?? { kind: "missing" };
 }
 
 export type PriorSessionEvaluation = {
@@ -1165,7 +1181,8 @@ export async function runOpenCodeStep({
           if (supervisorStopped || cancellation.action !== null) break;
           if (cls.kind === "done" || cls.kind === "failed") {
             const silentSeconds = Math.round((Date.now() - lastEventAt) / 1000);
-            watchdogStallReason = `event watchdog: session ${boundSessionID} idle with assistant message ${cls.kind} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
+            const detail = cls.kind === "failed" ? `: ${cls.errorMessage}` : "";
+            watchdogStallReason = `event watchdog: session ${boundSessionID} idle with assistant message ${cls.kind}${detail} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
             pushLine(`[looper] ${watchdogStallReason}`);
             ctrl.abort();
             break;
