@@ -17,7 +17,7 @@ import {
 } from "./runner.ts";
 import { insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
-import { extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
+import { extractAssistantModel, extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
 
 function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
@@ -320,6 +320,7 @@ class TitleCoordinator {
       );
       if (messages.error || !messages.data) return undefined;
       const text = extractAssistantText(messages.data);
+      const stepModel = extractAssistantModel(messages.data);
       const branchHint = branchHintFor(this.getBranch());
       // Skip generation only if BOTH signals are empty. A useful branch alone
       // is enough to produce a good title even before the assistant has said
@@ -331,6 +332,7 @@ class TitleCoordinator {
         contextText: text,
         ...(branchHint !== undefined ? { branchHint } : {}),
         ...(this.titleGenConfig !== undefined ? { config: this.titleGenConfig } : {}),
+        ...(stepModel !== undefined ? { sessionProviderID: stepModel.providerID } : {}),
         signal: this.controller.signal,
         log: this.log,
       });
