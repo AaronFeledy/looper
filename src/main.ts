@@ -37,6 +37,7 @@ import {
   writeStopFile,
 } from "./lib/state-files.ts";
 import { createAgentStream } from "./tui/agent-stream.ts";
+import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
 import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
 import { createHeader } from "./tui/header.ts";
@@ -160,6 +161,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let firstIterationStartStepIndex = options.continueFromLastStep ? resumeStepIndex(steps) : 0;
   let resumeAfterStepFailure = false;
   let renderer: CliRenderer | undefined;
+  let bootScreen: BootScreen | undefined;
+  let booting = true;
+  const bootAbort = new AbortController();
   let server: ServerHandle | undefined;
   let cleanupKeys: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
@@ -190,11 +194,21 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   };
 
   const handleSigint = () => {
+    if (booting) {
+      requestQuit("SIGINT received during looper startup");
+      bootScreen?.begin("Stopping startup");
+      bootAbort.abort(new Error("looper startup interrupted by SIGINT"));
+      return;
+    }
     requestStopAfterIteration("SIGINT received by looper TUI");
   };
 
   const handleSigterm = () => {
     requestQuit("SIGTERM received by looper TUI");
+    if (booting) {
+      bootScreen?.begin("Stopping startup");
+      bootAbort.abort(new Error("looper startup interrupted by SIGTERM"));
+    }
   };
 
   process.on("SIGINT", handleSigint);
@@ -208,6 +222,11 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       maxFps: 30,
     });
 
+    // Paint a status panel before the slow startup awaits below so the screen is
+    // never blank; it is destroyed before the real UI root mounts.
+    bootScreen = createBootScreen(renderer);
+
+    bootScreen.begin("Watching branch");
     branchWatcher = await watchBranch({
       repoDir,
       onChange: (branch) => {
@@ -228,16 +247,23 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       branchSafetyTimer.unref?.();
     }
 
+    bootScreen.begin("Loading configuration");
     const runtimeConfig = loadRuntimeConfig(configDir);
     const attachUrl = resolveAttachUrl(options, runtimeConfig);
-    server = await startOrAttachServer({ opencodeBin, attachUrl });
+
+    bootScreen.begin(attachUrl !== undefined ? `Attaching to opencode (${attachUrl})` : "Starting opencode server");
+    server = await startOrAttachServer({ opencodeBin, attachUrl, signal: bootAbort.signal });
+
+    bootScreen.begin("Connecting client");
     const client = createOpencodeClient({ baseUrl: server.url });
     if (attachUrl !== undefined) {
+      bootScreen.begin("Validating managed resources");
       await assertManagedOpencodeResourcesLoaded({
         client,
         repoDir,
         serverUrl: server.url,
         requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
+        signal: bootAbort.signal,
       });
     }
 
@@ -270,6 +296,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     });
     leftColumn.add(stepList);
 
+    bootScreen.begin("Detecting GitHub repository");
     const githubEnabled = await detectGithubRepo(repoDir);
     if (githubEnabled) {
       leftColumn.add(createGithubStatusPanel(renderer, state));
@@ -279,12 +306,16 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         onUpdate: (status) => setGithubStatus(state, status),
       });
     }
+    bootScreen.done();
 
     root.add(createHeader(renderer, state));
     body.add(leftColumn);
     body.add(stream);
     root.add(body);
     root.add(createFooter(renderer, state));
+
+    bootScreen.destroy();
+    bootScreen = undefined;
     renderer.root.add(root);
 
     cleanupKeys = bindKeys(renderer, state, {
@@ -331,6 +362,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         notify();
       },
     });
+
+    booting = false;
 
     await waitForStart(state);
 
@@ -391,6 +424,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
 
     return finish(1, `max iterations reached (${options.maxIterations})`);
+  } catch (error) {
+    if (bootAbort.signal.aborted) return finish(130, exitReason ?? "looper startup interrupted");
+    throw error;
   } finally {
     cleanupKeys?.();
     backgroundAgentStreamer?.stop();
@@ -399,6 +435,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);
     process.off("SIGTERM", handleSigterm);
+    bootScreen?.destroy();
     renderer?.destroy();
     await server?.close();
     if (exitReason !== undefined) process.stdout.write(`Looper exited: ${exitReason}\n`);
