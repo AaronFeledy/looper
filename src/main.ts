@@ -193,6 +193,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     notify();
   };
 
+  const throwIfBootAborted = () => {
+    if (!bootAbort.signal.aborted) return;
+    const reason = bootAbort.signal.reason;
+    throw reason instanceof Error ? reason : new Error("looper startup interrupted");
+  };
+
   const handleSigint = () => {
     if (booting) {
       requestQuit("SIGINT received during looper startup");
@@ -221,6 +227,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       targetFps: 30,
       maxFps: 30,
     });
+    throwIfBootAborted();
 
     // Paint a status panel before the slow startup awaits below so the screen is
     // never blank; it is destroyed before the real UI root mounts.
@@ -238,6 +245,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         githubWatcher?.refresh();
       },
     });
+    throwIfBootAborted();
 
     // Belt-and-braces fallback around the 5s background poll: re-check HEAD
     // every 60s in case the interval timer is starved or the watcher is
@@ -253,6 +261,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     bootScreen.begin(attachUrl !== undefined ? `Attaching to opencode (${attachUrl})` : "Starting opencode server");
     server = await startOrAttachServer({ opencodeBin, attachUrl, signal: bootAbort.signal });
+    throwIfBootAborted();
 
     bootScreen.begin("Connecting client");
     const client = createOpencodeClient({ baseUrl: server.url });
@@ -265,6 +274,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
         signal: bootAbort.signal,
       });
+      throwIfBootAborted();
     }
 
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
@@ -298,6 +308,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     bootScreen.begin("Detecting GitHub repository");
     const githubEnabled = await detectGithubRepo(repoDir);
+    throwIfBootAborted();
     if (githubEnabled) {
       leftColumn.add(createGithubStatusPanel(renderer, state));
       githubWatcher = watchGithubPr({
@@ -363,6 +374,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       },
     });
 
+    throwIfBootAborted();
     booting = false;
 
     await waitForStart(state);
