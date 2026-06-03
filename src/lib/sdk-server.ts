@@ -30,11 +30,17 @@ async function drain(stream: ReadableStream<Uint8Array> | null): Promise<void> {
   }
 }
 
-async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">): Promise<string> {
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("opencode server startup aborted");
+}
+
+async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">, signal?: AbortSignal): Promise<string> {
   const stdout = proc.stdout;
   if (!stdout) throw new Error("opencode serve produced no stdout");
+  if (signal?.aborted) throw abortReason(signal);
 
   let url: string | null = null;
+  let removeAbortListener: (() => void) | undefined;
   const exited = proc.exited.then((code) => {
     if (url === null) throw new Error(`opencode serve exited before listening (code ${code})`);
   });
@@ -51,14 +57,25 @@ async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">): 
       }
     }
   })();
+  const aborted = signal
+    ? new Promise<never>((_, reject) => {
+        const onAbort = () => {
+          proc.kill("SIGTERM");
+          reject(abortReason(signal));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      })
+    : undefined;
 
   try {
-    await Promise.race([scan, exited, timeout]);
+    await Promise.race(aborted ? [scan, exited, timeout, aborted] : [scan, exited, timeout]);
   } catch (error) {
     proc.kill("SIGTERM");
     throw error;
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+    removeAbortListener?.();
   }
 
   if (url === null) {
@@ -69,7 +86,8 @@ async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">): 
   return url;
 }
 
-async function spawnOpencodeServer(opencodeBin: string): Promise<{ url: string; proc: Subprocess }> {
+async function spawnOpencodeServer(opencodeBin: string, signal?: AbortSignal): Promise<{ url: string; proc: Subprocess }> {
+  if (signal?.aborted) throw abortReason(signal);
   const proc = spawn([opencodeBin, "serve", "--hostname=127.0.0.1", "--port=0"], {
     stdout: "pipe",
     stderr: "pipe",
@@ -79,7 +97,7 @@ async function spawnOpencodeServer(opencodeBin: string): Promise<{ url: string; 
   // and block before stdout prints the listening URL.
   void drain(proc.stderr).catch(() => undefined);
 
-  const url = await captureListeningUrl(proc);
+  const url = await captureListeningUrl(proc, signal);
 
   // Keep draining stdout or the OS pipe buffer fills and the server blocks on write.
   void drain(proc.stdout).catch(() => undefined);
@@ -90,7 +108,9 @@ async function spawnOpencodeServer(opencodeBin: string): Promise<{ url: string; 
 export async function startOrAttachServer(options: {
   opencodeBin: string;
   attachUrl?: string;
+  signal?: AbortSignal;
 }): Promise<ServerHandle> {
+  if (options.signal?.aborted) throw abortReason(options.signal);
   if (options.attachUrl !== undefined) {
     return {
       url: options.attachUrl,
@@ -98,7 +118,7 @@ export async function startOrAttachServer(options: {
     };
   }
 
-  const { url, proc } = await spawnOpencodeServer(options.opencodeBin);
+  const { url, proc } = await spawnOpencodeServer(options.opencodeBin, options.signal);
 
   return {
     url,

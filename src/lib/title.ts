@@ -2,6 +2,7 @@ import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { TitleGenConfig } from "./config.ts";
 import { createOpencodeID } from "./runner.ts";
+import { TITLE_AGENT_NAME } from "./title-agent.ts";
 
 function parseTitleModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
@@ -67,12 +68,18 @@ async function resolveHeuristicTitleModel({
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
     const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
-    for (const fragment of PRIORITY_SMALL_MODELS) {
-      const match = models.find((m) => m.id.includes(fragment));
-      if (match) return { providerID: provider.id, modelID: match.id };
-    }
+    // Filter to non-reasoning models BEFORE the priority match, not after.
+    // opencode auto-applies its adaptive-thinking variant to any
+    // reasoning-capable model, and cheap reasoning models (e.g.
+    // claude-haiku-4-5) reject it with a 400 ("adaptive thinking is not
+    // supported on this model") reported inside the assistant message's
+    // `error` field — which previously surfaced as an empty "no text" title.
     const nonReasoning = models.filter((m) => m.capabilities.reasoning === false);
     if (nonReasoning.length === 0) return undefined;
+    for (const fragment of PRIORITY_SMALL_MODELS) {
+      const match = nonReasoning.find((m) => m.id.includes(fragment));
+      if (match) return { providerID: provider.id, modelID: match.id };
+    }
     const cheapest = nonReasoning.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
     return { providerID: provider.id, modelID: cheapest.id };
   } catch (error) {
@@ -267,10 +274,16 @@ export async function setSessionTitle({
 
 /**
  * Approximate opencode's hidden title agent against `contextText` via a
- * throwaway session. The title agent isn't exposed by opencode's public
- * `session.prompt` API, so we pass TITLE_PROMPT (a looper-customized
- * derivative of opencode's title prompt) as a `system` override against the
- * server's default agent + model.
+ * throwaway session. opencode's own title agent isn't exposed by the public
+ * `session.prompt` API, so we run our own session against the `looper-title`
+ * agent (a hidden subagent materialized by title-agent.ts whose only job is to
+ * be a clean, variant-free param baseline — see TITLE_AGENT_NAME). The actual
+ * title instructions are passed as a `system` override (TITLE_PROMPT, a
+ * looper-customized derivative of opencode's title prompt) and the model is
+ * chosen per-provider by the cheap-model heuristic. Naming the agent is what
+ * stops opencode from inheriting the default agent's adaptive-thinking variant,
+ * which reasoning-capable cheap models reject with a 400. An explicit
+ * `opencode.title.agent` in looper.yaml overrides the default.
  *
  * Returns the post-processed title, or undefined on any failure (caller falls
  * back to letting opencode auto-title normally).
@@ -315,7 +328,7 @@ export async function generateWorkDescription({
   if (signal?.aborted) return undefined;
   const branchLine = branchHint && branchHint.length > 0 ? `[branch: ${branchHint}]\n\n` : "";
   const userMessage = `${branchLine}${trimmed}`;
-  const titleAgent = config?.agent;
+  const titleAgent = config?.agent ?? TITLE_AGENT_NAME;
   const titleVariant = config?.variant;
   const titleModel =
     parseTitleModel(config?.model) ??
@@ -328,6 +341,7 @@ export async function generateWorkDescription({
     }));
 
   let titleSessionID: string | undefined;
+  let preserveSession = false;
   try {
     const created = await client.session.create(
       { directory: repoDir, ...(titleAgent ? { agent: titleAgent } : {}) },
@@ -354,41 +368,59 @@ export async function generateWorkDescription({
     );
     if (resp.error || !resp.data) {
       log?.(`[looper] title gen: prompt failed: ${formatError(resp.error)}`);
+      preserveSession = true;
       return undefined;
     }
     logTitleAgentUsage(resp.data.info, log);
 
+    const modelError = extractMessageError(resp.data.info);
+    if (modelError !== undefined) {
+      log?.(`[looper] title gen: model returned an error: ${modelError}`);
+      preserveSession = true;
+      return undefined;
+    }
+
     const titleText = extractAssistantText([{ info: resp.data.info, parts: resp.data.parts }]);
     if (titleText.length === 0) {
       log?.("[looper] title gen: assistant returned no text");
+      preserveSession = true;
       return undefined;
     }
     const cleaned = postprocessTitle(titleText);
-    return cleaned.length > 0 ? cleaned : undefined;
+    if (cleaned.length === 0) {
+      log?.("[looper] title gen: title empty after postprocessing");
+      preserveSession = true;
+      return undefined;
+    }
+    return cleaned;
   } catch (error) {
     if (isAbort(error)) return undefined;
     log?.(`[looper] title gen threw: ${formatError(error)}`);
+    preserveSession = titleSessionID !== undefined;
     return undefined;
   } finally {
     if (titleSessionID !== undefined) {
-      // The throwaway title session runs on opencode's default model and, like
-      // any session, keeps generating server-side even if our client request
-      // was aborted. Abort it first so a cancelled/slow title generation does
-      // not linger as a running session, then delete it. Both are awaited and
-      // their failures logged so a silently-failed delete can no longer leak a
-      // session whose first message is a copy of the step's assistant output.
-      try {
-        await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
-      } catch (error) {
-        log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
-      }
-      try {
-        const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
-        if (deleted?.error) {
-          log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
+      if (preserveSession) {
+        log?.(`[looper] title gen: kept failed title session ${titleSessionID} for review`);
+      } else {
+        // Success or cancellation. The throwaway title session keeps generating
+        // server-side even after our client request returns/aborts, so abort it
+        // first, then delete it. Both are awaited and their failures logged so a
+        // silently-failed delete can no longer leak a session whose first
+        // message is a copy of the step's assistant output.
+        try {
+          await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
+        } catch (error) {
+          log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
         }
-      } catch (error) {
-        log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
+        try {
+          const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
+          if (deleted?.error) {
+            log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
+          }
+        } catch (error) {
+          log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
+        }
       }
     }
   }
@@ -408,6 +440,32 @@ function logTitleAgentUsage(info: Message, log: ((line: string) => void) | undef
     const cost = typeof info.cost === "number" ? `${info.cost.toFixed(4)}` : "n/a";
     log(`[looper] title gen used agent=${info.agent} model=${info.providerID}/${info.modelID} cost=${cost}`);
   } catch {}
+}
+
+/**
+ * opencode reports provider/model failures (auth, context overflow, and 400s
+ * such as "adaptive thinking is not supported on this model") in the assistant
+ * message's `error` field rather than the transport-level response error.
+ * Surfacing it here is what stops those failures from masquerading as an empty
+ * "assistant returned no text" result. Returns a short "Name (status) message"
+ * summary, or undefined when the message carries no error.
+ */
+function extractMessageError(info: Message): string | undefined {
+  if (info.role !== "assistant") return undefined;
+  const error = (info as { error?: unknown }).error;
+  if (error === undefined || error === null || typeof error !== "object") return undefined;
+  const name = typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "error";
+  const data = (error as { data?: unknown }).data;
+  let message = "";
+  let statusCode: number | undefined;
+  if (data !== null && typeof data === "object") {
+    const rawMessage = (data as { message?: unknown }).message;
+    if (typeof rawMessage === "string") message = rawMessage;
+    const rawStatus = (data as { statusCode?: unknown }).statusCode;
+    if (typeof rawStatus === "number") statusCode = rawStatus;
+  }
+  const summary = [name, statusCode !== undefined ? `(${statusCode})` : "", message].filter((p) => p.length > 0).join(" ");
+  return summary.length > 0 ? summary : JSON.stringify(error);
 }
 
 function isAbort(error: unknown): boolean {
