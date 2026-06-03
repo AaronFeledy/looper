@@ -6,6 +6,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
+import { AttachedServerAgentError } from "./lib/attached-server-agents.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
 import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
@@ -13,6 +14,11 @@ import { detectGithubRepo } from "./lib/github.ts";
 import { type GithubWatcher, watchGithubPr } from "./lib/github-watcher.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
 import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
+import {
+  applyManagedOpencodeResources,
+  assertManagedOpencodeResourcesLoaded,
+  LOOPER_MANAGED_RESOURCES,
+} from "./lib/opencode-managed-resources.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import { createLoopState, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
@@ -226,6 +232,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     const attachUrl = resolveAttachUrl(options, runtimeConfig);
     server = await startOrAttachServer({ opencodeBin, attachUrl });
     const client = createOpencodeClient({ baseUrl: server.url });
+    if (attachUrl !== undefined) {
+      await assertManagedOpencodeResourcesLoaded({
+        client,
+        repoDir,
+        serverUrl: server.url,
+        requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
+      });
+    }
 
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
 
@@ -407,6 +421,7 @@ async function main(): Promise<number> {
   initStatePaths({ configDir });
   ensureConfigDir();
   ensureConfigExists();
+  applyManagedOpencodeResources({ resources: LOOPER_MANAGED_RESOURCES, log: (line) => process.stderr.write(`${line}\n`) });
 
   const isTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!isTty) {
@@ -434,6 +449,10 @@ async function main(): Promise<number> {
 try {
   process.exitCode = Number(await main());
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+  if (error instanceof AttachedServerAgentError) {
+    process.stderr.write(`${error.message}\n`);
+  } else {
+    process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+  }
   process.exitCode = 1;
 }

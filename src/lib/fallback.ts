@@ -4,6 +4,7 @@ import type { Options } from "./args.ts";
 import { loadSteps, type TitleGenConfig } from "./config.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
+import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "./opencode-managed-resources.ts";
 import { createLoopState, notify, subscribe, type LoopState } from "./state.ts";
 import {
   clearResumeStepFile,
@@ -129,6 +130,14 @@ export async function runNonTty({
   const client = createOpencodeClient({ baseUrl: server.url });
 
   try {
+    if (attachUrl !== undefined) {
+      await assertManagedOpencodeResourcesLoaded({
+        client,
+        repoDir,
+        serverUrl: server.url,
+        requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
+      });
+    }
     await runNonTtyIterations({
       options,
       repoDir,
