@@ -1,6 +1,6 @@
 import { $ } from "bun";
 
-import type { GithubStatus } from "./state.ts";
+import type { GithubBugbot, GithubStatus } from "./state.ts";
 
 /**
  * GitHub PR/CI integration.
@@ -14,14 +14,16 @@ import type { GithubStatus } from "./state.ts";
  */
 
 /** Outcome of classifying a single status-check entry. */
-type CheckClass = "pass" | "fail" | "pending";
+type CheckClass = "pass" | "fail" | "pending" | "neutral";
 
 /** Aggregated CI rollup across every check attached to a PR's head commit. */
 export type CiRollup = {
-  overall: "none" | "pending" | "passing" | "failing";
+  overall: "none" | "pending" | "passing" | "failing" | "neutral";
   passing: number;
   failing: number;
   pending: number;
+  /** Checks whose conclusion is NEUTRAL; counted apart from passing. */
+  neutral: number;
   total: number;
 };
 
@@ -38,6 +40,9 @@ export type StatusCheckRollupEntry = {
   state?: string;
   name?: string;
   context?: string;
+  detailsUrl?: string;
+  startedAt?: string;
+  completedAt?: string;
 };
 
 type GhPrJson = {
@@ -91,7 +96,8 @@ function classifyCheck(entry: StatusCheckRollupEntry): CheckClass {
   const status = (entry.status ?? "").toUpperCase();
   if (status !== "COMPLETED") return "pending"; // QUEUED, IN_PROGRESS, WAITING, PENDING, REQUESTED
   const conclusion = (entry.conclusion ?? "").toUpperCase();
-  if (conclusion === "SUCCESS" || conclusion === "NEUTRAL" || conclusion === "SKIPPED") return "pass";
+  if (conclusion === "NEUTRAL") return "neutral"; // ran, no decision — surfaced apart from passing
+  if (conclusion === "SUCCESS" || conclusion === "SKIPPED") return "pass";
   return "fail"; // FAILURE, TIMED_OUT, CANCELLED, ACTION_REQUIRED, STARTUP_FAILURE, STALE
 }
 
@@ -99,21 +105,110 @@ function classifyCheck(entry: StatusCheckRollupEntry): CheckClass {
  * Reduce a PR's status-check rollup to a single overall verdict plus counts.
  *
  * Precedence for `overall`: any failure → `failing`; else any pending →
- * `pending`; else at least one check → `passing`; else `none`.
+ * `pending`; else any passing → `passing`; else any neutral → `neutral`; else
+ * `none`. NEUTRAL checks are counted in their own bucket so the UI can show
+ * them apart from clean passes (they ran but reached no pass/fail decision).
  */
 export function computeCiRollup(entries: StatusCheckRollupEntry[]): CiRollup {
   let passing = 0;
   let failing = 0;
   let pending = 0;
+  let neutral = 0;
   for (const entry of entries) {
     const verdict = classifyCheck(entry);
     if (verdict === "pass") passing += 1;
     else if (verdict === "fail") failing += 1;
+    else if (verdict === "neutral") neutral += 1;
     else pending += 1;
   }
-  const total = passing + failing + pending;
-  const overall = failing > 0 ? "failing" : pending > 0 ? "pending" : total > 0 ? "passing" : "none";
-  return { overall, passing, failing, pending, total };
+  const total = passing + failing + pending + neutral;
+  const overall =
+    failing > 0
+      ? "failing"
+      : pending > 0
+        ? "pending"
+        : passing > 0
+          ? "passing"
+          : neutral > 0
+            ? "neutral"
+            : "none";
+  return { overall, passing, failing, pending, neutral, total };
+}
+
+/**
+ * Cursor Bugbot publishes a check run named "Cursor Bugbot" whose `detailsUrl`
+ * points at cursor.com. Match on either signal so a rename of one doesn't lose
+ * detection.
+ */
+export function isBugbotEntry(entry: StatusCheckRollupEntry): boolean {
+  const label = (entry.name || entry.context || "").toLowerCase();
+  if (label.includes("bugbot")) return true;
+  const url = (entry.detailsUrl ?? "").toLowerCase();
+  return url.includes("bugbot") || url.includes("cursor.com");
+}
+
+/**
+ * Classify a Bugbot check into a {@link GithubBugbot} state. Unlike CI checks,
+ * a NEUTRAL conclusion is meaningful here: Bugbot reports "found issues" by
+ * concluding NEUTRAL, so we surface it as `issues` rather than folding it into
+ * a pass.
+ */
+export function classifyBugbot(entry: StatusCheckRollupEntry): GithubBugbot["state"] {
+  // Legacy status-context shape (state only).
+  if (entry.__typename === "StatusContext" || (entry.state !== undefined && entry.status === undefined)) {
+    const state = (entry.state ?? "").toUpperCase();
+    if (state === "SUCCESS") return "clean";
+    if (state === "FAILURE" || state === "ERROR") return "error";
+    return "pending";
+  }
+  const status = (entry.status ?? "").toUpperCase();
+  if (status !== "COMPLETED") return "pending";
+  const conclusion = (entry.conclusion ?? "").toUpperCase();
+  if (conclusion === "NEUTRAL") return "issues";
+  if (conclusion === "SUCCESS" || conclusion === "SKIPPED") return "clean";
+  if (conclusion === "") return "pending";
+  return "error";
+}
+
+/**
+ * Split a status-check rollup into the most-recent Bugbot entry, if any, and
+ * the remaining CI checks. Bugbot is removed from the CI set so it never
+ * inflates the pass/fail/neutral counts shown for ordinary CI. When a PR
+ * carries more than one Bugbot entry (re-runs), the one with the latest
+ * `completedAt`/`startedAt` wins; entries without a timestamp fall back to
+ * array order (last seen).
+ */
+export function partitionBugbot(entries: StatusCheckRollupEntry[]): {
+  bugbot: StatusCheckRollupEntry | null;
+  ci: StatusCheckRollupEntry[];
+} {
+  let bugbot: StatusCheckRollupEntry | null = null;
+  const ci: StatusCheckRollupEntry[] = [];
+  for (const entry of entries) {
+    if (!isBugbotEntry(entry)) {
+      ci.push(entry);
+      continue;
+    }
+    // Keep the most recent Bugbot run. `>=` makes a later array entry win on a
+    // timestamp tie, preserving the prior "last seen" behavior when neither
+    // entry carries a usable timestamp (both rank NEGATIVE_INFINITY).
+    if (bugbot === null || bugbotEntryTime(entry) >= bugbotEntryTime(bugbot)) {
+      bugbot = entry;
+    }
+  }
+  return { bugbot, ci };
+}
+
+/**
+ * Sortable timestamp for a Bugbot entry, preferring `completedAt` over
+ * `startedAt`. Returns NEGATIVE_INFINITY when no parseable timestamp is present
+ * so timestamped runs always outrank untimestamped ones.
+ */
+function bugbotEntryTime(entry: StatusCheckRollupEntry): number {
+  const raw = entry.completedAt ?? entry.startedAt;
+  if (raw === undefined || raw === "") return Number.NEGATIVE_INFINITY;
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
 }
 
 async function gitOriginUrl(repoDir: string): Promise<string | null> {
@@ -197,7 +292,8 @@ export function parsePrListJson(stdout: string): GithubStatus {
     return { kind: "no-pr" };
   }
 
-  const ci = computeCiRollup(pr.statusCheckRollup ?? []);
+  const { bugbot, ci: ciEntries } = partitionBugbot(pr.statusCheckRollup ?? []);
+  const ci = computeCiRollup(ciEntries);
   return {
     kind: "pr",
     pr: {
@@ -210,7 +306,9 @@ export function parsePrListJson(stdout: string): GithubStatus {
       ciPassing: ci.passing,
       ciFailing: ci.failing,
       ciPending: ci.pending,
+      ciNeutral: ci.neutral,
       ciTotal: ci.total,
+      ...(bugbot !== null ? { bugbot: { state: classifyBugbot(bugbot) } } : {}),
     },
   };
 }
@@ -248,5 +346,126 @@ export async function fetchPrStatus(repoDir: string, branch: string, signal?: Ab
     return { kind: "error", message: firstLine(result.stderr) || "gh pr list failed" };
   }
 
-  return parsePrListJson(result.stdout);
+  const status = parsePrListJson(result.stdout);
+
+  // Only pay for the extra review-thread query when Bugbot actually found
+  // issues; a clean / pending / errored Bugbot run has nothing to count.
+  if (status.kind === "pr" && status.pr.bugbot?.state === "issues") {
+    const target = parsePrUrl(status.pr.url);
+    if (target !== null) {
+      const unresolved = await fetchBugbotUnresolved(repoDir, target, withTimeout(signal, GH_TIMEOUT_MS));
+      if (unresolved !== null) {
+        // Bugbot's check run can linger on NEUTRAL after every thread it opened
+        // has been resolved by a human. Zero open threads means nothing is
+        // actionable, so report `clean` rather than a stale "issues" line.
+        if (unresolved === 0) {
+          status.pr.bugbot.state = "clean";
+          delete status.pr.bugbot.unresolved;
+        } else {
+          status.pr.bugbot.unresolved = unresolved;
+        }
+      }
+    }
+  }
+
+  return status;
+}
+
+/** Parse `owner`, `repo`, and PR `number` out of a github.com PR URL. */
+export function parsePrUrl(url: string): { owner: string; repo: string; number: number } | null {
+  const match = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(url);
+  if (match === null) return null;
+  const number = Number(match[3]);
+  if (!Number.isInteger(number)) return null;
+  return { owner: match[1]!, repo: match[2]!, number };
+}
+
+/**
+ * True when a review-comment author login belongs to Cursor Bugbot. The bot
+ * posts as `cursor` (GraphQL) / `cursor[bot]` (REST); match either form.
+ */
+export function isBugbotLogin(login: string): boolean {
+  const normalized = login.toLowerCase();
+  return normalized === "cursor" || normalized === "cursor[bot]";
+}
+
+type ReviewThreadsGraphql = {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewThreads?: {
+          nodes?: ({
+            isResolved?: boolean;
+            comments?: { nodes?: ({ author?: { login?: string } | null } | null)[] | null } | null;
+          } | null)[] | null;
+        } | null;
+      } | null;
+    } | null;
+  } | null;
+};
+
+/**
+ * Count the unresolved review threads opened by Bugbot in a `reviewThreads`
+ * GraphQL payload. A thread counts when it is not resolved and its first
+ * comment was authored by Bugbot. Returns `null` on malformed input.
+ */
+export function countUnresolvedBugbotThreads(stdout: string): number | null {
+  let data: ReviewThreadsGraphql;
+  try {
+    data = JSON.parse(stdout) as ReviewThreadsGraphql;
+  } catch {
+    return null;
+  }
+  const nodes = data.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(nodes)) return null;
+  let count = 0;
+  for (const thread of nodes) {
+    if (thread == null || thread.isResolved === true) continue;
+    const login = thread.comments?.nodes?.[0]?.author?.login ?? "";
+    if (isBugbotLogin(login)) count += 1;
+  }
+  return count;
+}
+
+const BUGBOT_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 1) { nodes { author { login } } }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * Query the PR's review threads and return how many unresolved ones Bugbot
+ * raised. Returns `null` if `gh` fails or returns unparseable output so the
+ * caller can render Bugbot's state without a count rather than erroring.
+ */
+async function fetchBugbotUnresolved(
+  repoDir: string,
+  target: { owner: string; repo: string; number: number },
+  signal: AbortSignal,
+): Promise<number | null> {
+  const result = await runGh(
+    [
+      "api",
+      "graphql",
+      "-f",
+      `query=${BUGBOT_THREADS_QUERY}`,
+      "-F",
+      `owner=${target.owner}`,
+      "-F",
+      `repo=${target.repo}`,
+      "-F",
+      `number=${target.number}`,
+    ],
+    repoDir,
+    signal,
+  );
+  if (result === null || result.exitCode !== 0) return null;
+  return countUnresolvedBugbotThreads(result.stdout);
 }

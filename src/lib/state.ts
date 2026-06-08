@@ -8,7 +8,26 @@ export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "
 
 export type ScrollIntent = { direction: ScrollDirection; stepIndex: number; seq: number };
 
-export type GithubCiOverall = "none" | "pending" | "passing" | "failing";
+export type GithubCiOverall = "none" | "pending" | "passing" | "failing" | "neutral";
+
+/**
+ * Status of Cursor Bugbot (a code-review check) when present on a PR.
+ * Bugbot is surfaced apart from CI because its NEUTRAL conclusion is a signal
+ * ("found issues"), not a skip. State meanings:
+ * - `clean`: ran and found no issues (SUCCESS)
+ * - `issues`: ran and found issues (NEUTRAL)
+ * - `pending`: still running
+ * - `error`: the check itself failed (FAILURE/TIMED_OUT/etc.)
+ */
+export type GithubBugbot = {
+  state: "clean" | "issues" | "pending" | "error";
+  /**
+   * Count of unresolved review threads Bugbot raised. Only populated when
+   * `state` is `issues` (we skip the extra API call otherwise); `undefined`
+   * means "not fetched / unknown".
+   */
+  unresolved?: number;
+};
 
 export type GithubPr = {
   number: number;
@@ -21,7 +40,11 @@ export type GithubPr = {
   ciPassing: number;
   ciFailing: number;
   ciPending: number;
+  /** Checks with a NEUTRAL conclusion; tracked apart from passing. */
+  ciNeutral: number;
   ciTotal: number;
+  /** Present only when a Cursor Bugbot check is attached to the PR head. */
+  bugbot?: GithubBugbot;
 };
 
 /**

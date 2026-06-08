@@ -99,7 +99,7 @@ describe("watchGithubPr", () => {
 
       // Branch switches while the feature-a poll is still in flight.
       branch = "feature-b";
-      const staleStatus: GithubStatus = { kind: "pr", pr: { number: 1, title: "A", state: "OPEN", isDraft: false, url: "", ciOverall: "passing", ciPassing: 1, ciFailing: 0, ciPending: 0, ciTotal: 1 } };
+      const staleStatus: GithubStatus = { kind: "pr", pr: { number: 1, title: "A", state: "OPEN", isDraft: false, url: "", ciOverall: "passing", ciPassing: 1, ciFailing: 0, ciPending: 0, ciNeutral: 0, ciTotal: 1 } };
       calls[0]!.resolve(staleStatus);
       await flush();
 

@@ -18,6 +18,8 @@ const COLOR_CLOSED = "#f38ba8";
 const COLOR_PASS = "#a6e3a1";
 const COLOR_FAIL = "#f38ba8";
 const COLOR_PENDING = "#f9e2af";
+const COLOR_NEUTRAL = "#89b4fa";
+const COLOR_BUGBOT_ISSUES = "#fab387";
 
 type Line = { content: string; fg: string; attrs: number };
 
@@ -34,28 +36,65 @@ function prStateColor(status: Extract<GithubStatus, { kind: "pr" }>): string {
 }
 
 function ciLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line {
-  const { ciOverall, ciPassing, ciFailing, ciTotal } = status.pr;
+  const { ciOverall, ciPassing, ciFailing, ciNeutral, ciTotal } = status.pr;
   if (ciOverall === "none") return { content: "no checks", fg: COLOR_MUTED, attrs: TextAttributes.NONE };
   if (ciOverall === "failing") {
     return { content: formatRow("✗ failing", `${ciFailing}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
   }
   if (ciOverall === "pending") {
-    const done = ciPassing + ciFailing;
+    const done = ciPassing + ciFailing + ciNeutral;
     return { content: formatRow(`${frame} running`, `${done}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
   }
-  return { content: formatRow("✓ passing", `${ciTotal}`, TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
+  if (ciOverall === "neutral") {
+    return { content: formatRow("~ neutral", `${ciNeutral}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
+  }
+  return { content: formatRow("✓ passing", `${ciPassing}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
+}
+
+/**
+ * Secondary line shown when some checks are NEUTRAL but the overall verdict is
+ * something else (passing/failing/pending) — so neutral counts never hide
+ * inside the passing tally. When the overall verdict is itself `neutral`,
+ * {@link ciLine} already covers it and this returns null.
+ */
+function neutralLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null {
+  const { ciOverall, ciNeutral } = status.pr;
+  if (ciNeutral <= 0 || ciOverall === "neutral") return null;
+  return { content: formatRow("~ neutral", `${ciNeutral}`, TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
+}
+
+/** Dedicated Bugbot line; null when no Bugbot check is attached to the PR. */
+function bugbotLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line | null {
+  const bugbot = status.pr.bugbot;
+  if (bugbot === undefined) return null;
+  if (bugbot.state === "pending") {
+    return { content: formatRow(`${frame} bugbot`, "running", TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
+  }
+  if (bugbot.state === "error") {
+    return { content: formatRow("✗ bugbot", "error", TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
+  }
+  if (bugbot.state === "issues") {
+    const detail = bugbot.unresolved === undefined ? "issues" : `${bugbot.unresolved} unresolved`;
+    return { content: formatRow("● bugbot", detail, TEXT_WIDTH), fg: COLOR_BUGBOT_ISSUES, attrs: TextAttributes.NONE };
+  }
+  return { content: formatRow("✓ bugbot", "clean", TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
 }
 
 function buildLines(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line[] {
-  return [
+  const lines: Line[] = [
     { content: formatRow(`#${status.pr.number}`, prStateLabel(status), TEXT_WIDTH), fg: prStateColor(status), attrs: TextAttributes.BOLD },
     { content: status.pr.title, fg: COLOR_TITLE, attrs: TextAttributes.NONE },
     ciLine(status, frame),
   ];
+  const neutral = neutralLine(status);
+  if (neutral !== null) lines.push(neutral);
+  const bugbot = bugbotLine(status, frame);
+  if (bugbot !== null) lines.push(bugbot);
+  return lines;
 }
 
 function isLive(status: GithubStatus): boolean {
-  return status.kind === "pr" && status.pr.ciOverall === "pending";
+  return status.kind === "pr" && (status.pr.ciOverall === "pending" || status.pr.bugbot?.state === "pending");
 }
 
 export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState): BoxRenderable {
