@@ -6,6 +6,7 @@ import {
   countUnresolvedBugbotThreads,
   isBugbotEntry,
   isBugbotLogin,
+  parseBugbotThreadsPage,
   parsePrListJson,
   parsePrUrl,
   parseRemoteIsGithub,
@@ -412,5 +413,34 @@ describe("countUnresolvedBugbotThreads", () => {
   test("returns null on malformed input", () => {
     expect(countUnresolvedBugbotThreads("not json")).toBeNull();
     expect(countUnresolvedBugbotThreads("{}")).toBeNull();
+  });
+});
+
+describe("parseBugbotThreadsPage", () => {
+  const thread = (isResolved: boolean, login: string) => ({
+    isResolved,
+    comments: { nodes: [{ author: { login } }] },
+  });
+
+  const payload = (threads: unknown[], pageInfo?: { hasNextPage: boolean; endCursor: string | null }) =>
+    JSON.stringify({
+      data: { repository: { pullRequest: { reviewThreads: { nodes: threads, ...(pageInfo ? { pageInfo } : {}) } } } },
+    });
+
+  test("counts the page and reports there are no more pages by default", () => {
+    const page = parseBugbotThreadsPage(payload([thread(false, "cursor"), thread(true, "cursor")]));
+    expect(page).toEqual({ count: 1, hasNextPage: false, endCursor: null });
+  });
+
+  test("surfaces pagination info when more pages remain", () => {
+    const page = parseBugbotThreadsPage(
+      payload([thread(false, "cursor")], { hasNextPage: true, endCursor: "Y3Vyc29y" }),
+    );
+    expect(page).toEqual({ count: 1, hasNextPage: true, endCursor: "Y3Vyc29y" });
+  });
+
+  test("returns null on malformed input", () => {
+    expect(parseBugbotThreadsPage("not json")).toBeNull();
+    expect(parseBugbotThreadsPage("{}")).toBeNull();
   });
 });

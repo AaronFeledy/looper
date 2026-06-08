@@ -398,25 +398,37 @@ type ReviewThreadsGraphql = {
             isResolved?: boolean;
             comments?: { nodes?: ({ author?: { login?: string } | null } | null)[] | null } | null;
           } | null)[] | null;
+          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null } | null;
         } | null;
       } | null;
     } | null;
   } | null;
 };
 
+/** One parsed page of the review-thread query: a count plus pagination info. */
+export type BugbotThreadsPage = {
+  /** Unresolved Bugbot-authored threads on this page. */
+  count: number;
+  /** Whether more thread pages remain to fetch. */
+  hasNextPage: boolean;
+  /** Cursor to pass as `after` for the next page; null when none. */
+  endCursor: string | null;
+};
+
 /**
- * Count the unresolved review threads opened by Bugbot in a `reviewThreads`
- * GraphQL payload. A thread counts when it is not resolved and its first
- * comment was authored by Bugbot. Returns `null` on malformed input.
+ * Parse one page of the `reviewThreads` GraphQL payload: count the unresolved
+ * threads opened by Bugbot (not resolved, first comment authored by Bugbot)
+ * and extract pagination info. Returns `null` on malformed input.
  */
-export function countUnresolvedBugbotThreads(stdout: string): number | null {
+export function parseBugbotThreadsPage(stdout: string): BugbotThreadsPage | null {
   let data: ReviewThreadsGraphql;
   try {
     data = JSON.parse(stdout) as ReviewThreadsGraphql;
   } catch {
     return null;
   }
-  const nodes = data.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  const threads = data.data?.repository?.pullRequest?.reviewThreads;
+  const nodes = threads?.nodes;
   if (!Array.isArray(nodes)) return null;
   let count = 0;
   for (const thread of nodes) {
@@ -424,34 +436,56 @@ export function countUnresolvedBugbotThreads(stdout: string): number | null {
     const login = thread.comments?.nodes?.[0]?.author?.login ?? "";
     if (isBugbotLogin(login)) count += 1;
   }
-  return count;
+  return {
+    count,
+    hasNextPage: threads?.pageInfo?.hasNextPage === true,
+    endCursor: threads?.pageInfo?.endCursor ?? null,
+  };
 }
 
-const BUGBOT_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!) {
+/**
+ * Count the unresolved Bugbot threads in a single (unpaginated) `reviewThreads`
+ * payload. Returns `null` on malformed input.
+ */
+export function countUnresolvedBugbotThreads(stdout: string): number | null {
+  const page = parseBugbotThreadsPage(stdout);
+  return page === null ? null : page.count;
+}
+
+const BUGBOT_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $after) {
         nodes {
           isResolved
           comments(first: 1) { nodes { author { login } } }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 }`;
 
+/** Page ceiling for review-thread pagination (100 threads/page = 5000 max). */
+const BUGBOT_THREADS_MAX_PAGES = 50;
+
 /**
  * Query the PR's review threads and return how many unresolved ones Bugbot
- * raised. Returns `null` if `gh` fails or returns unparseable output so the
- * caller can render Bugbot's state without a count rather than erroring.
+ * raised, paginating through every page so PRs with more than 100 threads are
+ * counted fully (a partial count could otherwise flip Bugbot from `issues` to
+ * `clean`). Returns `null` if `gh` fails or returns unparseable output so the
+ * caller can render Bugbot's state without a count rather than erroring. The
+ * shared `signal` bounds the whole pagination loop, not each page.
  */
 async function fetchBugbotUnresolved(
   repoDir: string,
   target: { owner: string; repo: string; number: number },
   signal: AbortSignal,
 ): Promise<number | null> {
-  const result = await runGh(
-    [
+  let total = 0;
+  let after: string | null = null;
+  for (let page = 0; page < BUGBOT_THREADS_MAX_PAGES; page += 1) {
+    const args = [
       "api",
       "graphql",
       "-f",
@@ -462,10 +496,16 @@ async function fetchBugbotUnresolved(
       `repo=${target.repo}`,
       "-F",
       `number=${target.number}`,
-    ],
-    repoDir,
-    signal,
-  );
-  if (result === null || result.exitCode !== 0) return null;
-  return countUnresolvedBugbotThreads(result.stdout);
+    ];
+    // Cursor is an opaque string; pass it raw (`-f`) so gh doesn't coerce it.
+    if (after !== null) args.push("-f", `after=${after}`);
+    const result = await runGh(args, repoDir, signal);
+    if (result === null || result.exitCode !== 0) return null;
+    const parsed = parseBugbotThreadsPage(result.stdout);
+    if (parsed === null) return null;
+    total += parsed.count;
+    if (!parsed.hasNextPage || parsed.endCursor === null) return total;
+    after = parsed.endCursor;
+  }
+  return total;
 }
