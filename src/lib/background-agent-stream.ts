@@ -53,20 +53,20 @@ export function startBackgroundAgentStreamer({
     pushBackgroundAgentLines(state, stepIndex, sessionID, lines);
   };
 
-  let inflight = false;
+  const inflight = new Set<string>();
   const refresh = async (target: { sessionID: string; stepIndex: number }): Promise<void> => {
-    if (inflight) return;
-    inflight = true;
+    if (inflight.has(target.sessionID)) return;
+    inflight.add(target.sessionID);
     try {
       const result = await client.session.messages({ sessionID: target.sessionID, directory: repoDir });
       if (result.error || !result.data) return;
       if (active === null || active.sessionID !== target.sessionID) return;
       const lines = renderSessionMessages(result.data);
       replaceBuffer(target.stepIndex, target.sessionID, lines);
-    } catch {
-      // transient; next tick retries
+    } catch (error) {
+      if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] background agent stream: refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      inflight = false;
+      inflight.delete(target.sessionID);
     }
   };
 

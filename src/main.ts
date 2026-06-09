@@ -21,7 +21,7 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { createLoopState, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
+import { cancelPendingNotify, createLoopState, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
 import {
   clearStopAfterIterationFile,
   clearResumeStepFile,
@@ -447,6 +447,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);
     process.off("SIGTERM", handleSigterm);
+    cancelPendingNotify();
     bootScreen?.destroy();
     renderer?.destroy();
     await server?.close();

@@ -569,6 +569,12 @@ export function subscribe(listener: Listener): () => void {
   };
 }
 
+export function cancelPendingNotify(): void {
+  if (notifyTimer === undefined) return;
+  clearTimeout(notifyTimer);
+  notifyTimer = undefined;
+}
+
 export function notify(): void {
   if (notifyTimer !== undefined) return;
   notifyTimer = setTimeout(() => {
@@ -577,4 +583,5 @@ export function notify(): void {
       listener();
     }
   }, NOTIFY_FRAME_MS);
+  notifyTimer.unref?.();
 }

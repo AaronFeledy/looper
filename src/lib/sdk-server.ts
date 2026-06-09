@@ -8,6 +8,20 @@ export type ServerHandle = {
 const LISTENING_RE = /opencode server listening on\s+(https?:\/\/\S+)/i;
 const SPAWN_TIMEOUT_MS = 15_000;
 
+function logServerDiagnostic(message: string): void {
+  if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] opencode server: ${message}`);
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const decoder = new TextDecoder();
   let buffer = "";
@@ -95,12 +109,16 @@ async function spawnOpencodeServer(opencodeBin: string, signal?: AbortSignal): P
 
   // Start draining stderr immediately; a noisy server can otherwise fill the pipe
   // and block before stdout prints the listening URL.
-  void drain(proc.stderr).catch(() => undefined);
+  void drain(proc.stderr).catch((error) => {
+    logServerDiagnostic(`stderr drain failed: ${formatError(error)}`);
+  });
 
   const url = await captureListeningUrl(proc, signal);
 
   // Keep draining stdout or the OS pipe buffer fills and the server blocks on write.
-  void drain(proc.stdout).catch(() => undefined);
+  void drain(proc.stdout).catch((error) => {
+    logServerDiagnostic(`stdout drain failed: ${formatError(error)}`);
+  });
 
   return { url, proc };
 }
@@ -126,7 +144,9 @@ export async function startOrAttachServer(options: {
       if (proc.exitCode !== null) return;
       proc.kill("SIGTERM");
       const forceTimer = setTimeout(() => proc.kill("SIGKILL"), 3000);
-      await proc.exited.catch(() => undefined);
+      await proc.exited.catch((error) => {
+        logServerDiagnostic(`shutdown wait failed: ${formatError(error)}`);
+      });
       clearTimeout(forceTimer);
     },
   };

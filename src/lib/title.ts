@@ -439,7 +439,15 @@ function logTitleAgentUsage(info: Message, log: ((line: string) => void) | undef
     if (info.role !== "assistant") return;
     const cost = typeof info.cost === "number" ? `${info.cost.toFixed(4)}` : "n/a";
     log(`[looper] title gen used agent=${info.agent} model=${info.providerID}/${info.modelID} cost=${cost}`);
-  } catch {}
+  } catch (error) {
+    try {
+      log(`[looper] title gen: usage logging failed: ${formatError(error)}`);
+    } catch (logError) {
+      if (process.env.LOOPER_DEBUG_EVENTS === "1") {
+        console.error(`[looper] title gen: usage logging failed and fallback log failed: ${formatError(logError)}`);
+      }
+    }
+  }
 }
 
 /**

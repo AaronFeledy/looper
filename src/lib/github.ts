@@ -74,7 +74,8 @@ export function parseRemoteIsGithub(remoteUrl: string): boolean {
 
   try {
     return isGithubHost(new URL(trimmed).hostname);
-  } catch {
+  } catch (error) {
+    debugGithub(`remote URL parse failed for ${JSON.stringify(trimmed)}: ${formatError(error)}`);
     return false;
   }
 }
@@ -220,14 +221,23 @@ async function gitOriginUrl(repoDir: string): Promise<string | null> {
 
 let ghAvailableCache: Promise<boolean> | undefined;
 
-/** Whether the `gh` CLI is installed and runnable. Cached for the session. */
+/** Whether the `gh` CLI is installed and runnable. Cached for the session to avoid repeated subprocess probes. */
 export function ghAvailable(): Promise<boolean> {
   if (ghAvailableCache === undefined) {
     ghAvailableCache = $`gh --version`
       .quiet()
       .nothrow()
-      .then((result) => result.exitCode === 0)
-      .catch(() => false);
+      .then((result) => {
+        if (result.exitCode !== 0) {
+          debugGithub(`gh --version exited ${result.exitCode}: ${firstLine(result.stderr.toString()) || "no stderr"}`);
+          return false;
+        }
+        return true;
+      })
+      .catch((error) => {
+        debugGithub(`gh --version threw: ${formatError(error)}`);
+        return false;
+      });
   }
   return ghAvailableCache;
 }
@@ -246,6 +256,20 @@ function firstLine(value: string): string {
   return value.split(/\r?\n/, 1)[0]?.trim() ?? "";
 }
 
+function debugGithub(message: string): void {
+  if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] github: ${message}`);
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 const GH_TIMEOUT_MS = 10_000;
 
 function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
@@ -262,7 +286,8 @@ async function runGh(
     const proc = Bun.spawn(["gh", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe", signal });
     const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     return { exitCode: await proc.exited, stdout, stderr };
-  } catch {
+  } catch (error) {
+    debugGithub(`gh ${args.join(" ")} threw: ${formatError(error)}`);
     return null;
   }
 }
@@ -279,7 +304,8 @@ export function parsePrListJson(stdout: string): GithubStatus {
   let data: GhPrJson[];
   try {
     data = JSON.parse(stdout) as GhPrJson[];
-  } catch {
+  } catch (error) {
+    debugGithub(`gh pr list returned invalid JSON: ${formatError(error)}; stdout=${JSON.stringify(firstLine(stdout))}`);
     return { kind: "error", message: "invalid gh output" };
   }
 
@@ -424,7 +450,8 @@ export function parseBugbotThreadsPage(stdout: string): BugbotThreadsPage | null
   let data: ReviewThreadsGraphql;
   try {
     data = JSON.parse(stdout) as ReviewThreadsGraphql;
-  } catch {
+  } catch (error) {
+    debugGithub(`gh api graphql returned invalid JSON: ${formatError(error)}; stdout=${JSON.stringify(firstLine(stdout))}`);
     return null;
   }
   const threads = data.data?.repository?.pullRequest?.reviewThreads;
@@ -500,7 +527,11 @@ async function fetchBugbotUnresolved(
     // Cursor is an opaque string; pass it raw (`-f`) so gh doesn't coerce it.
     if (after !== null) args.push("-f", `after=${after}`);
     const result = await runGh(args, repoDir, signal);
-    if (result === null || result.exitCode !== 0) return null;
+    if (result === null) return null;
+    if (result.exitCode !== 0) {
+      debugGithub(`gh ${args.join(" ")} exited ${result.exitCode}: ${firstLine(result.stderr) || "no stderr"}`);
+      return null;
+    }
     const parsed = parseBugbotThreadsPage(result.stdout);
     if (parsed === null) return null;
     total += parsed.count;

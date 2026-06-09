@@ -7,6 +7,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 export const TITLE_AGENT_NAME = "looper-title";
 
 const TITLE_AGENT_MARKER = "managed by looper (looper-title)";
+const TITLE_AGENT_MARKER_LINE = `<!-- ${TITLE_AGENT_MARKER}: auto-generated; edits will be overwritten. -->`;
 
 const TITLE_AGENT_CONTENT = `---
 description: Looper internal title generator. Hidden; used by looper to title step sessions.
@@ -14,7 +15,7 @@ mode: subagent
 hidden: true
 temperature: 0
 ---
-<!-- ${TITLE_AGENT_MARKER}: auto-generated; edits will be overwritten. -->
+${TITLE_AGENT_MARKER_LINE}
 
 You generate a single, concise thread title for an autonomous coding agent's work log. Output only the title — no preamble, no quotes, no commentary. Looper supplies the full title instructions with each request.
 `;
