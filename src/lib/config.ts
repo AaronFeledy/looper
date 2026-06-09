@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 
@@ -145,9 +145,17 @@ export function configCandidatePaths(configDir: string): string[] {
   return CONFIG_FILE_NAMES.map((name) => join(configDir, name));
 }
 
+function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** First existing config file in `configDir`, or undefined if none exist. */
 export function findConfigFile(configDir: string): string | undefined {
-  return configCandidatePaths(configDir).find((candidate) => existsSync(candidate));
+  return configCandidatePaths(configDir).find((candidate) => isRegularFile(candidate));
 }
 
 /** Resolved existing config path, or the default (preferred) path when none exist. */
@@ -166,6 +174,7 @@ function isMissingPath(error: unknown): boolean {
 
 function readFirstConfigFile(configDir: string): ConfigFileRead | undefined {
   for (const configPath of configCandidatePaths(configDir)) {
+    if (!isRegularFile(configPath)) continue;
     try {
       return { path: configPath, content: readFileSync(configPath, "utf8") };
     } catch (error) {
@@ -182,9 +191,17 @@ function loadRawConfig(configDir: string): RawConfig {
     throw new Error(`missing ${CONFIG_FILE_NAME} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")}); create it with at least one step`);
   }
 
-  const rawConfig = YAML.parse(configFile.content) as RawConfig | null;
-  if (!rawConfig || typeof rawConfig !== "object") throw new Error(`${configFile.path} must contain a mapping`);
-  return rawConfig;
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(configFile.content);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${configFile.path} is not valid YAML: ${detail}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${configFile.path} must contain a mapping`);
+  }
+  return parsed as RawConfig;
 }
 
 function parseTitleConfig(value: unknown): TitleGenConfig | undefined {

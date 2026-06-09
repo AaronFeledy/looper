@@ -4,6 +4,10 @@ import { isAbsolute, join } from "node:path";
 
 const HEAD_REF_PREFIX = "ref: refs/heads/";
 
+function logBranchDiagnostic(message: string): void {
+  if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] branch-watcher: ${message}`);
+}
+
 /** Default polling interval for the background watcher. */
 export const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
@@ -47,7 +51,8 @@ export async function resolveGitHeadPath(repoDir: string): Promise<string | null
 export function readBranchFromHead(headPath: string): string | null {
   try {
     return parseHeadContents(readFileSync(headPath, "utf8"));
-  } catch {
+  } catch (error) {
+    logBranchDiagnostic(`failed to read HEAD at ${headPath}: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }

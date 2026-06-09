@@ -179,7 +179,8 @@ export function createLineBatcher(
       pending = normalizeNewlines(pending)
 
       const segments = pending.split('\n')
-      pending = segments.pop() ?? ''
+      // Collapse CR overwrites in the retained tail so newline-less progress redraws can't grow `pending` unbounded.
+      pending = visibleCarriageReturnSegment(segments.pop() ?? '')
 
       for (const segment of segments) {
         const trimmedLine = visibleCarriageReturnSegment(segment)
