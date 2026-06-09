@@ -382,6 +382,7 @@ test("runIteration retries session errors twice before surfacing terminal failur
     },
     session: {
       abort: async () => ({}),
+      children: async () => ({ data: [] }),
       create: async () => ({ data: { id: "ses_retry" } }),
       messages: async () => ({ data: [] }),
       prompt: async () => {
