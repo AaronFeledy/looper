@@ -1,8 +1,12 @@
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function logStateDiagnostic(message: string): void {
+  if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] state-files: ${message}`);
 }
 
 function tolerantRm(path: string): void {
@@ -89,12 +93,21 @@ export function clearResumeStepFile() {
   tolerantRm(resumeStepFilePath());
 }
 
+function regularFileExists(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch (error) {
+    if (isMissingPath(error)) return false;
+    throw error;
+  }
+}
+
 export function stopFileExists() {
-  return existsSync(stopFilePath());
+  return regularFileExists(stopFilePath());
 }
 
 export function stopAfterIterationFileExists() {
-  return existsSync(stopAfterIterationFilePath());
+  return regularFileExists(stopAfterIterationFilePath());
 }
 
 function readReasonFile(path: string) {
@@ -140,7 +153,8 @@ export function readResumeStep(): ResumeStep | null {
     const content = tolerantRead(resumeStepFilePath());
     if (content === null) return null;
     return parseResumeStep(JSON.parse(content));
-  } catch {
+  } catch (error) {
+    logStateDiagnostic(`ignoring unreadable resume-step file: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }

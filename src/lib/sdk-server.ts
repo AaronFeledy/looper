@@ -7,9 +7,36 @@ export type ServerHandle = {
 
 const LISTENING_RE = /opencode server listening on\s+(https?:\/\/\S+)/i;
 const SPAWN_TIMEOUT_MS = 15_000;
+const SHUTDOWN_GRACE_MS = 3_000;
 
 function logServerDiagnostic(message: string): void {
   if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] opencode server: ${message}`);
+}
+
+// SIGTERM, escalate to SIGKILL after the grace window, and await the exit so a
+// server that ignores SIGTERM is never orphaned. Shared by shutdown and every
+// startup-failure path.
+async function terminateProcess(proc: Subprocess, label: string): Promise<void> {
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill("SIGTERM");
+  } catch (error) {
+    logServerDiagnostic(`${label}: SIGTERM failed: ${formatError(error)}`);
+  }
+  const forceTimer = setTimeout(() => {
+    try {
+      proc.kill("SIGKILL");
+    } catch (error) {
+      logServerDiagnostic(`${label}: SIGKILL failed: ${formatError(error)}`);
+    }
+  }, SHUTDOWN_GRACE_MS);
+  try {
+    await proc.exited;
+  } catch (error) {
+    logServerDiagnostic(`${label}: exit wait failed: ${formatError(error)}`);
+  } finally {
+    clearTimeout(forceTimer);
+  }
 }
 
 function formatError(error: unknown): string {
@@ -73,10 +100,7 @@ async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">, s
   })();
   const aborted = signal
     ? new Promise<never>((_, reject) => {
-        const onAbort = () => {
-          proc.kill("SIGTERM");
-          reject(abortReason(signal));
-        };
+        const onAbort = () => reject(abortReason(signal));
         signal.addEventListener("abort", onAbort, { once: true });
         removeAbortListener = () => signal.removeEventListener("abort", onAbort);
       })
@@ -84,18 +108,12 @@ async function captureListeningUrl(proc: Subprocess<"ignore", "pipe", "pipe">, s
 
   try {
     await Promise.race(aborted ? [scan, exited, timeout, aborted] : [scan, exited, timeout]);
-  } catch (error) {
-    proc.kill("SIGTERM");
-    throw error;
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     removeAbortListener?.();
   }
 
-  if (url === null) {
-    proc.kill("SIGTERM");
-    throw new Error("opencode serve closed stdout without announcing a URL");
-  }
+  if (url === null) throw new Error("opencode serve closed stdout without announcing a URL");
 
   return url;
 }
@@ -113,7 +131,13 @@ async function spawnOpencodeServer(opencodeBin: string, signal?: AbortSignal): P
     logServerDiagnostic(`stderr drain failed: ${formatError(error)}`);
   });
 
-  const url = await captureListeningUrl(proc, signal);
+  let url: string;
+  try {
+    url = await captureListeningUrl(proc, signal);
+  } catch (error) {
+    await terminateProcess(proc, "startup failed");
+    throw error;
+  }
 
   // Keep draining stdout or the OS pipe buffer fills and the server blocks on write.
   void drain(proc.stdout).catch((error) => {
@@ -141,13 +165,7 @@ export async function startOrAttachServer(options: {
   return {
     url,
     async close() {
-      if (proc.exitCode !== null) return;
-      proc.kill("SIGTERM");
-      const forceTimer = setTimeout(() => proc.kill("SIGKILL"), 3000);
-      await proc.exited.catch((error) => {
-        logServerDiagnostic(`shutdown wait failed: ${formatError(error)}`);
-      });
-      clearTimeout(forceTimer);
+      await terminateProcess(proc, "shutdown");
     },
   };
 }
