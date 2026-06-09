@@ -78,6 +78,19 @@ describe("stopServerSession drain window (kill path)", () => {
     expect(stub.aborts).toEqual(["sid"]);
     expect(stub.childrenCalls()).toBe(0);
   });
+
+  test("returns false (not a false stop-confirm) when the session keeps reviving past the drain deadline", async () => {
+    const stub = killStub(["idle", "busy"], 1);
+    const confirmed = await stopServerSession({
+      client: stub.client,
+      repoDir: "/x",
+      sessionID: "sid",
+      timeoutMs: 5000,
+      drainWindowMs: 40,
+    });
+    expect(confirmed).toBe(false);
+    expect(stub.aborts.length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 describe("waitForLoopContinuationIdle drain window (settle path)", () => {
@@ -140,5 +153,35 @@ describe("waitForLoopContinuationIdle drain window (settle path)", () => {
 
     expect(result).toBe("idle");
     expect(elapsed).toBeGreaterThanOrEqual(180);
+  });
+
+  test("does not settle while session.status is unknown; a status error holds, never advances, the drain", async () => {
+    scratch = mkdtempSync(join(tmpdir(), "looper-drain-"));
+    const configDir = join(scratch, ".looper");
+    mkdirSync(configDir, { recursive: true });
+    initStatePaths({ configDir });
+    writeIdleRecord(scratch, "sid");
+    setEnv("LOOPER_CONTINUATION_DRAIN_MS", "40");
+    setEnv("LOOPER_CONTINUATION_DRAIN_POLL_MS", "20");
+    setEnv("LOOPER_CONTINUATION_POLL_MS", "20");
+
+    const client = {
+      session: {
+        status: async () => ({ error: { message: "status unavailable" } }),
+        children: async () => ({ data: [] }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const result = await waitForLoopContinuationIdle({
+      state,
+      client,
+      stepIndex: 0,
+      repoDir: scratch,
+      sessionID: "sid",
+      timeoutMs: 250,
+    });
+
+    expect(result).toBe("timeout");
   });
 });
