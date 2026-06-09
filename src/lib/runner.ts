@@ -411,16 +411,16 @@ async function holdSessionDead({
   sessionID: string;
   drainWindowMs: number;
   log?: (line: string) => void;
-}): Promise<void> {
-  if (!(await sessionHasBackgroundChildren(client, repoDir, sessionID))) return;
+}): Promise<boolean> {
+  if (!(await sessionHasBackgroundChildren(client, repoDir, sessionID))) return true;
 
   let reaborts = 0;
   let idleSince = Date.now();
   const hardDeadline = Date.now() + drainWindowMs * 4;
   while (Date.now() - idleSince < drainWindowMs) {
     if (Date.now() > hardDeadline) {
-      log?.(`[looper] session ${sessionID} kept reviving during drain; proceeding after ${reaborts} re-abort(s)`);
-      return;
+      log?.(`[looper] session ${sessionID} kept reviving during drain after ${reaborts} re-abort(s); could not confirm stop`);
+      return false;
     }
     await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, drainWindowMs));
     let state: SessionPendingState;
@@ -441,6 +441,7 @@ async function holdSessionDead({
     }
     idleSince = Date.now();
   }
+  return true;
 }
 
 export async function stopServerSession({
@@ -476,7 +477,7 @@ export async function stopServerSession({
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
     if (state === "idle") {
-      if (drainWindowMs > 0) await holdSessionDead({ client, repoDir, sessionID, drainWindowMs, log });
+      if (drainWindowMs > 0) return await holdSessionDead({ client, repoDir, sessionID, drainWindowMs, log });
       return true;
     }
     if (remaining() <= 0) {
@@ -756,13 +757,13 @@ export async function waitForLoopContinuationIdle({
         const updatedAt = Date.parse(record!.source.updatedAt);
         if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
       } else {
-        let pending = false;
+        let pendingState: SessionPendingState;
         try {
-          pending = await sessionStillPending(client, repoDir, sessionID);
+          pendingState = await sessionPendingState(client, repoDir, sessionID);
         } catch {
-          pending = false;
+          pendingState = "unknown";
         }
-        if (pending) {
+        if (pendingState !== "idle") {
           idleSince = undefined;
         } else {
           idleSince ??= Date.now();
