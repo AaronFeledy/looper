@@ -104,6 +104,7 @@ const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIB
  */
 const STOP_SESSION_CONFIRM_TIMEOUT_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", 10_000);
 const STOP_SESSION_CONFIRM_POLL_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_POLL_MS", 250);
+export const STOP_SESSION_DRAIN_WINDOW_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_DRAIN_MS", 15_000);
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -388,17 +389,73 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
  * stopped"; callers should treat that as a retryable condition, not as
  * permission to assume the session is gone.
  */
+async function sessionHasBackgroundChildren(client: OpencodeClient, repoDir: string, sessionID: string): Promise<boolean> {
+  try {
+    const result = await client.session.children({ sessionID, directory: repoDir });
+    if (result.error || !result.data) return false;
+    return result.data.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function holdSessionDead({
+  client,
+  repoDir,
+  sessionID,
+  drainWindowMs,
+  log,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  drainWindowMs: number;
+  log?: (line: string) => void;
+}): Promise<void> {
+  if (!(await sessionHasBackgroundChildren(client, repoDir, sessionID))) return;
+
+  let reaborts = 0;
+  let idleSince = Date.now();
+  const hardDeadline = Date.now() + drainWindowMs * 4;
+  while (Date.now() - idleSince < drainWindowMs) {
+    if (Date.now() > hardDeadline) {
+      log?.(`[looper] session ${sessionID} kept reviving during drain; proceeding after ${reaborts} re-abort(s)`);
+      return;
+    }
+    await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, drainWindowMs));
+    let state: SessionPendingState;
+    try {
+      state = await sessionPendingState(client, repoDir, sessionID);
+    } catch {
+      state = "unknown";
+    }
+    if (state === "idle") continue;
+    if (state === "pending") {
+      reaborts += 1;
+      log?.(`[looper] session ${sessionID} revived by a background wake during drain; re-aborting (${reaborts})`);
+      try {
+        await withDeadline(client.session.abort({ sessionID, directory: repoDir }), STOP_SESSION_CONFIRM_TIMEOUT_MS);
+      } catch {
+        // best-effort; the next poll re-evaluates
+      }
+    }
+    idleSince = Date.now();
+  }
+}
+
 export async function stopServerSession({
   client,
   repoDir,
   sessionID,
   timeoutMs = STOP_SESSION_CONFIRM_TIMEOUT_MS,
+  drainWindowMs = 0,
   log,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
   timeoutMs?: number;
+  drainWindowMs?: number;
   log?: (line: string) => void;
 }): Promise<boolean> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
@@ -418,7 +475,10 @@ export async function stopServerSession({
   while (true) {
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
-    if (state === "idle") return true;
+    if (state === "idle") {
+      if (drainWindowMs > 0) await holdSessionDead({ client, repoDir, sessionID, drainWindowMs, log });
+      return true;
+    }
     if (remaining() <= 0) {
       log?.(`[looper] session ${sessionID} still ${state} ${timeoutMs}ms after abort; could not confirm stop`);
       return false;
@@ -663,6 +723,9 @@ export async function waitForLoopContinuationIdle({
   timeoutMs?: number;
 }): Promise<ContinuationWaitResult> {
   const startedAt = Date.now();
+  const drainWindowMs = positiveIntegerEnv("LOOPER_CONTINUATION_DRAIN_MS", 15_000);
+  const drainPollMs = positiveIntegerEnv("LOOPER_CONTINUATION_DRAIN_POLL_MS", 1_000);
+  const pollMs = positiveIntegerEnv("LOOPER_CONTINUATION_POLL_MS", CONTINUATION_POLL_MS);
   const poller = startBackgroundAgentPoller({
     state,
     stepIndex,
@@ -672,6 +735,7 @@ export async function waitForLoopContinuationIdle({
     fallbackAgents: continuationFallback(repoDir, sessionID),
   });
 
+  let idleSince: number | undefined;
   try {
     while (true) {
       if (state.restartRequested) return "restart";
@@ -685,31 +749,37 @@ export async function waitForLoopContinuationIdle({
         record = null;
       }
 
-      if (record !== null && record.source.state === "idle") {
-        setContinuationStatus(state, stepIndex, record);
-        logContinuationState(state, stepIndex, record, "background tasks idle");
-        return "idle";
-      }
-
-      if (record === null) {
-        // Record vanished or never appeared. Only call it "idle" once the SDK
-        // confirms the session is no longer pending; otherwise keep polling.
+      const backgroundActive = record !== null && record.source.state === "active";
+      if (backgroundActive) {
+        idleSince = undefined;
+        setContinuationStatus(state, stepIndex, record!);
+        const updatedAt = Date.parse(record!.source.updatedAt);
+        if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
+      } else {
         let pending = false;
         try {
           pending = await sessionStillPending(client, repoDir, sessionID);
         } catch {
           pending = false;
         }
-        if (!pending) return "idle";
-      } else {
-        setContinuationStatus(state, stepIndex, record);
-        const updatedAt = Date.parse(record.source.updatedAt);
-        if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
+        if (pending) {
+          idleSince = undefined;
+        } else {
+          idleSince ??= Date.now();
+          if (Date.now() - idleSince >= drainWindowMs) {
+            if (record !== null) {
+              setContinuationStatus(state, stepIndex, record);
+              logContinuationState(state, stepIndex, record, "background tasks idle");
+            }
+            return "idle";
+          }
+        }
+        if (record !== null) setContinuationStatus(state, stepIndex, record);
       }
 
       if (Date.now() - startedAt > Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs)) return "timeout";
 
-      await Bun.sleep(CONTINUATION_POLL_MS);
+      await Bun.sleep(idleSince !== undefined ? drainPollMs : pollMs);
     }
   } finally {
     poller.stop();
