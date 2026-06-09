@@ -382,12 +382,16 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
  * resuming a still-busy session silently drops the resume prompt (opencode's
  * per-session mutex persists the message but ignores its generation).
  *
- * The ENTIRE operation — the abort call and every status poll — is bounded
- * by `timeoutMs` so a hung HTTP call can never deadlock the loop. Polls
- * `session.status` only (never `session.messages`) so it is cheap and never
- * perturbs message history. A `false` return means "could not confirm
- * stopped"; callers should treat that as a retryable condition, not as
- * permission to assume the session is gone.
+ * The abort call and the status polls up to first-idle are bounded by
+ * `timeoutMs` so a hung HTTP call can never deadlock the loop. When
+ * `drainWindowMs > 0`, an ADDITIONAL drain phase runs after first-idle to
+ * outlast background-wake revivals; that phase is bounded separately (up to
+ * `drainWindowMs * 4`, not by `timeoutMs`), so callers must budget for
+ * `timeoutMs + drainWindowMs * 4` worst case. Polls `session.status` only
+ * (never `session.messages`) so it is cheap and never perturbs message
+ * history. A `false` return means "could not confirm stopped"; callers should
+ * treat that as a retryable condition, not as permission to assume the session
+ * is gone.
  */
 async function sessionHasBackgroundChildren(client: OpencodeClient, repoDir: string, sessionID: string): Promise<boolean> {
   try {
@@ -778,7 +782,17 @@ export async function waitForLoopContinuationIdle({
         if (record !== null) setContinuationStatus(state, stepIndex, record);
       }
 
-      if (Date.now() - startedAt > Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs)) return "timeout";
+      // An in-progress drain must be allowed to finish even if the step budget
+      // (`timeoutMs`) runs out mid-drain; otherwise a session that goes idle
+      // with <`drainWindowMs` left is falsely reported as `timeout`, forcing a
+      // needless restart of work that is actually done. Extend only to the
+      // current drain's completion (`idleSince + drainWindowMs`), capped by
+      // CONTINUATION_MAX_WAIT_MS; a session going active resets `idleSince`.
+      const baseDeadlineMs = Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs);
+      const drainDeadlineMs = idleSince !== undefined
+        ? Math.min(CONTINUATION_MAX_WAIT_MS, idleSince - startedAt + drainWindowMs)
+        : 0;
+      if (Date.now() - startedAt > Math.max(baseDeadlineMs, drainDeadlineMs)) return "timeout";
 
       await Bun.sleep(idleSince !== undefined ? drainPollMs : pollMs);
     }
