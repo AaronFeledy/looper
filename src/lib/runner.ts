@@ -393,13 +393,13 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
  * treat that as a retryable condition, not as permission to assume the session
  * is gone.
  */
-async function sessionHasBackgroundChildren(client: OpencodeClient, repoDir: string, sessionID: string): Promise<boolean> {
+async function listSessionChildState(client: OpencodeClient, repoDir: string, sessionID: string): Promise<"none" | "some" | "unknown"> {
   try {
     const result = await client.session.children({ sessionID, directory: repoDir });
-    if (result.error || !result.data) return false;
-    return result.data.length > 0;
+    if (result.error || !result.data) return "unknown";
+    return result.data.length > 0 ? "some" : "none";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -416,7 +416,11 @@ async function holdSessionDead({
   drainWindowMs: number;
   log?: (line: string) => void;
 }): Promise<boolean> {
-  if (!(await sessionHasBackgroundChildren(client, repoDir, sessionID))) return true;
+  // Only a background sub-session can revive this parent after it first reports
+  // idle, so a CONFIRMED-empty child list means the stop is already settled and
+  // the drain can be skipped. An inconclusive lookup is treated as "may have
+  // children" and drained, matching this function's hold-on-uncertainty stance.
+  if ((await listSessionChildState(client, repoDir, sessionID)) === "none") return true;
 
   let reaborts = 0;
   let idleSince = Date.now();
@@ -434,14 +438,17 @@ async function holdSessionDead({
       state = "unknown";
     }
     if (state === "idle") continue;
-    if (state === "pending") {
-      reaborts += 1;
-      log?.(`[looper] session ${sessionID} revived by a background wake during drain; re-aborting (${reaborts})`);
-      try {
-        await withDeadline(client.session.abort({ sessionID, directory: repoDir }), STOP_SESSION_CONFIRM_TIMEOUT_MS);
-      } catch {
-        // best-effort; the next poll re-evaluates
-      }
+    // Non-idle means a background wake revived the session (`pending`) or the
+    // status read failed (`unknown`). Re-abort in BOTH cases: aborting an
+    // already-idle session is harmless, while skipping it on `unknown` could
+    // let a revived generation keep running until later idle reads confirm a
+    // false stop.
+    reaborts += 1;
+    log?.(`[looper] session ${sessionID} non-idle (${state}) during drain; re-aborting (${reaborts})`);
+    try {
+      await withDeadline(client.session.abort({ sessionID, directory: repoDir }), STOP_SESSION_CONFIRM_TIMEOUT_MS);
+    } catch {
+      // best-effort; the next poll re-evaluates
     }
     idleSince = Date.now();
   }
