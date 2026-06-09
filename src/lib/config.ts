@@ -155,14 +155,35 @@ export function configFilePath(configDir: string): string {
   return findConfigFile(configDir) ?? join(configDir, CONFIG_FILE_NAME);
 }
 
+type ConfigFileRead = {
+  path: string;
+  content: string;
+};
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function readFirstConfigFile(configDir: string): ConfigFileRead | undefined {
+  for (const configPath of configCandidatePaths(configDir)) {
+    try {
+      return { path: configPath, content: readFileSync(configPath, "utf8") };
+    } catch (error) {
+      if (isMissingPath(error)) continue;
+      throw error;
+    }
+  }
+  return undefined;
+}
+
 function loadRawConfig(configDir: string): RawConfig {
-  const configPath = findConfigFile(configDir);
-  if (configPath === undefined) {
+  const configFile = readFirstConfigFile(configDir);
+  if (configFile === undefined) {
     throw new Error(`missing ${CONFIG_FILE_NAME} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")}); create it with at least one step`);
   }
 
-  const rawConfig = YAML.parse(readFileSync(configPath, "utf8")) as RawConfig | null;
-  if (!rawConfig || typeof rawConfig !== "object") throw new Error(`${CONFIG_FILE_NAME} must contain a mapping`);
+  const rawConfig = YAML.parse(configFile.content) as RawConfig | null;
+  if (!rawConfig || typeof rawConfig !== "object") throw new Error(`${configFile.path} must contain a mapping`);
   return rawConfig;
 }
 

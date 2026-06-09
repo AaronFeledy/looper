@@ -56,7 +56,7 @@ function groupContentLine(line: string): string {
 function toolCallName(line: string): string | null {
   const visible = stripAnsi(line);
   if (!visible.startsWith("◌ tool ")) return null;
-  return visible.slice("◌ tool ".length).split(" ")[0] ?? null;
+  return visible.slice("◌ tool ".length).split(" ")[0] || null;
 }
 
 function toolOutputName(title: string): string | null {
@@ -67,7 +67,7 @@ function toolOutputName(title: string): string | null {
 function toolFailureName(line: string): string | null {
   const visible = stripAnsi(line);
   if (!visible.startsWith("✗ tool failed ")) return null;
-  return visible.slice("✗ tool failed ".length).split(" ")[0] ?? null;
+  return visible.slice("✗ tool failed ".length).split(" ")[0] || null;
 }
 
 function isStandaloneStatusLine(line: string): boolean {
@@ -459,7 +459,12 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   const outputKey = (output: SelectedOutput): string => {
     const stepKey = output.stepIndex ?? "agent";
     const bgKey = output.backgroundAgent?.sessionID ?? "step";
-    return `${stepKey}:${bgKey}:${output.lines.length}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
+    // Fold each line's length into a cheap rolling hash so a middle-of-stream
+    // edit (same line count, same first/last line) still changes the key and
+    // forces a re-render. O(line count), no content scan, so perf is unchanged.
+    let lengthHash = 0;
+    for (const line of output.lines) lengthHash = (Math.imul(lengthHash, 31) + line.length) | 0;
+    return `${stepKey}:${bgKey}:${output.lines.length}:${lengthHash}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
   };
 
   const selectedScrollTarget = (): { outputScrollTop: number; outputPinnedToBottom: boolean } | null =>

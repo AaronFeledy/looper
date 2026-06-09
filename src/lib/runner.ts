@@ -60,6 +60,10 @@ type RunContinuationRecord = {
 
 type BackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: string; placeholder?: true; startedAt: number };
 
+type LiveBackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: string; startedAt: number };
+
+type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMessage?: string };
+
 export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
@@ -439,9 +443,14 @@ async function waitForActiveLoopContinuationRecord({
   const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
   let nextStatusPoll = 0;
   while (Date.now() <= deadline) {
-    const record = sessionID === undefined
-      ? readActiveProjectContinuationRecord(repoDir, startedAt)
-      : readProjectContinuationRecord(repoDir, sessionID);
+    let record: RunContinuationRecord | null;
+    try {
+      record = sessionID === undefined
+        ? readActiveProjectContinuationRecord(repoDir, startedAt)
+        : readProjectContinuationRecord(repoDir, sessionID);
+    } catch {
+      record = null;
+    }
     if (record !== null && continuationTime(record) >= startedAt - CONTINUATION_START_SKEW_MS) {
       if (record.source.state === "active") return record;
       if (record.source.state === "idle") return null;
@@ -450,7 +459,13 @@ async function waitForActiveLoopContinuationRecord({
     const now = Date.now();
     if (sessionID !== undefined && now >= nextStatusPoll) {
       nextStatusPoll = now + CONTINUATION_STATUS_POLL_MS;
-      if (await sessionStillPending(client, repoDir, sessionID)) {
+      let pending = false;
+      try {
+        pending = await sessionStillPending(client, repoDir, sessionID);
+      } catch {
+        pending = false;
+      }
+      if (pending) {
         await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
         continue;
       }
@@ -475,7 +490,12 @@ async function waitForSessionLoopContinuationRecord({
   const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
   let nextStatusPoll = 0;
   while (Date.now() <= deadline) {
-    const record = readProjectContinuationRecord(repoDir, sessionID);
+    let record: RunContinuationRecord | null;
+    try {
+      record = readProjectContinuationRecord(repoDir, sessionID);
+    } catch {
+      record = null;
+    }
     if (record !== null) {
       if (record.source.state === "active") return record;
       if (record.source.state === "idle") return null;
@@ -484,7 +504,13 @@ async function waitForSessionLoopContinuationRecord({
     const now = Date.now();
     if (now >= nextStatusPoll) {
       nextStatusPoll = now + CONTINUATION_STATUS_POLL_MS;
-      if (await sessionStillPending(client, repoDir, sessionID)) {
+      let pending = false;
+      try {
+        pending = await sessionStillPending(client, repoDir, sessionID);
+      } catch {
+        pending = false;
+      }
+      if (pending) {
         await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
         continue;
       }
@@ -538,16 +564,18 @@ async function snapshotLiveBackgroundAgents({
   client: OpencodeClient;
   repoDir: string;
   parentSessionID: string;
-}): Promise<{ sessionID: string; agent?: string; title?: string; startedAt: number }[]> {
+}): Promise<LiveBackgroundAgentScan> {
   const [childrenResult, statusResult] = await Promise.all([
     client.session.children({ sessionID: parentSessionID, directory: repoDir }),
     client.session.status({ directory: repoDir }),
   ]);
-  if (childrenResult.error || !childrenResult.data) return [];
-  if (statusResult.error || !statusResult.data) return [];
+  if (childrenResult.error) return { agents: [], errorMessage: `session.children failed: ${formatRequestError(childrenResult.error)}` };
+  if (!childrenResult.data) return { agents: [], errorMessage: "session.children returned no data" };
+  if (statusResult.error) return { agents: [], errorMessage: `session.status failed: ${formatRequestError(statusResult.error)}` };
+  if (!statusResult.data) return { agents: [], errorMessage: "session.status returned no data" };
 
   const statusMap = statusResult.data;
-  const liveAgents: { sessionID: string; agent?: string; title?: string; startedAt: number }[] = [];
+  const liveAgents: LiveBackgroundAgentSnapshot[] = [];
   for (const child of childrenResult.data) {
     if (!isPendingSessionStatus(statusMap[child.id])) continue;
     liveAgents.push({
@@ -557,7 +585,7 @@ async function snapshotLiveBackgroundAgents({
       startedAt: child.time?.created ?? Date.now(),
     });
   }
-  return liveAgents;
+  return { agents: liveAgents };
 }
 
 type BackgroundAgentPoller = { stop: () => void };
@@ -579,17 +607,28 @@ function startBackgroundAgentPoller({
 }): BackgroundAgentPoller {
   let stopped = false;
   let inflight = false;
+  let errorLogged = false;
+
+  const logPollerError = (message: string): void => {
+    if (stopped || errorLogged) return;
+    errorLogged = true;
+    const line = `[looper] background agent poller ${message}`;
+    pushAgentLine(state, line);
+    pushStepOutputLine(state, stepIndex, line);
+    notify();
+  };
 
   const tick = async (): Promise<void> => {
     if (stopped || inflight) return;
     inflight = true;
     try {
       const liveAgents = await snapshotLiveBackgroundAgents({ client, repoDir, parentSessionID });
-      const agents = liveAgents.length > 0 ? liveAgents : fallbackAgents?.() ?? [];
+      if (liveAgents.errorMessage !== undefined) logPollerError(liveAgents.errorMessage);
+      const agents = liveAgents.agents.length > 0 ? liveAgents.agents : fallbackAgents?.() ?? [];
       if (stopped) return;
       syncStepBackgroundAgents(state, stepIndex, agents);
-    } catch {
-      // ignore transient errors; next tick retries
+    } catch (error) {
+      logPollerError(`threw: ${toError(error).message}`);
     } finally {
       inflight = false;
     }
@@ -639,7 +678,12 @@ export async function waitForLoopContinuationIdle({
       if (state.skipRequested) return "skipped";
       if (state.quitting || stopFileExists()) return "stopped";
 
-      const record = readProjectContinuationRecord(repoDir, sessionID);
+      let record: RunContinuationRecord | null;
+      try {
+        record = readProjectContinuationRecord(repoDir, sessionID);
+      } catch {
+        record = null;
+      }
 
       if (record !== null && record.source.state === "idle") {
         setContinuationStatus(state, stepIndex, record);
@@ -650,7 +694,13 @@ export async function waitForLoopContinuationIdle({
       if (record === null) {
         // Record vanished or never appeared. Only call it "idle" once the SDK
         // confirms the session is no longer pending; otherwise keep polling.
-        if (!(await sessionStillPending(client, repoDir, sessionID))) return "idle";
+        let pending = false;
+        try {
+          pending = await sessionStillPending(client, repoDir, sessionID);
+        } catch {
+          pending = false;
+        }
+        if (!pending) return "idle";
       } else {
         setContinuationStatus(state, stepIndex, record);
         const updatedAt = Date.parse(record.source.updatedAt);
@@ -805,7 +855,13 @@ export async function reattachOpenCodeStep({
     pushLine(`[looper] ${reason} requested for ${step.name} during reattach`);
     if (!abortSent) {
       abortSent = true;
-      void client.session.abort({ sessionID, directory: repoDir }).catch(() => undefined);
+      void client.session.abort({ sessionID, directory: repoDir })
+        .then((aborted) => {
+          if (aborted?.error) pushLine(`[looper] session.abort failed for ${sessionID}: ${formatRequestError(aborted.error)}`);
+        })
+        .catch((error) => {
+          pushLine(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
+        });
     }
     ctrl.abort();
   };
@@ -936,7 +992,12 @@ export async function reattachOpenCodeStep({
   const classification = await classifyAssistantForMessage(client, repoDir, sessionID, messageID);
   if (classification.kind === "done") {
     pushLine(`[looper] reattach: assistant message ${messageID} completed cleanly`);
-    const record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
+    let record: RunContinuationRecord | null = null;
+    try {
+      record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
+    } catch (error) {
+      pushLine(`[looper] continuation lookup after reattach threw: ${toError(error).message}`);
+    }
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after reattach");
@@ -1036,7 +1097,13 @@ export async function runOpenCodeStep({
     if (cancellation.activeSessionID !== undefined && !cancellation.abortSent) {
       cancellation.abortSent = true;
       const sid = cancellation.activeSessionID;
-      void client.session.abort({ sessionID: sid, directory: repoDir }).catch(() => undefined);
+      void client.session.abort({ sessionID: sid, directory: repoDir })
+        .then((aborted) => {
+          if (aborted?.error) pushLine(`[looper] session.abort failed for ${sid}: ${formatRequestError(aborted.error)}`);
+        })
+        .catch((error) => {
+          pushLine(`[looper] session.abort threw for ${sid}: ${toError(error).message}`);
+        });
     }
     subscription.ctrl?.abort();
     ctrl.abort();
@@ -1275,12 +1342,17 @@ export async function runOpenCodeStep({
   if (finalError) pushLine(`[error] ${finalError.message}`);
 
   if (status === "done" && cancellation.activeSessionID !== undefined) {
-    const record = await waitForActiveLoopContinuationRecord({
-      client,
-      repoDir,
-      startedAt,
-      sessionID: cancellation.activeSessionID,
-    });
+    let record: RunContinuationRecord | null = null;
+    try {
+      record = await waitForActiveLoopContinuationRecord({
+        client,
+        repoDir,
+        startedAt,
+        sessionID: cancellation.activeSessionID,
+      });
+    } catch (error) {
+      pushLine(`[looper] continuation lookup after opencode exit threw: ${toError(error).message}`);
+    }
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after opencode exit");

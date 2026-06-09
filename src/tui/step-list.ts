@@ -85,6 +85,8 @@ function charDisplayWidth(char: string): number {
   if (codePoint === undefined) return 0;
   if (codePoint === 0) return 0;
   if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
+  if (codePoint === 0x200d) return 0; // zero-width joiner (emoji sequences)
+  if (codePoint >= 0xfe00 && codePoint <= 0xfe0f) return 0; // variation selectors
   if (codePoint >= 0x300 && codePoint <= 0x36f) return 0;
   if (codePoint >= 0x1ab0 && codePoint <= 0x1aff) return 0;
   if (codePoint >= 0x1dc0 && codePoint <= 0x1dff) return 0;

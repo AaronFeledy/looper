@@ -35,7 +35,13 @@ type PendingPartDelta = {
 };
 
 function eventSessionID(event: Event): string | undefined {
-  return (event as { properties?: { sessionID?: string } }).properties?.sessionID;
+  // Most events carry a top-level properties.sessionID. The stream is global
+  // (subscribed per repo directory, not per session), so this id is the only
+  // thing isolating this session's output from concurrent background sub-sessions.
+  // Fall back to the part's own sessionID for part events so a foreign part is
+  // never mistaken for session-less just because the top-level field is absent.
+  const props = (event as { properties?: { sessionID?: string; part?: { sessionID?: string } } }).properties;
+  return props?.sessionID ?? props?.part?.sessionID;
 }
 
 function formatInput(input: Record<string, unknown>): string {
@@ -162,9 +168,16 @@ function handlePartUpdate(
     case "step-finish": {
       if (parts.has(part.id)) return;
       parts.set(part.id, { kind: "step-finish" });
+      // step-finish payloads are required-shaped per the SDK type, but this is a
+      // system boundary (live opencode stream): guard every field so a partial /
+      // schema-drifted payload degrades gracefully instead of crashing or
+      // printing NaN/undefined into the stream.
+      const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+      const reason = typeof part.reason === "string" && part.reason.length > 0 ? part.reason : "unknown";
       const t = part.tokens;
+      const cache = t?.cache;
       push(
-        `${ui.green("✓ step done")} ${ui.dim("reason=")}${part.reason} ${ui.dim("cost=")}$${part.cost.toFixed(4)} ${ui.dim("tokens=")}in ${t.input} / out ${t.output} / think ${t.reasoning} ${ui.dim("cache=")}r ${t.cache.read} / w ${t.cache.write}`,
+        `${ui.green("✓ step done")} ${ui.dim("reason=")}${reason} ${ui.dim("cost=")}$${num(part.cost).toFixed(4)} ${ui.dim("tokens=")}in ${num(t?.input)} / out ${num(t?.output)} / think ${num(t?.reasoning)} ${ui.dim("cache=")}r ${num(cache?.read)} / w ${num(cache?.write)}`,
       );
       return;
     }
@@ -188,7 +201,10 @@ function handlePartUpdate(
       } else if (status === "completed") {
         const state = part.state as { output: string };
         const outputLines = [groupHeader(`Tool output · ${part.tool}`, ui.green)];
-        const lines = state.output.split("\n").filter((line) => line.length > 0);
+        const lines = state.output
+          .split("\n")
+          .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
+          .filter((line) => line.length > 0);
         if (lines.length === 0) outputLines.push(groupLine(ui.dim("(no output)")));
         for (const line of lines) outputLines.push(groupLine(line));
         pushLines(outputLines);

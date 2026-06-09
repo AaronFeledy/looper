@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
@@ -23,14 +23,18 @@ function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
 }
 
-function fileEndsWithNewline(path: string): boolean {
-  if (!existsSync(path)) return false;
-  const content = readFileSync(path);
-  return content.length === 0 || content[content.length - 1] === 0x0a;
+function fileReadMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
 export function promptText(step: Step): string {
-  if (!existsSync(step.prompt)) throw new Error(`missing prompt file for ${step.name}: ${step.prompt}`);
+  let prompt: string;
+  try {
+    prompt = readFileSync(step.prompt, "utf8");
+  } catch (error) {
+    if (fileReadMissing(error)) throw new Error(`missing prompt file for ${step.name}: ${step.prompt}`);
+    throw error;
+  }
 
   const parts: string[] = [];
   if (step.prefix) {
@@ -38,10 +42,10 @@ export function promptText(step: Step): string {
     parts.push(textEndsWithNewline(step.prefix) ? "\n" : "\n\n");
   }
 
-  parts.push(readFileSync(step.prompt, "utf8"));
+  parts.push(prompt);
 
   if (step.suffix) {
-    parts.push(fileEndsWithNewline(step.prompt) ? "\n" : "\n\n");
+    parts.push(prompt.length === 0 || textEndsWithNewline(prompt) ? "\n" : "\n\n");
     parts.push(step.suffix);
     if (!textEndsWithNewline(step.suffix)) parts.push("\n");
   }
@@ -253,23 +257,27 @@ class TitleCoordinator {
   async resolve(finalSessionID: string): Promise<string | undefined> {
     this.finished = true;
     this.clearTimers();
-    if (this.inflight !== undefined) {
-      const fromTimer = await this.inflight;
-      if (fromTimer !== undefined) {
-        // Title was generated and applied mid-step, but if the step retried
-        // with a new session, we need to re-apply the title to the final session.
-        if (this.appliedToSessionID !== undefined && this.appliedToSessionID !== finalSessionID) {
-          try {
-            await this.applyTitle(fromTimer);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            this.log(`[looper] title gen: re-apply to retry session threw: ${message}`);
+    try {
+      if (this.inflight !== undefined) {
+        const fromTimer = await this.inflight;
+        if (fromTimer !== undefined) {
+          // Title was generated and applied mid-step, but if the step retried
+          // with a new session, we need to re-apply the title to the final session.
+          if (this.appliedToSessionID !== undefined && this.appliedToSessionID !== finalSessionID) {
+            try {
+              await this.applyTitle(fromTimer);
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              this.log(`[looper] title gen: re-apply to retry session threw: ${message}`);
+            }
           }
+          return fromTimer;
         }
-        return fromTimer;
       }
+      return await this.runGeneration(finalSessionID);
+    } finally {
+      this.clearTimers();
     }
-    return await this.runGeneration(finalSessionID);
   }
 
   cancel(): void {
@@ -377,18 +385,20 @@ export async function runIteration({
    * opencode's server-side generation; without this a retry/restart can leave
    * the prior session running while a new one starts (two concurrent runs).
    */
-  const stopPriorSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<void> => {
-    if (sessionID === undefined) return;
-    await stopServerSession({
+  const logStepLine = (stepIdx: number, line: string): void => {
+    pushAgentLine(state, line);
+    pushStepOutputLine(state, stepIdx, line);
+    notify();
+  };
+
+  const stopPriorSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
+    if (sessionID === undefined) return true;
+    return await stopServerSession({
       client,
       repoDir,
       sessionID,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      log: (line) => {
-        pushAgentLine(state, line);
-        pushStepOutputLine(state, stepIdx, line);
-        notify();
-      },
+      log: (line) => logStepLine(stepIdx, line),
     });
   };
 
@@ -498,7 +508,7 @@ export async function runIteration({
       if (inheritedTitleApplied || inheritedTitleTimer !== undefined) return;
       inheritedTitleTimer = setTimeout(() => {
         inheritedTitleTimer = undefined;
-        inheritedTitleInflight = applyInheritedOpencodeTitle();
+        if (inheritedTitleInflight === undefined) inheritedTitleInflight = startInheritedTitleApply();
       }, inheritedRenameDelayMs());
     };
     const cancelInheritedTitleTimer = (): void => {
@@ -506,6 +516,22 @@ export async function runIteration({
         clearTimeout(inheritedTitleTimer);
         inheritedTitleTimer = undefined;
       }
+    };
+    const startInheritedTitleApply = (): Promise<void> => {
+      inheritedTitleInflight = applyInheritedOpencodeTitle()
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          try {
+            titleLog(`[looper] inherited title apply threw: ${message}`);
+          } catch {
+            return;
+          }
+        })
+        .finally(() => {
+          cancelInheritedTitleTimer();
+          inheritedTitleInflight = undefined;
+        });
+      return inheritedTitleInflight;
     };
     if (usingInheritedTitle) {
       const row = state.steps[stepIndexForTitle];
@@ -528,6 +554,22 @@ export async function runIteration({
     let lastPromptMessageID: string | undefined;
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
+    const failAfterUnconfirmedStop = (sessionID: string, stepIdx: number, action: string): StepRunResult => {
+      const reason = `could not confirm session ${sessionID} stopped; not ${action} to avoid overlapping opencode generations`;
+      suppressFailureRetry = true;
+      suppressReason = reason;
+      lastErrorMessage = reason;
+      logStepLine(stepIdx, `[looper] ${reason}`);
+      const activeStep = state.steps[stepIdx];
+      if (activeStep) {
+        activeStep.status = "failed";
+        activeStep.statusMessage = undefined;
+        activeStep.finishedAt = Date.now();
+      }
+      state.activeStepIndex = null;
+      notify();
+      return { status: "failed", sessionID, errorMessage: reason };
+    };
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
@@ -597,7 +639,10 @@ export async function runIteration({
         if (waitResult === "restart") {
           const reason: StepRestartReason = state.restartReason ?? "manual";
           const previousStepIndex = currentStepIndex;
-          await stopPriorSession(waitSessionID, previousStepIndex);
+          if (!(await stopPriorSession(waitSessionID, previousStepIndex))) {
+            result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a restart session");
+            break;
+          }
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
@@ -619,7 +664,10 @@ export async function runIteration({
 
         if (waitResult === "timeout") {
           const previousStepIndex = currentStepIndex;
-          await stopPriorSession(waitSessionID, previousStepIndex);
+          if (!(await stopPriorSession(waitSessionID, previousStepIndex))) {
+            result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a timeout restart session");
+            break;
+          }
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
@@ -658,10 +706,14 @@ export async function runIteration({
 
       if (result.status === "restart" && !state.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
+        const priorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
         // Confirm the prior session is actually aborted before creating the
         // fresh restart session, so the old run can't keep generating in
         // parallel with the new one.
-        await stopPriorSession(result.sessionID ?? state.steps[currentStepIndex]?.sessionID, currentStepIndex);
+        if (!(await stopPriorSession(priorSessionID, currentStepIndex)) && priorSessionID !== undefined) {
+          result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "starting a restart session");
+          break;
+        }
         currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
         stepIndexForTitle = currentStepIndex;
         stepStartTime = Date.now();
@@ -727,11 +779,7 @@ export async function runIteration({
           }
         }
 
-        failureRetryCount += 1;
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
-        const delayMs = failureRetryDelayMs(failureRetryCount);
-        const delaySeconds = Math.round(delayMs / 1000);
-        const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
 
         if (priorSessionID !== undefined) {
           const pending = await sessionPendingState(client, repoDir, priorSessionID);
@@ -741,8 +789,16 @@ export async function runIteration({
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
           }
-          await stopPriorSession(priorSessionID, currentStepIndex);
+          if (!(await stopPriorSession(priorSessionID, currentStepIndex))) {
+            result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "retrying in a fresh session");
+            break;
+          }
         }
+
+        failureRetryCount += 1;
+        const delayMs = failureRetryDelayMs(failureRetryCount);
+        const delaySeconds = Math.round(delayMs / 1000);
+        const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
 
         const targetSuffix = `will retry with a fresh session`;
         const failedStepIndex = currentStepIndex;
@@ -782,11 +838,15 @@ export async function runIteration({
       // sure the step's session is actually stopped so it doesn't keep running
       // server-side after we surface the failure. Use a short budget when the
       // user is quitting so teardown stays responsive.
-      await stopPriorSession(
-        state.steps[currentStepIndex]?.sessionID,
+      const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
+      const terminalStopConfirmed = await stopPriorSession(
+        terminalSessionID,
         currentStepIndex,
         stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
       );
+      if (!terminalStopConfirmed && terminalSessionID !== undefined) {
+        logStepLine(currentStepIndex, `[looper] ${step.name}: session ${terminalSessionID} may still be running after terminal failure`);
+      }
       if (stopRequested) {
         markRemainingSkipped(state, currentStepIndex);
         break;
@@ -805,11 +865,7 @@ export async function runIteration({
         await titleCoordinator.resolve(result.sessionID);
       } else if (usingInheritedTitle) {
         cancelInheritedTitleTimer();
-        if (inheritedTitleInflight !== undefined) {
-          await inheritedTitleInflight;
-        } else {
-          await applyInheritedOpencodeTitle();
-        }
+        await (inheritedTitleInflight ?? startInheritedTitleApply());
       }
     } else {
       titleCoordinator?.cancel();

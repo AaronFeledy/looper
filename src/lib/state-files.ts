@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 function isMissingPath(error: unknown): boolean {
@@ -18,6 +18,17 @@ function tolerantRead(path: string): string | null {
     return readFileSync(path, "utf8");
   } catch (error) {
     if (isMissingPath(error)) return null;
+    throw error;
+  }
+}
+
+function writeFileAtomically(path: string, content: string): void {
+  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tempPath, content);
+    renameSync(tempPath, path);
+  } catch (error) {
+    rmSync(tempPath, { force: true });
     throw error;
   }
 }
@@ -102,11 +113,11 @@ export function readStopAfterIterationFile() {
 }
 
 export function writeStopFile(reason: string) {
-  writeFileSync(stopFilePath(), `${reason}\n`);
+  writeFileAtomically(stopFilePath(), `${reason}\n`);
 }
 
 export function writeStopAfterIterationFile(reason: string) {
-  writeFileSync(stopAfterIterationFilePath(), `${reason}\n`);
+  writeFileAtomically(stopAfterIterationFilePath(), `${reason}\n`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -125,19 +136,18 @@ function parseResumeStep(value: unknown): ResumeStep | null {
 }
 
 export function readResumeStep(): ResumeStep | null {
-  const content = tolerantRead(resumeStepFilePath());
-  if (content === null) return null;
   try {
+    const content = tolerantRead(resumeStepFilePath());
+    if (content === null) return null;
     return parseResumeStep(JSON.parse(content));
-  } catch (error) {
-    if (error instanceof SyntaxError) return null;
-    throw error;
+  } catch {
+    return null;
   }
 }
 
 export function writeResumeStep(stepIndex: number, stepName: string) {
   const record: ResumeStep = { stepIndex, stepName, updatedAt: new Date().toISOString() };
-  writeFileSync(resumeStepFilePath(), `${JSON.stringify(record, null, 2)}\n`);
+  writeFileAtomically(resumeStepFilePath(), `${JSON.stringify(record, null, 2)}\n`);
 }
 
 export function resumeStepIndex(steps: NamedStep[]): number {
@@ -157,5 +167,5 @@ export function readLastBranch() {
 }
 
 export function writeLastBranch(branch: string) {
-  writeFileSync(lastBranchFilePath(), `${branch}\n`);
+  writeFileAtomically(lastBranchFilePath(), `${branch}\n`);
 }
