@@ -685,26 +685,30 @@ export async function waitForLoopContinuationIdle({
         record = null;
       }
 
-      if (record !== null && record.source.state === "idle") {
-        setContinuationStatus(state, stepIndex, record);
-        logContinuationState(state, stepIndex, record, "background tasks idle");
-        return "idle";
-      }
-
-      if (record === null) {
-        // Record vanished or never appeared. Only call it "idle" once the SDK
-        // confirms the session is no longer pending; otherwise keep polling.
-        let pending = false;
-        try {
-          pending = await sessionStillPending(client, repoDir, sessionID);
-        } catch {
-          pending = false;
-        }
-        if (!pending) return "idle";
-      } else {
-        setContinuationStatus(state, stepIndex, record);
-        const updatedAt = Date.parse(record.source.updatedAt);
+      const backgroundActive = record !== null && record.source.state === "active";
+      if (backgroundActive) {
+        setContinuationStatus(state, stepIndex, record!);
+        const updatedAt = Date.parse(record!.source.updatedAt);
         if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
+      } else {
+        // Background tasks report idle: resume only once the session is
+        // CONFIRMED idle. sessionPendingState treats a status-read error as
+        // "unknown" (not idle), so transient flakiness can't resume into a
+        // still-busy session and have opencode drop the continuation prompt.
+        let pendingState: SessionPendingState;
+        try {
+          pendingState = await sessionPendingState(client, repoDir, sessionID);
+        } catch {
+          pendingState = "unknown";
+        }
+        if (pendingState === "idle") {
+          if (record !== null) {
+            setContinuationStatus(state, stepIndex, record);
+            logContinuationState(state, stepIndex, record, "background tasks idle");
+          }
+          return "idle";
+        }
+        if (record !== null) setContinuationStatus(state, stepIndex, record);
       }
 
       if (Date.now() - startedAt > Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs)) return "timeout";
