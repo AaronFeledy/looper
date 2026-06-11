@@ -194,4 +194,54 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     expect(ops.some((op) => op.startsWith("prompt"))).toBe(false);
     expect(state.steps.at(-1)!.sessionID).toBe("ses_old");
   });
+
+  test("reattach re-persists the live session ids dropped by onStepBegin", async () => {
+    const { repoDir, configDir } = setupScratch();
+    scratch = repoDir;
+    const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    let statusReads = 0;
+    const sessionCalls: Array<{ index: number; stepName: string; sessionID: string; messageID: string }> = [];
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: "ses_new" } }),
+        prompt: async () => ({ data: {} }),
+        abort: async () => ({ data: {} }),
+        status: async () => {
+          statusReads += 1;
+          return { data: { ses_old: { type: statusReads <= 1 ? "busy" : "idle" } } };
+        },
+        messages: async () => ({
+          data: [
+            { info: { id: "msg_old", role: "user" }, parts: [] },
+            {
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 } },
+              parts: [],
+            },
+          ],
+        }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_p: unknown, options: { signal: AbortSignal }) => ({ stream: abortableStream(options.signal) }),
+      },
+    } as unknown as OpencodeClient;
+
+    writeIdleContinuation(repoDir, "ses_old");
+    const resume: ResumeSession = { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" };
+    const result = await runIteration({
+      state,
+      iteration: 5,
+      client,
+      repoDir,
+      configDir,
+      resume,
+      hooks: {
+        onStepSession: (info) => sessionCalls.push(info),
+      },
+    });
+
+    expect(result).toBe("complete");
+    expect(sessionCalls).toContainEqual({ iteration: 5, index: 0, stepName: "Build", sessionID: "ses_old", messageID: "msg_old" });
+  });
 });

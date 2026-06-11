@@ -584,6 +584,17 @@ export async function runIteration({
         if (stepMatches && pendingState === "pending" && resumeInfo.messageID !== undefined) {
           logStepLine(currentStepIndex, `[looper] resuming ${step.name}: session ${resumeSession} still active; reattaching`);
           lastPromptMessageID = resumeInfo.messageID;
+          // onStepBegin's saveRunStatePosition just cleared the live session ids
+          // from .looper-run.json, and reattach never hits runOpenCodeStep's
+          // onSessionBound; re-persist them so a crash mid-reattach can still
+          // reattach instead of starting a fresh overlapping generation.
+          hooks?.onStepSession?.({
+            iteration,
+            index,
+            stepName: step.name,
+            sessionID: resumeSession,
+            messageID: resumeInfo.messageID,
+          });
           pendingResult = await reattachOpenCodeStep({
             state,
             stepIndex: currentStepIndex,
