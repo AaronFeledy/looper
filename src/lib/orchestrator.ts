@@ -84,6 +84,13 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
 export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number }) => void;
   onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult }) => void;
+  onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string }) => void;
+};
+
+export type ResumeSession = {
+  sessionID?: string;
+  messageID?: string;
+  stepName?: string;
 };
 
 export type RunIterationOptions = {
@@ -93,6 +100,7 @@ export type RunIterationOptions = {
   repoDir: string;
   configDir: string;
   startStepIndex?: number;
+  resume?: ResumeSession;
   hooks?: RunIterationHooks;
   titleGenConfig?: TitleGenConfig;
 };
@@ -371,6 +379,7 @@ export async function runIteration({
   repoDir,
   configDir,
   startStepIndex = 0,
+  resume,
   hooks,
   titleGenConfig,
 }: RunIterationOptions): Promise<"complete" | "stopped"> {
@@ -378,6 +387,7 @@ export async function runIteration({
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
   let workDescription: string | undefined;
+  let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -563,6 +573,38 @@ export async function runIteration({
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+
+    if (pendingResume !== undefined) {
+      const resumeInfo = pendingResume;
+      pendingResume = undefined;
+      const resumeSession = resumeInfo.sessionID;
+      if (resumeSession !== undefined) {
+        const stepMatches = resumeInfo.stepName === undefined || resumeInfo.stepName === step.name;
+        const pendingState = await sessionPendingState(client, repoDir, resumeSession);
+        if (stepMatches && pendingState === "pending" && resumeInfo.messageID !== undefined) {
+          logStepLine(currentStepIndex, `[looper] resuming ${step.name}: session ${resumeSession} still active; reattaching`);
+          lastPromptMessageID = resumeInfo.messageID;
+          pendingResult = await reattachOpenCodeStep({
+            state,
+            stepIndex: currentStepIndex,
+            client,
+            repoDir,
+            step,
+            sessionID: resumeSession,
+            messageID: resumeInfo.messageID,
+          });
+        } else if (stepMatches && pendingState === "idle") {
+          logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; restarting step in a fresh session`);
+        } else {
+          const why = !stepMatches ? "step changed since the session was recorded" : `prior session is ${pendingState}`;
+          logStepLine(currentStepIndex, `[looper] resuming ${step.name}: ${why}; confirming session ${resumeSession} is stopped before restarting`);
+          if (!(await stopPriorSession(resumeSession, currentStepIndex))) {
+            pendingResult = failAfterUnconfirmedStop(resumeSession, currentStepIndex, "restarting after resume");
+          }
+        }
+      }
+    }
+
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
@@ -577,6 +619,8 @@ export async function runIteration({
           step,
           sessionID: resumeSessionID,
           timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+          onSessionBound: ({ sessionID, messageID }) =>
+            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID }),
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
