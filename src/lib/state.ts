@@ -109,7 +109,40 @@ export type LoopStep = {
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
 export const AGENT_MAX_LINES = 5_000;
+/** Cap retained iteration-history entries (current-run, in-RAM); oldest dropped first. */
+export const HISTORY_MAX_ENTRIES = 500;
 const NOTIFY_FRAME_MS = 33;
+
+export type HistoryStepSnapshot = {
+  name: string;
+  status: StepStatus;
+  sessionID?: string;
+  title?: string;
+  restartReason?: StepRestartReason;
+  startedAt?: number;
+  finishedAt?: number;
+};
+
+export type IterationHistoryEntry = {
+  iteration: number;
+  branch: string;
+  startedAt: number;
+  steps: HistoryStepSnapshot[];
+};
+
+export type HistoryViewStatus = "empty" | "loading" | "ready" | "error";
+
+export type HistoryView = {
+  entryIndex: number;
+  stepIndex: number;
+  sessionKey: string | null;
+  status: HistoryViewStatus;
+  error?: string;
+  lines: string[];
+  lineTimes: number[];
+  outputScrollTop: number;
+  outputPinnedToBottom: boolean;
+};
 
 export type LoopState = {
   iteration: number;
@@ -134,6 +167,8 @@ export type LoopState = {
   stepOutputLines: string[][];
   scrollIntent: ScrollIntent | null;
   github: GithubStatus;
+  history: IterationHistoryEntry[];
+  historyView: HistoryView | null;
 };
 
 export type FlatRow =
@@ -244,6 +279,8 @@ export function createLoopState({
     stepOutputLines: stepNames.map(() => []),
     scrollIntent: null,
     github: { kind: "loading" },
+    history: [],
+    historyView: null,
   };
 }
 
@@ -671,6 +708,122 @@ export function pushAgentLine(state: LoopState, line: string): void {
   state.agentLines.push(line);
   state.agentLineTimes.push(Date.now());
   trimPairedLines(state.agentLines, state.agentLineTimes);
+}
+
+export function snapshotIterationToHistory(state: LoopState): void {
+  if (state.iteration < 1 || state.steps.length === 0) return;
+  const steps: HistoryStepSnapshot[] = state.steps.map((step) => ({
+    name: step.name,
+    status: step.status,
+    ...(step.sessionID !== undefined ? { sessionID: step.sessionID } : {}),
+    ...(step.title !== undefined ? { title: step.title } : {}),
+    ...(step.restartReason !== undefined ? { restartReason: step.restartReason } : {}),
+    ...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
+    ...(step.finishedAt !== undefined ? { finishedAt: step.finishedAt } : {}),
+  }));
+  state.history.push({ iteration: state.iteration, branch: state.branch, startedAt: state.iterationStartedAt, steps });
+  const overflow = state.history.length - HISTORY_MAX_ENTRIES;
+  if (overflow > 0) {
+    state.history.splice(0, overflow);
+    if (state.historyView !== null) state.historyView.entryIndex = Math.max(0, state.historyView.entryIndex - overflow);
+  }
+}
+
+export function historyStepSessionKey(entryIndex: number, stepIndex: number, sessionID: string | undefined): string | null {
+  if (sessionID === undefined) return null;
+  return `${entryIndex}:${stepIndex}:${sessionID}`;
+}
+
+export function selectedHistoryStep(state: LoopState): { entry: IterationHistoryEntry; step: HistoryStepSnapshot; stepIndex: number } | null {
+  const view = state.historyView;
+  if (view === null) return null;
+  const entry = state.history[view.entryIndex];
+  if (entry === undefined) return null;
+  const step = entry.steps[view.stepIndex];
+  if (step === undefined) return null;
+  return { entry, step, stepIndex: view.stepIndex };
+}
+
+function freshHistoryView(state: LoopState, entryIndex: number, stepIndex: number): HistoryView {
+  const hasSession = state.history[entryIndex]?.steps[stepIndex]?.sessionID !== undefined;
+  return {
+    entryIndex,
+    stepIndex,
+    sessionKey: null,
+    status: hasSession ? "loading" : "empty",
+    lines: [],
+    lineTimes: [],
+    outputScrollTop: 0,
+    outputPinnedToBottom: true,
+  };
+}
+
+export function enterHistoryView(state: LoopState): boolean {
+  if (state.history.length === 0) return false;
+  state.historyView = freshHistoryView(state, state.history.length - 1, 0);
+  state.focusedPane = "steps";
+  notifyStateChange();
+  return true;
+}
+
+export function exitHistoryView(state: LoopState): void {
+  if (state.historyView === null) return;
+  state.historyView = null;
+  state.focusedPane = "steps";
+  notifyStateChange();
+}
+
+export function historyMoveIteration(state: LoopState, delta: number): void {
+  const view = state.historyView;
+  if (view === null) return;
+  const nextIndex = Math.max(0, Math.min(state.history.length - 1, view.entryIndex + delta));
+  if (nextIndex === view.entryIndex) return;
+  state.historyView = freshHistoryView(state, nextIndex, 0);
+  notifyStateChange();
+}
+
+export function historyMoveStep(state: LoopState, delta: number): void {
+  const view = state.historyView;
+  if (view === null) return;
+  const entry = state.history[view.entryIndex];
+  if (entry === undefined || entry.steps.length === 0) return;
+  const nextStepIndex = Math.max(0, Math.min(entry.steps.length - 1, view.stepIndex + delta));
+  if (nextStepIndex === view.stepIndex) return;
+  state.historyView = freshHistoryView(state, view.entryIndex, nextStepIndex);
+  notifyStateChange();
+}
+
+export function setHistoryViewOutput(state: LoopState, sessionKey: string, lines: string[], times: number[]): void {
+  const view = state.historyView;
+  if (view === null) return;
+  const expected = historyStepSessionKey(view.entryIndex, view.stepIndex, selectedHistoryStep(state)?.step.sessionID);
+  if (expected !== sessionKey) return;
+  view.sessionKey = sessionKey;
+  view.lines = lines;
+  view.lineTimes = times;
+  view.status = lines.length > 0 ? "ready" : "empty";
+  delete view.error;
+  if (view.outputPinnedToBottom) view.outputScrollTop = Math.max(0, lines.length - 1);
+  notifyStateChange();
+}
+
+export function setHistoryViewError(state: LoopState, sessionKey: string, message: string): void {
+  const view = state.historyView;
+  if (view === null) return;
+  const expected = historyStepSessionKey(view.entryIndex, view.stepIndex, selectedHistoryStep(state)?.step.sessionID);
+  if (expected !== sessionKey) return;
+  view.sessionKey = sessionKey;
+  view.status = "error";
+  view.error = message;
+  notifyStateChange();
+}
+
+export function setHistoryViewScroll(state: LoopState, scrollTop: number, pinnedToBottom: boolean): void {
+  const view = state.historyView;
+  if (view === null) return;
+  view.outputScrollTop = Math.max(0, scrollTop);
+  view.outputPinnedToBottom = pinnedToBottom;
+  notifyStateChange();
 }
 
 export function subscribe(listener: Listener): () => void {
