@@ -145,10 +145,16 @@ type Listener = () => void;
 const listeners = new Set<Listener>();
 let notifyTimer: ReturnType<typeof setTimeout> | undefined;
 
-function createLoopStep(name: string): LoopStep {
+/** The single constructor for a step row; defaults to a fresh `pending` row. */
+export function createStepRow(
+  name: string,
+  overrides: { status?: StepStatus; title?: string; finishedAt?: number } = {},
+): LoopStep {
   return {
     name,
-    status: "pending",
+    status: overrides.status ?? "pending",
+    ...(overrides.title !== undefined ? { title: overrides.title } : {}),
+    ...(overrides.finishedAt !== undefined ? { finishedAt: overrides.finishedAt } : {}),
     outputLines: [],
     outputLineTimes: [],
     outputScrollTop: 0,
@@ -220,7 +226,7 @@ export function createLoopState({
     maxIterations,
     branch: "",
     iterationStartedAt: Date.now(),
-    steps: stepNames.map(createLoopStep),
+    steps: stepNames.map((name) => createStepRow(name)),
     focusedPane: "steps",
     selectedStepIndex: null,
     selectedBackgroundSessionID: null,
@@ -336,16 +342,7 @@ export function insertRestartAttempt(state: LoopState, stepIndex: number, reason
   step.status = "done";
   step.statusMessage = undefined;
   step.finishedAt = Date.now();
-  const next: LoopStep = {
-    name: step.name,
-    status: "pending",
-    ...(step.title !== undefined ? { title: step.title } : {}),
-    outputLines: [],
-    outputLineTimes: [],
-    outputScrollTop: 0,
-    outputPinnedToBottom: true,
-    backgroundAgents: [],
-  };
+  const next = createStepRow(step.name, step.title !== undefined ? { title: step.title } : {});
   state.steps.splice(stepIndex + 1, 0, next);
   if (state.activeStepIndex !== null && state.activeStepIndex > stepIndex) state.activeStepIndex += 1;
   if (state.selectedStepIndex !== null && state.selectedStepIndex > stepIndex) state.selectedStepIndex += 1;
@@ -359,16 +356,7 @@ export function insertFailureRetryAttempt(state: LoopState, stepIndex: number): 
   step.status = "failed";
   step.statusMessage = undefined;
   step.finishedAt = Date.now();
-  const next: LoopStep = {
-    name: step.name,
-    status: "pending",
-    ...(step.title !== undefined ? { title: step.title } : {}),
-    outputLines: [],
-    outputLineTimes: [],
-    outputScrollTop: 0,
-    outputPinnedToBottom: true,
-    backgroundAgents: [],
-  };
+  const next = createStepRow(step.name, step.title !== undefined ? { title: step.title } : {});
   state.steps.splice(stepIndex + 1, 0, next);
   if (state.activeStepIndex !== null && state.activeStepIndex > stepIndex) state.activeStepIndex += 1;
   if (state.selectedStepIndex !== null && state.selectedStepIndex > stepIndex) state.selectedStepIndex += 1;

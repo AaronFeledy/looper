@@ -21,7 +21,7 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { cancelPendingNotify, createLoopState, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
+import { cancelPendingNotify, createLoopState, createStepRow, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
 import {
   clearStopAfterIterationFile,
   clearResumeStepFile,
@@ -104,7 +104,7 @@ function resetIterationState(
   state.restartReason = undefined;
   state.agentLines = [];
   state.stepOutputLines = steps.map(() => []);
-  state.steps = steps.map((step) => ({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] }));
+  state.steps = steps.map((step) => createStepRow(step.name));
   resetIterationNavigationState(state);
   notify();
 }

@@ -15,7 +15,7 @@ import {
   type StepResult,
   type StepRunResult,
 } from "./runner.ts";
-import { failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
+import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
 
@@ -59,13 +59,13 @@ function syncStepsUiState(state: LoopState, cfgSteps: Step[], nextIndex: number,
     for (let j = 0; j < nextIndex; j += 1) {
       const step = cfgSteps[j];
       if (!step) continue;
-      rows.push({ name: step.name, status: "skipped" as const, finishedAt: Date.now(), outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] });
+      rows.push(createStepRow(step.name, { status: "skipped", finishedAt: Date.now() }));
     }
   }
   for (let j = nextIndex; j < cfgSteps.length; j += 1) {
     const step = cfgSteps[j];
     if (!step) continue;
-    rows.push({ name: step.name, status: "pending" as const, outputLines: [], outputLineTimes: [], outputScrollTop: 0, outputPinnedToBottom: true, backgroundAgents: [] });
+    rows.push(createStepRow(step.name));
   }
   state.steps = rows;
   notify();
