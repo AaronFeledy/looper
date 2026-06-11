@@ -10,7 +10,6 @@ import {
   runOpenCodeStep,
   sessionPendingState,
   stopServerSession,
-  STOP_SESSION_DRAIN_WINDOW_MS,
   waitForLoopContinuationIdle,
   type Step,
   type StepResult,
@@ -394,12 +393,10 @@ export async function runIteration({
 
   const stopPriorSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
     if (sessionID === undefined) return true;
-    const drainWindowMs = state.quitting || stopFileExists() ? 0 : STOP_SESSION_DRAIN_WINDOW_MS;
     return await stopServerSession({
       client,
       repoDir,
       sessionID,
-      drainWindowMs,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       log: (line) => logStepLine(stepIdx, line),
     });
