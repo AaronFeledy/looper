@@ -1,6 +1,6 @@
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
 
-import type { BackgroundAgent, FlatRow, LoopState, LoopStep, StepStatus } from "../lib/state.ts";
+import type { BackgroundAgent, FlatRow, HistoryStepSnapshot, LoopState, LoopStep, StepStatus } from "../lib/state.ts";
 import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -125,6 +125,22 @@ function backgroundRowColor(): string {
   return "#94e2d5";
 }
 
+function historyStepRowContent(step: HistoryStepSnapshot, frame: string): string {
+  const right = durationSecondsFrom(step.startedAt, step.finishedAt);
+  const icon = step.restartReason === "timeout" ? "◷" : step.restartReason === "manual" ? "↻" : statusIcon(step.status, frame);
+  return formatRow(`${icon} ${step.name}`, right);
+}
+
+function historyStepRowColor(step: HistoryStepSnapshot): string {
+  if (step.restartReason === "manual") return "#cba6f7";
+  if (step.restartReason === "timeout") return "#f9e2af";
+  if (step.status === "done") return "#a6e3a1";
+  if (step.status === "failed") return "#f38ba8";
+  if (step.status === "skipped" || step.status === "waiting") return "#f9e2af";
+  if (step.status === "running") return "#8bd5ff";
+  return "#6c7086";
+}
+
 function rowBackgroundColor(isSelected: boolean, isFocused: boolean): string | undefined {
   if (!isSelected) return undefined;
   return isFocused ? "#313244" : "#262936";
@@ -180,12 +196,41 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
   };
 
   let frameIndex = 0;
+
+  const updateHistoryRows = () => {
+    const view = state.historyView;
+    if (view === null) return;
+    const entry = state.history[view.entryIndex];
+    const steps = entry?.steps ?? [];
+    ensureRowCount(steps.length);
+    const frame = frames[frameIndex % frames.length]!;
+    const isFocused = state.focusedPane === "steps";
+    list.borderColor = isFocused ? "#cba6f7" : "#45475a";
+    list.title = entry ? `History · iter ${entry.iteration}` : "History";
+
+    steps.forEach((step, index) => {
+      const renderable = rowRenderables[index];
+      if (!renderable) return;
+      const isSelected = index === view.stepIndex;
+      renderable.content = historyStepRowContent(step, frame);
+      renderable.fg = historyStepRowColor(step);
+      renderable.bg = rowBackgroundColor(isSelected, isFocused) ?? "transparent";
+      renderable.attributes = isSelected ? TextAttributes.BOLD : TextAttributes.NONE;
+    });
+    renderer.requestRender();
+  };
+
   const updateRows = () => {
+    if (state.historyView !== null) {
+      updateHistoryRows();
+      return;
+    }
     const rows = flattenRows(state);
     ensureRowCount(rows.length);
     const frame = frames[frameIndex % frames.length]!;
     const isFocused = state.focusedPane === "steps";
     list.borderColor = isFocused ? "#89b4fa" : "#45475a";
+    list.title = "Steps";
 
     rows.forEach((row, index) => {
       const renderable = rowRenderables[index];

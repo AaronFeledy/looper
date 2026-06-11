@@ -7,14 +7,15 @@ import {
   type CliRenderer,
 } from "@opentui/core";
 
-import type { BackgroundAgent, LoopState, LoopStep } from "../lib/state.ts";
+import type { BackgroundAgent, HistoryView, LoopState, LoopStep, ScrollIntent } from "../lib/state.ts";
 import { ansiToStyledText, stripAnsi } from "../lib/ansi.ts";
-import { backgroundAgentLabel, consumeScrollIntent, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 
 type SelectedOutput = {
   step: LoopStep | null;
   stepIndex: number | null;
   backgroundAgent: BackgroundAgent | null;
+  history: HistoryView | null;
   lines: string[];
   times: number[];
 };
@@ -340,7 +341,26 @@ function fallbackTitle(state: LoopState): string {
   return activeStep ? `${activeStep.name} output` : "Agent output";
 }
 
+function historyPlaceholder(view: HistoryView): string {
+  if (view.status === "loading") return "Loading history output…";
+  if (view.status === "error") return `Failed to load history output: ${view.error ?? "unknown error"}`;
+  return "No recorded output for this step.";
+}
+
 function resolveSelectedOutput(state: LoopState): SelectedOutput {
+  if (state.historyView !== null) {
+    const view = state.historyView;
+    const hasLines = view.lines.length > 0;
+    return {
+      step: null,
+      stepIndex: null,
+      backgroundAgent: null,
+      history: view,
+      lines: hasLines ? view.lines : [historyPlaceholder(view)],
+      times: hasLines ? view.lineTimes : [Date.now()],
+    };
+  }
+
   const candidateStepIndexes = [state.selectedStepIndex, state.activeStepIndex, state.steps.length > 0 ? 0 : null];
 
   for (const candidateStepIndex of candidateStepIndexes) {
@@ -359,6 +379,7 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
           step,
           stepIndex: candidateStepIndex,
           backgroundAgent: agent,
+          history: null,
           lines: agent.outputLines,
           times: agent.outputLineTimes,
         };
@@ -368,6 +389,7 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
       step,
       stepIndex: candidateStepIndex,
       backgroundAgent: null,
+      history: null,
       lines: step.outputLines,
       times: step.outputLineTimes,
     };
@@ -377,12 +399,21 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
     step: null,
     stepIndex: null,
     backgroundAgent: null,
+    history: null,
     lines: state.agentLines,
     times: state.agentLineTimes,
   };
 }
 
 function outputTitle(state: LoopState, selectedOutput: SelectedOutput): string {
+  if (selectedOutput.history !== null) {
+    const view = selectedOutput.history;
+    const entry = state.history[view.entryIndex];
+    const step = entry?.steps[view.stepIndex];
+    const stepLabel = step ? (step.title && step.title.length > 0 ? `${step.name}: ${step.title}` : step.name) : "step";
+    const iterLabel = entry ? `iter ${entry.iteration}` : "history";
+    return `History · ${iterLabel} · ${stepLabel}`;
+  }
   if (!selectedOutput.step || selectedOutput.stepIndex === null) return fallbackTitle(state);
   const { name, title } = selectedOutput.step;
   const stepLabel = title && title.length > 0 ? `${name}: ${title}` : `${name} output`;
@@ -449,33 +480,47 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     });
   };
 
+  const historyKeyOf = (output: SelectedOutput): string | null =>
+    output.history === null ? null : `${output.history.entryIndex}:${output.history.stepIndex}`;
+
   let selectedOutput = initialOutput;
   let selectedStepIndex = initialOutput.stepIndex;
   let selectedBackgroundSessionID = initialOutput.backgroundAgent?.sessionID ?? null;
+  let selectedHistoryKey = historyKeyOf(initialOutput);
   let renderedOutputKey: string | undefined;
-  let pinToBottom = (initialOutput.backgroundAgent ?? initialOutput.step)?.outputPinnedToBottom ?? true;
+  let pinToBottom = (initialOutput.history ?? initialOutput.backgroundAgent ?? initialOutput.step)?.outputPinnedToBottom ?? true;
   let syncingStateScroll = false;
 
   const outputKey = (output: SelectedOutput): string => {
+    let lengthHash = 0;
+    for (const line of output.lines) lengthHash = (Math.imul(lengthHash, 31) + line.length) | 0;
+    if (output.history !== null) {
+      return `history:${output.history.entryIndex}:${output.history.stepIndex}:${output.history.status}:${output.lines.length}:${lengthHash}`;
+    }
     const stepKey = output.stepIndex ?? "agent";
     const bgKey = output.backgroundAgent?.sessionID ?? "step";
     // Fold each line's length into a cheap rolling hash so a middle-of-stream
     // edit (same line count, same first/last line) still changes the key and
     // forces a re-render. O(line count), no content scan, so perf is unchanged.
-    let lengthHash = 0;
-    for (const line of output.lines) lengthHash = (Math.imul(lengthHash, 31) + line.length) | 0;
     return `${stepKey}:${bgKey}:${output.lines.length}:${lengthHash}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
   };
 
   const selectedScrollTarget = (): { outputScrollTop: number; outputPinnedToBottom: boolean } | null =>
-    selectedOutput.backgroundAgent ?? selectedOutput.step;
+    selectedOutput.history ?? selectedOutput.backgroundAgent ?? selectedOutput.step;
 
   const maxScrollTop = (): number => Math.max(0, stream.scrollHeight - stream.viewport.height);
 
   const persistSelectedScroll = (scrollTop: number, pinnedToBottom: boolean): void => {
     const target = selectedScrollTarget();
-    if (target === null || selectedOutput.stepIndex === null) return;
+    if (target === null) return;
     if (target.outputScrollTop === scrollTop && target.outputPinnedToBottom === pinnedToBottom) return;
+    if (selectedOutput.history !== null) {
+      syncingStateScroll = true;
+      setHistoryViewScroll(state, scrollTop, pinnedToBottom);
+      syncingStateScroll = false;
+      return;
+    }
+    if (selectedOutput.stepIndex === null) return;
     const stillSelected =
       selectedOutput.stepIndex === state.selectedStepIndex &&
       (selectedOutput.backgroundAgent?.sessionID ?? null) === state.selectedBackgroundSessionID;
@@ -527,10 +572,13 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   stream.verticalScrollBar.on("change", onVerticalScrollChange);
   stream.content.on(LayoutEvents.LAYOUT_CHANGED, onLayoutReflow);
 
+  const intentApplies = (intent: ScrollIntent): boolean =>
+    selectedOutput.history !== null || intent.stepIndex === selectedStepIndex;
+
   const applyScrollIntent = (): void => {
     const intent = state.scrollIntent;
     if (intent === null) return;
-    if (intent.stepIndex !== selectedStepIndex) return;
+    if (!intentApplies(intent)) return;
     const max = maxScrollTop();
     const viewportRows = Math.max(1, stream.viewport.height);
     const pageStep = Math.max(1, viewportRows - 1);
@@ -551,13 +599,16 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   const rebuild = () => {
     const nextSelectedOutput = resolveSelectedOutput(state);
     const nextBackgroundSessionID = nextSelectedOutput.backgroundAgent?.sessionID ?? null;
+    const nextHistoryKey = historyKeyOf(nextSelectedOutput);
     const stepChanged =
       nextSelectedOutput.stepIndex !== selectedStepIndex ||
-      nextBackgroundSessionID !== selectedBackgroundSessionID;
+      nextBackgroundSessionID !== selectedBackgroundSessionID ||
+      nextHistoryKey !== selectedHistoryKey;
     selectedOutput = nextSelectedOutput;
     selectedStepIndex = nextSelectedOutput.stepIndex;
     selectedBackgroundSessionID = nextBackgroundSessionID;
-    pinToBottom = (selectedOutput.backgroundAgent ?? selectedOutput.step)?.outputPinnedToBottom ?? pinToBottom;
+    selectedHistoryKey = nextHistoryKey;
+    pinToBottom = (selectedOutput.history ?? selectedOutput.backgroundAgent ?? selectedOutput.step)?.outputPinnedToBottom ?? pinToBottom;
     stream.title = outputTitle(state, selectedOutput);
     const nextOutputKey = outputKey(selectedOutput);
     if (nextOutputKey !== renderedOutputKey) {
@@ -566,14 +617,14 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     }
     renderer.requestRender();
     if (syncingStateScroll) return;
-    const hasIntent = state.scrollIntent !== null && state.scrollIntent.stepIndex === selectedStepIndex;
+    const hasIntent = state.scrollIntent !== null && intentApplies(state.scrollIntent);
     queueMicrotask(() => {
       if (hasIntent) applyScrollIntent();
       else if (stepChanged || !pinToBottom) restoreSelectedScroll();
       else scrollToBottomIfPinned();
     });
     process.nextTick(() => {
-      if (state.scrollIntent !== null && state.scrollIntent.stepIndex === selectedStepIndex) applyScrollIntent();
+      if (state.scrollIntent !== null && intentApplies(state.scrollIntent)) applyScrollIntent();
       else if (stepChanged || !pinToBottom) restoreSelectedScroll();
       else scrollToBottomIfPinned();
     });
