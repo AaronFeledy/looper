@@ -4,7 +4,11 @@ import type { LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
 
 function footerContent(state: LoopState): string {
-  if (!state.started) return `[q]uit  [g]o/start  [e]nd after iteration  Up/Down: select first step`;
+  if (state.historyView !== null) {
+    const navHint = state.focusedPane === "steps" ? "Up/Down: step" : "Up/Down/PageUp/PageDown/Home/End: scroll";
+    return `[h] exit history  Left/Right: iteration  Tab: ${state.focusedPane === "steps" ? "output" : "steps"}  ${navHint}  [q]uit`;
+  }
+  if (!state.started) return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory  Up/Down: select first step`;
 
   const focusHint = state.focusedPane === "steps" ? "Tab: output  Up/Down: select" : "Tab: steps  Up/Down/PageUp/PageDown/Home/End: scroll";
 
@@ -12,10 +16,12 @@ function footerContent(state: LoopState): string {
   const end = state.stopAfterIteration ? "ending after iteration" : "[e]nd after iteration";
   const restart = state.restartRequested ? "restarting step" : "[r]estart step";
   const skip = state.skipRequested ? "skipping step" : "[s]kip step";
-  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  ${focusHint}`;
+  const history = state.history.length > 0 ? "  [h]istory" : "";
+  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}${history}  ${focusHint}`;
 }
 
 function footerColor(state: LoopState): string {
+  if (state.historyView !== null) return "#cba6f7";
   return state.paused || state.stopAfterIteration || state.skipRequested || state.restartRequested ? "#f9e2af" : "#6c7086";
 }
 
