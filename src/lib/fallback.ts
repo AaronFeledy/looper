@@ -8,13 +8,17 @@ import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "
 import { createLoopState, notify, subscribe, type LoopState } from "./state.ts";
 import {
   clearResumeStepFile,
+  clearRunStateFile,
   clearStopAfterIterationFile,
   clearStopFile,
+  readRunState,
   resumeStepIndex,
   stopAfterIterationFileExists,
   stopFileExists,
   writeResumeStep,
+  writeRunState,
 } from "./state-files.ts";
+import type { ResumeSession } from "./orchestrator.ts";
 import type { Step } from "./runner.ts";
 
 export type FallbackOptions = {
@@ -87,6 +91,24 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
+function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number): void {
+  const step = steps[stepIndex];
+  if (step === undefined) return;
+  writeRunState({ iteration, stepIndex, stepName: step.name });
+}
+
+function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number): void {
+  if (steps.length === 0) {
+    clearRunStateFile();
+    return;
+  }
+  if (nextIndex >= steps.length) {
+    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name });
+    return;
+  }
+  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name });
+}
+
 export async function waitWithCountdown(
   state: LoopState,
   seconds: number,
@@ -117,7 +139,10 @@ export async function runNonTty({
 }: FallbackOptions): Promise<void> {
   clearStopFile();
   clearStopAfterIterationFile();
-  if (!options.continueFromLastStep) clearResumeStepFile();
+  if (options.fresh) {
+    clearResumeStepFile();
+    clearRunStateFile();
+  }
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
   process.stdout.write(`${label("Mode", "non-TTY fallback")}\n`);
@@ -166,14 +191,44 @@ async function runNonTtyIterations({
   titleGenConfig?: TitleGenConfig;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
-  for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
+  let startIteration = 1;
+  let firstStartStepIndex = 0;
+  let firstIterationResume: ResumeSession | undefined;
+  if (!options.fresh) {
+    const runState = readRunState();
+    if (runState !== null) {
+      startIteration = Math.max(1, runState.iteration);
+      const steps0 = loadSteps(configDir);
+      const named = steps0.findIndex((step) => step.name === runState.stepName);
+      firstStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(steps0.length - 1, runState.stepIndex));
+      if (runState.sessionID !== undefined) {
+        firstIterationResume = {
+          sessionID: runState.sessionID,
+          ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
+          stepName: runState.stepName,
+        };
+      }
+    } else {
+      firstStartStepIndex = resumeStepIndex(loadSteps(configDir));
+    }
+  }
+  if (startIteration > options.maxIterations) {
+    startIteration = 1;
+    firstStartStepIndex = 0;
+    firstIterationResume = undefined;
+    clearResumeStepFile();
+    clearRunStateFile();
+  }
+
+  for (let iteration = startIteration; iteration <= options.maxIterations; iteration += 1) {
     if (stopFileExists()) {
       process.stdout.write(`\n${ui.yellow("■ stop file exists")} stopping before iteration ${iteration}\n`);
       return;
     }
 
     const stepsSnapshot = loadSteps(configDir);
-    const startStepIndex = iteration === 1 && options.continueFromLastStep ? resumeStepIndex(stepsSnapshot) : 0;
+    const startStepIndex = iteration === startIteration ? firstStartStepIndex : 0;
+    const resumeForThisIteration = iteration === startIteration ? firstIterationResume : undefined;
     const state = createLoopState({
       maxIterations: options.maxIterations,
       stepNames: stepsSnapshot.map((step) => step.name),
@@ -202,18 +257,26 @@ async function runNonTtyIterations({
       repoDir,
       configDir,
       startStepIndex,
+      ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
       ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
       hooks: {
-        onStepBegin: ({ step, index, totalSteps }) => {
+        onStepBegin: ({ step, index, totalSteps, iteration: stepIteration }) => {
           saveResumeStep(loadSteps(configDir), index);
+          saveRunStatePosition(stepIteration, loadSteps(configDir), index);
           process.stdout.write(`\n${divider(`Step ${index + 1}/${totalSteps} · ${step.name}`, ui.green)}`);
           process.stdout.write(`${label("Agent", step.agent || "default")}\n`);
           process.stdout.write(`${label("Model", step.model || "default")}\n`);
           process.stdout.write(`${label("Variant", step.variant || "default")}\n`);
           process.stdout.write(`${label("Prompt", step.prompt)}\n`);
         },
-        onStepFinish: ({ nextIndex, status }) => {
-          if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
+        onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID }) => {
+          writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID });
+        },
+        onStepFinish: ({ nextIndex, status, iteration: stepIteration }) => {
+          if (status === "done") {
+            saveNextResumeStep(loadSteps(configDir), nextIndex);
+            saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex);
+          }
         },
       },
     });
@@ -235,6 +298,8 @@ async function runNonTtyIterations({
     }
   }
 
+  clearResumeStepFile();
+  clearRunStateFile();
   process.stdout.write(`\n${ui.yellow("■ max iterations reached")} ${options.maxIterations}; no .looper-stop found\n`);
   process.exitCode = 1;
 }

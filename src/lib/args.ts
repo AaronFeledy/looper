@@ -2,7 +2,7 @@ export type Options = {
   attach: boolean;
   attachUrl?: string;
   configDir?: string;
-  continueFromLastStep: boolean;
+  fresh: boolean;
   maxIterations: number;
   start: boolean;
   waitProvided: boolean;
@@ -18,18 +18,23 @@ export class HelpRequested extends Error {
 
 export function usage() {
   return `Looper - iterative OpenCode step runner
-Usage: looper [--attach[=url]] [--config-dir=path|--config-dir path] [--start|--continue] [--wait[=minutes]|--wait minutes] [max_iterations]
+Usage: looper [--attach[=url]] [--config-dir=path|--config-dir path] [--start] [--fresh] [--wait[=minutes]|--wait minutes] [max_iterations]
 
 Flags:
   --attach[=url]      Connect to an existing opencode server. Without a URL, uses looper.yml, OPENCODE_ATTACH_URL, or the local default.
   --config-dir=path   Use this directory for config, prompts, and state files. Overrides auto-detection and LOOPER_CONFIG_DIR.
   --start             Start immediately. Without this, the TUI waits for [g]o.
-  --continue          Start immediately from the last saved step checkpoint.
+  --fresh             Ignore any saved checkpoint and start a new run from iteration 1, step 1.
+  --continue          Deprecated alias of --start (resuming is now the default).
   --wait[=minutes]    Wait between iterations. Without minutes, wait for the previous iteration duration.
+
+By default looper resumes the previous run where it left off: it restores the iteration and step, and
+reattaches to the in-progress opencode session if it is still active (otherwise it restarts that step).
+Use --fresh to start over. A run that reaches max_iterations clears its checkpoint automatically.
 
 Without --config-dir, looper looks for its config dir under \$PWD in this order: .looper, .local/looper, .local/.looper.
 If none contain a config file it defaults to .looper. The config file is looper.yml (falling back to looper.yaml, .looper.yml, .looper.yaml).
-State files (.looper-stop, .looper-resume-step.json, .last-branch) live in the same directory.
+State files (.looper-stop, .looper-resume-step.json, .looper-run.json, .last-branch) live in the same directory.
 A step can stop the loop by creating .looper-stop in that directory.
 `;
 }
@@ -46,7 +51,7 @@ export function parseArgs(argv: string[]): Options {
   let attach = false;
   let attachUrl: string | undefined;
   let configDir: string | undefined;
-  let continueFromLastStep = false;
+  let fresh = false;
   let maxIterations = 100;
   let start = false;
   let waitProvided = false;
@@ -89,8 +94,12 @@ export function parseArgs(argv: string[]): Options {
       continue;
     }
 
+    if (arg === "--fresh") {
+      fresh = true;
+      continue;
+    }
+
     if (arg === "--continue") {
-      continueFromLastStep = true;
       start = true;
       continue;
     }
@@ -121,7 +130,7 @@ export function parseArgs(argv: string[]): Options {
     throw new Error(`unknown argument '${arg}'`);
   }
 
-  return { attach, attachUrl, ...(configDir !== undefined ? { configDir } : {}), continueFromLastStep, maxIterations, start, waitProvided, waitDuration };
+  return { attach, attachUrl, ...(configDir !== undefined ? { configDir } : {}), fresh, maxIterations, start, waitProvided, waitDuration };
 }
 
 export function resolveAttachUrl(options: Options, configUrl: string | undefined, defaultAttachUrl: string): string | undefined {

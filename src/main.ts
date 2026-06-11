@@ -13,7 +13,7 @@ import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { detectGithubRepo } from "./lib/github.ts";
 import { type GithubWatcher, watchGithubPr } from "./lib/github-watcher.ts";
 import { runNonTty, waitWithCountdown } from "./lib/fallback.ts";
-import { runIteration, StepFailureError } from "./lib/orchestrator.ts";
+import { runIteration, StepFailureError, type ResumeSession } from "./lib/orchestrator.ts";
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
@@ -21,18 +21,22 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { cancelPendingNotify, createLoopState, createStepRow, notify, resetIterationNavigationState, setGithubStatus } from "./lib/state.ts";
+import { cancelPendingNotify, createLoopState, createStepRow, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
+import { startHistoryStreamer } from "./lib/history-stream.ts";
 import {
   clearStopAfterIterationFile,
   clearResumeStepFile,
+  clearRunStateFile,
   clearStopFile,
   initStatePaths,
+  readRunState,
   readStopAfterIterationFile,
   readStopFile,
   resumeStepIndex,
   stopAfterIterationFileExists,
   stopFileExists,
   writeResumeStep,
+  writeRunState,
   writeStopAfterIterationFile,
   writeStopFile,
 } from "./lib/state-files.ts";
@@ -94,6 +98,7 @@ function resetIterationState(
   branch: string,
   steps: Step[],
 ): void {
+  snapshotIterationToHistory(state);
   state.iteration = iteration;
   state.branch = branch;
   state.iterationStartedAt = Date.now();
@@ -138,6 +143,29 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
+function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number): void {
+  const step = steps[stepIndex];
+  if (step === undefined) return;
+  writeRunState({ iteration, stepIndex, stepName: step.name });
+}
+
+function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number): void {
+  if (steps.length === 0) {
+    clearRunStateFile();
+    return;
+  }
+  if (nextIndex >= steps.length) {
+    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name });
+    return;
+  }
+  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name });
+}
+
+function clearRunArtifactsForNewRun(): void {
+  clearResumeStepFile();
+  clearRunStateFile();
+}
+
 function stopReason(): string {
   return readStopFile() ?? readStopAfterIterationFile() ?? "stop requested";
 }
@@ -152,13 +180,38 @@ function resolveAttachUrl(
 async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const steps = loadSteps(configDir);
   if (options.start) clearStopFilesForNewRun();
-  if (options.start && !options.continueFromLastStep) clearResumeStepFile();
+  if (options.fresh) clearRunArtifactsForNewRun();
 
   const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name) });
   state.branch = await currentBranch();
   state.started = options.start;
 
-  let firstIterationStartStepIndex = options.continueFromLastStep ? resumeStepIndex(steps) : 0;
+  let startIteration = 1;
+  let firstIterationStartStepIndex = 0;
+  let firstIterationResume: ResumeSession | undefined;
+  if (!options.fresh) {
+    const runState = readRunState();
+    if (runState !== null) {
+      startIteration = Math.max(1, runState.iteration);
+      const named = steps.findIndex((step) => step.name === runState.stepName);
+      firstIterationStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(steps.length - 1, runState.stepIndex));
+      if (runState.sessionID !== undefined) {
+        firstIterationResume = {
+          sessionID: runState.sessionID,
+          ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
+          stepName: runState.stepName,
+        };
+      }
+    } else {
+      firstIterationStartStepIndex = resumeStepIndex(steps);
+    }
+  }
+  if (startIteration > options.maxIterations) {
+    startIteration = 1;
+    firstIterationStartStepIndex = 0;
+    firstIterationResume = undefined;
+    clearRunArtifactsForNewRun();
+  }
   let resumeAfterStepFailure = false;
   let renderer: CliRenderer | undefined;
   let bootScreen: BootScreen | undefined;
@@ -167,6 +220,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let server: ServerHandle | undefined;
   let cleanupKeys: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
+  let historyStreamer: { stop: () => void } | undefined;
   let branchWatcher: BranchWatcher | null = null;
   let branchSafetyTimer: ReturnType<typeof setInterval> | undefined;
   let githubWatcher: GithubWatcher | undefined;
@@ -278,6 +332,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
 
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
+    historyStreamer = startHistoryStreamer({ state, client, repoDir });
 
     const root = new BoxRenderable(renderer, {
       id: "looper-root",
@@ -343,15 +398,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       },
       onStart: () => {
         clearStopFilesForNewRun();
-        if (!options.continueFromLastStep && !resumeAfterStepFailure) clearResumeStepFile();
+        if (options.fresh && !resumeAfterStepFailure) clearRunArtifactsForNewRun();
         if (!state.started) {
           if (resumeAfterStepFailure) {
             firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
             resumeAfterStepFailure = false;
           } else if (state.manualStepSelection && state.selectedStepIndex !== null) {
             firstIterationStartStepIndex = state.selectedStepIndex;
-          } else if (options.continueFromLastStep) {
-            firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
           }
         }
         state.started = true;
@@ -379,12 +432,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     await waitForStart(state);
 
-    for (let iteration = 1; iteration <= options.maxIterations; iteration += 1) {
+    for (let iteration = startIteration; iteration <= options.maxIterations; iteration += 1) {
       if (stopFileExists() || stopAfterIterationFileExists()) return finish(0, stopReason());
 
       const iterationSteps = loadSteps(configDir);
       resetIterationState(state, iteration, state.branch || (await currentBranch()), iterationSteps);
       const startedAt = Date.now();
+      const resumeForThisIteration = iteration === startIteration ? firstIterationResume : undefined;
       let result: Awaited<ReturnType<typeof runIteration>>;
       try {
         result = await runIteration({
@@ -393,19 +447,27 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           client,
           repoDir,
           configDir,
-          startStepIndex: iteration === 1 ? firstIterationStartStepIndex : 0,
+          startStepIndex: iteration === startIteration ? firstIterationStartStepIndex : 0,
+          ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
           hooks: {
-            onStepBegin: ({ index }) => {
+            onStepBegin: ({ index, iteration: stepIteration }) => {
               saveResumeStep(loadSteps(configDir), index);
+              saveRunStatePosition(stepIteration, loadSteps(configDir), index);
               // Step boundaries are common branch-change moments (the previous
               // step may have run `git checkout`); re-read HEAD immediately so
               // the header doesn't lag up to 5s behind reality.
               branchWatcher?.refresh();
               githubWatcher?.refresh();
             },
-            onStepFinish: ({ nextIndex, status }) => {
-              if (status === "done") saveNextResumeStep(loadSteps(configDir), nextIndex);
+            onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID }) => {
+              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID });
+            },
+            onStepFinish: ({ nextIndex, status, iteration: stepIteration }) => {
+              if (status === "done") {
+                saveNextResumeStep(loadSteps(configDir), nextIndex);
+                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex);
+              }
               branchWatcher?.refresh();
               githubWatcher?.refresh();
             },
@@ -435,6 +497,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       }
     }
 
+    clearRunArtifactsForNewRun();
     return finish(1, `max iterations reached (${options.maxIterations})`);
   } catch (error) {
     if (bootAbort.signal.aborted) return finish(130, exitReason ?? "looper startup interrupted");
@@ -442,6 +505,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   } finally {
     cleanupKeys?.();
     backgroundAgentStreamer?.stop();
+    historyStreamer?.stop();
     githubWatcher?.stop();
     if (branchSafetyTimer !== undefined) clearInterval(branchSafetyTimer);
     branchWatcher?.stop();
