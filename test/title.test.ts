@@ -150,6 +150,46 @@ describe("generateWorkDescription agent selection", () => {
     expect(captured.createAgents).toEqual(["my-custom-title-agent"]);
     expect(captured.promptAgents).toEqual(["my-custom-title-agent"]);
   });
+
+  test("aborts and deletes the title session when generation exceeds the timeout", async () => {
+    const prev = process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"];
+    process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"] = "50";
+    const aborts: string[] = [];
+    const deletes: string[] = [];
+    const client = {
+      config: { get: async () => ({ data: {} }) },
+      provider: { list: async () => ({ data: { all: [] } }) },
+      session: {
+        create: async () => ({ data: { id: "ses_title_runaway" } }),
+        prompt: (_params: unknown, opts?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () => {
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          }),
+        abort: async ({ sessionID }: { sessionID: string }) => {
+          aborts.push(sessionID);
+          return {};
+        },
+        delete: async ({ sessionID }: { sessionID: string }) => {
+          deletes.push(sessionID);
+          return {};
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    try {
+      const title = await generateWorkDescription({ client, repoDir: "/tmp/repo", contextText: "did some work" });
+      expect(title).toBeUndefined();
+      expect(aborts).toContain("ses_title_runaway");
+      expect(deletes).toContain("ses_title_runaway");
+    } finally {
+      if (prev === undefined) delete process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"];
+      else process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"] = prev;
+    }
+  });
 });
 
 describe("config title parsing", () => {
@@ -616,7 +656,40 @@ describe("title orchestration", () => {
     expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
   });
 
-  test("model error response keeps the title session and applies no title", async () => {
+  test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "openai",
+      stepModelID: "gpt-5.5",
+      providerList: {
+        all: [
+          {
+            id: "openai",
+            models: {
+              "gpt-5.5": { id: "gpt-5.5", providerID: "openai", capabilities: { reasoning: true }, cost: { input: 10, output: 10 }, status: "active" },
+              "gpt-5-nano": { id: "gpt-5-nano", providerID: "openai", capabilities: { reasoning: true }, cost: { input: 0.1, output: 0.1 }, status: "active" },
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5-nano" });
+    expect(models).not.toContain(undefined);
+  });
+
+  test("model error response deletes the title session and applies no title", async () => {
     writeTwoStepConfig();
     const captured: Array<{ sessionID: string; title: string }> = [];
     const deletes: string[] = [];
@@ -635,7 +708,7 @@ describe("title orchestration", () => {
 
     expect(result).toBe("complete");
     expect(captured).toEqual([]);
-    expect(deletes).not.toContain("ses_title");
+    expect(deletes).toContain("ses_title");
     expect(state.steps[0]?.title).toBeUndefined();
   });
 

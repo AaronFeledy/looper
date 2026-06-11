@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import YAML from "yaml";
 
 import {
   applyManagedOpencodeResources,
@@ -44,6 +45,22 @@ describe("opencode managed resources", () => {
     const file = titleAgentPath();
     expect(readFileSync(file, "utf8")).toContain(TITLE_AGENT_NAME);
     expect(TITLE_AGENT_RESOURCE.isManaged(readFileSync(file, "utf8"))).toBe(true);
+  });
+
+  test("title agent frontmatter disables every tool and denies tool permissions", () => {
+    const content = TITLE_AGENT_RESOURCE.desiredContent();
+    const match = /^---\n([\s\S]*?)\n---/.exec(content);
+    expect(match).not.toBeNull();
+    const frontmatter = YAML.parse(match![1]!) as {
+      mode?: string;
+      tools?: Record<string, unknown>;
+      permission?: Record<string, unknown>;
+    };
+    expect(frontmatter.mode).toBe("subagent");
+    expect(frontmatter.tools?.["*"]).toBe(false);
+    expect(frontmatter.permission?.["*"]).toBe("deny");
+    expect(frontmatter.permission?.["bash"]).toBe("deny");
+    expect(frontmatter.permission?.["edit"]).toBe("deny");
   });
 
   test("is idempotent when the desired title agent content is already present", () => {

@@ -224,8 +224,8 @@ class TitleCoordinator {
     private readonly mode: TitleMode,
     private readonly getSessionID: () => string | undefined,
     private readonly getBranch: () => string | undefined,
-    /** Apply the generated title (state mutation + opencode session.update). Called eagerly the moment generation succeeds, NOT at step end — so TUI and opencode update mid-step. */
-    private readonly applyTitle: (desc: string) => Promise<void>,
+    /** Apply the generated title (state mutation + opencode session.update). Called eagerly the moment generation succeeds, NOT at step end — so TUI and opencode update mid-step. `targetSessionID` pins the opencode rename to the session the title was generated from, so a concurrent restart that reindexes `state.steps` can't redirect or drop it. */
+    private readonly applyTitle: (desc: string, targetSessionID?: string) => Promise<void>,
     private readonly log: (line: string) => void,
     private readonly titleGenConfig: TitleGenConfig | undefined,
   ) {
@@ -265,7 +265,7 @@ class TitleCoordinator {
           // with a new session, we need to re-apply the title to the final session.
           if (this.appliedToSessionID !== undefined && this.appliedToSessionID !== finalSessionID) {
             try {
-              await this.applyTitle(fromTimer);
+              await this.applyTitle(fromTimer, finalSessionID);
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
               this.log(`[looper] title gen: re-apply to retry session threw: ${message}`);
@@ -348,7 +348,7 @@ class TitleCoordinator {
         this.applied = true;
         this.appliedToSessionID = sessionID;
         try {
-          await this.applyTitle(desc);
+          await this.applyTitle(desc, sessionID);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           this.log(`[looper] title gen: applyTitle threw: ${message}`);
@@ -446,14 +446,14 @@ export async function runIteration({
      * eager step-start path of a reuse step before the session exists). Also
      * mutates the outer `workDescription` so later steps inherit the value.
      */
-    const applyTitle = async (desc: string): Promise<void> => {
+    const applyTitle = async (desc: string, targetSessionID?: string): Promise<void> => {
       workDescription = desc;
       const row = state.steps[stepIndexForTitle];
       if (row && row.title !== desc) {
         row.title = desc;
         notify();
       }
-      const sid = state.steps[stepIndexForTitle]?.sessionID;
+      const sid = targetSessionID ?? state.steps[stepIndexForTitle]?.sessionID;
       if (sid === undefined) return;
       await setSessionTitle({
         client,
