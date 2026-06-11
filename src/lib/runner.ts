@@ -6,13 +6,16 @@ import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
 import { consumeSessionEvents, createSessionEventConsumer } from "./event-consumer.ts";
 import {
+  beginStepRun,
+  finalizeStepRow,
+  markStepWaiting,
   notify,
   pushAgentLine,
   pushStepOutputLine,
   pushStepOutputLines,
   setStepSessionID,
-  syncSelectionToActiveStep,
   syncStepBackgroundAgents,
+  type FinalizeStepStatus,
   type LoopState,
   type StepRestartReason,
 } from "./state.ts";
@@ -530,11 +533,7 @@ function logContinuationState(state: LoopState, stepIndex: number, record: RunCo
 }
 
 function setContinuationStatus(state: LoopState, stepIndex: number, _record: RunContinuationRecord): void {
-  const step = state.steps[stepIndex];
-  if (!step) return;
-  step.status = "waiting";
-  step.statusMessage = undefined;
-  notify();
+  markStepWaiting(state, stepIndex);
 }
 
 function continuationBackgroundAgent(record: RunContinuationRecord): BackgroundAgentSnapshot {
@@ -829,14 +828,8 @@ export async function reattachOpenCodeStep({
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
 
-  state.activeStepIndex = stepIndex;
-  syncSelectionToActiveStep(state);
-  activeStep.status = "running";
-  activeStep.statusMessage = "reattaching";
-  activeStep.startedAt ??= Date.now();
-  activeStep.finishedAt = undefined;
+  beginStepRun(state, stepIndex, { statusMessage: "reattaching" });
   setStepSessionID(state, stepIndex, sessionID);
-  notify();
 
   const pushLine = (line: string) => {
     pushAgentLine(state, line);
@@ -957,21 +950,10 @@ export async function reattachOpenCodeStep({
   }
 
   const finalize = (
-    statusValue: StepResult,
+    statusValue: FinalizeStepStatus,
     extras?: { errorMessage?: string; statusMessage?: string },
   ): StepRunResult => {
-    if (statusValue === "restart") {
-      activeStep.status = "pending";
-      activeStep.statusMessage = undefined;
-      activeStep.finishedAt = undefined;
-    } else {
-      activeStep.status = statusValue;
-      activeStep.statusMessage = extras?.statusMessage;
-      activeStep.finishedAt = Date.now();
-    }
-    syncStepBackgroundAgents(state, stepIndex, []);
-    state.activeStepIndex = null;
-    notify();
+    finalizeStepRow(state, stepIndex, statusValue, extras?.statusMessage !== undefined ? { statusMessage: extras.statusMessage } : {});
     return {
       status: statusValue,
       sessionID,
@@ -1043,13 +1025,7 @@ export async function runOpenCodeStep({
   const startedAt = Date.now();
   const effectiveTimeoutMs = timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
 
-  state.activeStepIndex = stepIndex;
-  syncSelectionToActiveStep(state);
-  activeStep.status = "running";
-  activeStep.statusMessage = undefined;
-  activeStep.startedAt ??= Date.now();
-  activeStep.finishedAt = undefined;
-  notify();
+  beginStepRun(state, stepIndex);
 
   const pushLine = (line: string) => {
     pushAgentLine(state, line);
@@ -1365,18 +1341,7 @@ export async function runOpenCodeStep({
     }
   }
 
-  if (status === "restart") {
-    activeStep.status = "pending";
-    activeStep.statusMessage = undefined;
-    activeStep.finishedAt = undefined;
-  } else {
-    activeStep.status = status;
-    activeStep.statusMessage = undefined;
-    activeStep.finishedAt = Date.now();
-  }
-  syncStepBackgroundAgents(state, stepIndex, []);
-  state.activeStepIndex = null;
-  notify();
+  finalizeStepRow(state, stepIndex, status);
 
   return {
     status,
