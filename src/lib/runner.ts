@@ -104,7 +104,6 @@ const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIB
  */
 const STOP_SESSION_CONFIRM_TIMEOUT_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", 10_000);
 const STOP_SESSION_CONFIRM_POLL_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_POLL_MS", 250);
-export const STOP_SESSION_DRAIN_WINDOW_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_DRAIN_MS", 15_000);
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -382,92 +381,24 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
  * resuming a still-busy session silently drops the resume prompt (opencode's
  * per-session mutex persists the message but ignores its generation).
  *
- * The abort call and the status polls up to first-idle are bounded by
- * `timeoutMs` so a hung HTTP call can never deadlock the loop. When
- * `drainWindowMs > 0`, an ADDITIONAL drain phase runs after first-idle to
- * outlast background-wake revivals; that phase is bounded separately (up to
- * `drainWindowMs * 4`, not by `timeoutMs`), so callers must budget for
- * `timeoutMs + drainWindowMs * 4` worst case. Polls `session.status` only
- * (never `session.messages`) so it is cheap and never perturbs message
- * history. A `false` return means "could not confirm stopped"; callers should
- * treat that as a retryable condition, not as permission to assume the session
- * is gone.
+ * The ENTIRE operation — the abort call and every status poll — is bounded
+ * by `timeoutMs` so a hung HTTP call can never deadlock the loop. Polls
+ * `session.status` only (never `session.messages`) so it is cheap and never
+ * perturbs message history. A `false` return means "could not confirm
+ * stopped"; callers should treat that as a retryable condition, not as
+ * permission to assume the session is gone.
  */
-async function listSessionChildState(client: OpencodeClient, repoDir: string, sessionID: string): Promise<"none" | "some" | "unknown"> {
-  try {
-    const result = await client.session.children({ sessionID, directory: repoDir });
-    if (result.error || !result.data) return "unknown";
-    return result.data.length > 0 ? "some" : "none";
-  } catch {
-    return "unknown";
-  }
-}
-
-async function holdSessionDead({
-  client,
-  repoDir,
-  sessionID,
-  drainWindowMs,
-  log,
-}: {
-  client: OpencodeClient;
-  repoDir: string;
-  sessionID: string;
-  drainWindowMs: number;
-  log?: (line: string) => void;
-}): Promise<boolean> {
-  // Only a background sub-session can revive this parent after it first reports
-  // idle, so a CONFIRMED-empty child list means the stop is already settled and
-  // the drain can be skipped. An inconclusive lookup is treated as "may have
-  // children" and drained, matching this function's hold-on-uncertainty stance.
-  if ((await listSessionChildState(client, repoDir, sessionID)) === "none") return true;
-
-  let reaborts = 0;
-  let idleSince = Date.now();
-  const hardDeadline = Date.now() + drainWindowMs * 4;
-  while (Date.now() - idleSince < drainWindowMs) {
-    if (Date.now() > hardDeadline) {
-      log?.(`[looper] session ${sessionID} kept reviving during drain after ${reaborts} re-abort(s); could not confirm stop`);
-      return false;
-    }
-    await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, drainWindowMs));
-    let state: SessionPendingState;
-    try {
-      state = await sessionPendingState(client, repoDir, sessionID);
-    } catch {
-      state = "unknown";
-    }
-    if (state === "idle") continue;
-    // Non-idle means a background wake revived the session (`pending`) or the
-    // status read failed (`unknown`). Re-abort in BOTH cases: aborting an
-    // already-idle session is harmless, while skipping it on `unknown` could
-    // let a revived generation keep running until later idle reads confirm a
-    // false stop.
-    reaborts += 1;
-    log?.(`[looper] session ${sessionID} non-idle (${state}) during drain; re-aborting (${reaborts})`);
-    try {
-      await withDeadline(client.session.abort({ sessionID, directory: repoDir }), STOP_SESSION_CONFIRM_TIMEOUT_MS);
-    } catch {
-      // best-effort; the next poll re-evaluates
-    }
-    idleSince = Date.now();
-  }
-  return true;
-}
-
 export async function stopServerSession({
   client,
   repoDir,
   sessionID,
   timeoutMs = STOP_SESSION_CONFIRM_TIMEOUT_MS,
-  drainWindowMs = 0,
   log,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
   timeoutMs?: number;
-  drainWindowMs?: number;
   log?: (line: string) => void;
 }): Promise<boolean> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
@@ -487,10 +418,7 @@ export async function stopServerSession({
   while (true) {
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
-    if (state === "idle") {
-      if (drainWindowMs > 0) return await holdSessionDead({ client, repoDir, sessionID, drainWindowMs, log });
-      return true;
-    }
+    if (state === "idle") return true;
     if (remaining() <= 0) {
       log?.(`[looper] session ${sessionID} still ${state} ${timeoutMs}ms after abort; could not confirm stop`);
       return false;
@@ -735,9 +663,6 @@ export async function waitForLoopContinuationIdle({
   timeoutMs?: number;
 }): Promise<ContinuationWaitResult> {
   const startedAt = Date.now();
-  const drainWindowMs = positiveIntegerEnv("LOOPER_CONTINUATION_DRAIN_MS", 15_000);
-  const drainPollMs = positiveIntegerEnv("LOOPER_CONTINUATION_DRAIN_POLL_MS", 1_000);
-  const pollMs = positiveIntegerEnv("LOOPER_CONTINUATION_POLL_MS", CONTINUATION_POLL_MS);
   const poller = startBackgroundAgentPoller({
     state,
     stepIndex,
@@ -747,7 +672,6 @@ export async function waitForLoopContinuationIdle({
     fallbackAgents: continuationFallback(repoDir, sessionID),
   });
 
-  let idleSince: number | undefined;
   try {
     while (true) {
       if (state.restartRequested) return "restart";
@@ -763,45 +687,33 @@ export async function waitForLoopContinuationIdle({
 
       const backgroundActive = record !== null && record.source.state === "active";
       if (backgroundActive) {
-        idleSince = undefined;
         setContinuationStatus(state, stepIndex, record!);
         const updatedAt = Date.parse(record!.source.updatedAt);
         if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
       } else {
+        // Background tasks report idle: resume only once the session is
+        // CONFIRMED idle. sessionPendingState treats a status-read error as
+        // "unknown" (not idle), so transient flakiness can't resume into a
+        // still-busy session and have opencode drop the continuation prompt.
         let pendingState: SessionPendingState;
         try {
           pendingState = await sessionPendingState(client, repoDir, sessionID);
         } catch {
           pendingState = "unknown";
         }
-        if (pendingState !== "idle") {
-          idleSince = undefined;
-        } else {
-          idleSince ??= Date.now();
-          if (Date.now() - idleSince >= drainWindowMs) {
-            if (record !== null) {
-              setContinuationStatus(state, stepIndex, record);
-              logContinuationState(state, stepIndex, record, "background tasks idle");
-            }
-            return "idle";
+        if (pendingState === "idle") {
+          if (record !== null) {
+            setContinuationStatus(state, stepIndex, record);
+            logContinuationState(state, stepIndex, record, "background tasks idle");
           }
+          return "idle";
         }
         if (record !== null) setContinuationStatus(state, stepIndex, record);
       }
 
-      // An in-progress drain must be allowed to finish even if the step budget
-      // (`timeoutMs`) runs out mid-drain; otherwise a session that goes idle
-      // with <`drainWindowMs` left is falsely reported as `timeout`, forcing a
-      // needless restart of work that is actually done. Extend only to the
-      // current drain's completion (`idleSince + drainWindowMs`), capped by
-      // CONTINUATION_MAX_WAIT_MS; a session going active resets `idleSince`.
-      const baseDeadlineMs = Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs);
-      const drainDeadlineMs = idleSince !== undefined
-        ? Math.min(CONTINUATION_MAX_WAIT_MS, idleSince - startedAt + drainWindowMs)
-        : 0;
-      if (Date.now() - startedAt > Math.max(baseDeadlineMs, drainDeadlineMs)) return "timeout";
+      if (Date.now() - startedAt > Math.min(CONTINUATION_MAX_WAIT_MS, timeoutMs)) return "timeout";
 
-      await Bun.sleep(idleSince !== undefined ? drainPollMs : pollMs);
+      await Bun.sleep(CONTINUATION_POLL_MS);
     }
   } finally {
     poller.stop();

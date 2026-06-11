@@ -68,20 +68,23 @@ async function resolveHeuristicTitleModel({
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
     const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
-    // Filter to non-reasoning models BEFORE the priority match, not after.
-    // opencode auto-applies its adaptive-thinking variant to any
-    // reasoning-capable model, and cheap reasoning models (e.g.
-    // claude-haiku-4-5) reject it with a 400 ("adaptive thinking is not
-    // supported on this model") reported inside the assistant message's
-    // `error` field — which previously surfaced as an empty "no text" title.
+    if (models.length === 0) return undefined;
+    const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
+      if (pool.length === 0) return undefined;
+      for (const fragment of PRIORITY_SMALL_MODELS) {
+        const match = pool.find((m) => m.id.includes(fragment));
+        if (match) return { providerID: provider.id, modelID: match.id };
+      }
+      const cheapest = pool.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
+      return { providerID: provider.id, modelID: cheapest.id };
+    };
+    // Prefer non-reasoning models (reasoning ones can reject opencode's
+    // adaptive-thinking variant with a 400), but fall back to a cheap reasoning
+    // model rather than returning undefined: a reasoning-only provider (openai
+    // gpt-5.x) would otherwise fall through to opencode's heavyweight default,
+    // which is what ran the title agent on opus.
     const nonReasoning = models.filter((m) => m.capabilities.reasoning === false);
-    if (nonReasoning.length === 0) return undefined;
-    for (const fragment of PRIORITY_SMALL_MODELS) {
-      const match = nonReasoning.find((m) => m.id.includes(fragment));
-      if (match) return { providerID: provider.id, modelID: match.id };
-    }
-    const cheapest = nonReasoning.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
-    return { providerID: provider.id, modelID: cheapest.id };
+    return pickCheap(nonReasoning) ?? pickCheap(models);
   } catch (error) {
     if (isAbort(error)) return undefined;
     log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
@@ -151,6 +154,13 @@ export function extractAssistantModel(
 }
 
 const TITLE_MAX_CHARS = 100;
+
+const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
+
+function titleGenTimeoutMs(): number {
+  const raw = Number(process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
+}
 
 /**
  * System prompt for the throwaway title session. Originally a verbatim copy of
@@ -341,11 +351,21 @@ export async function generateWorkDescription({
     }));
 
   let titleSessionID: string | undefined;
-  let preserveSession = false;
+  // A correct title is one turn; exceeding this bound means the agent is
+  // executing the work-log instead of titling it. The timeout aborts the
+  // server-side session so a misbehaving agent cannot run unbounded.
+  const timeoutMs = titleGenTimeoutMs();
+  const timeoutController = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, timeoutMs);
+  const genSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
   try {
     const created = await client.session.create(
       { directory: repoDir, ...(titleAgent ? { agent: titleAgent } : {}) },
-      { signal },
+      { signal: genSignal },
     );
     if (created.error || !created.data?.id) {
       log?.(`[looper] title gen: session.create failed: ${formatError(created.error)}`);
@@ -364,11 +384,10 @@ export async function generateWorkDescription({
         ...(titleModel ? { model: titleModel } : {}),
         ...(titleVariant ? { variant: titleVariant } : {}),
       },
-      { signal },
+      { signal: genSignal },
     );
     if (resp.error || !resp.data) {
       log?.(`[looper] title gen: prompt failed: ${formatError(resp.error)}`);
-      preserveSession = true;
       return undefined;
     }
     logTitleAgentUsage(resp.data.info, log);
@@ -376,51 +395,46 @@ export async function generateWorkDescription({
     const modelError = extractMessageError(resp.data.info);
     if (modelError !== undefined) {
       log?.(`[looper] title gen: model returned an error: ${modelError}`);
-      preserveSession = true;
       return undefined;
     }
 
     const titleText = extractAssistantText([{ info: resp.data.info, parts: resp.data.parts }]);
     if (titleText.length === 0) {
       log?.("[looper] title gen: assistant returned no text");
-      preserveSession = true;
       return undefined;
     }
     const cleaned = postprocessTitle(titleText);
     if (cleaned.length === 0) {
       log?.("[looper] title gen: title empty after postprocessing");
-      preserveSession = true;
       return undefined;
     }
     return cleaned;
   } catch (error) {
-    if (isAbort(error)) return undefined;
-    log?.(`[looper] title gen threw: ${formatError(error)}`);
-    preserveSession = titleSessionID !== undefined;
+    if (isAbort(error) && timedOut) {
+      log?.(`[looper] title gen: exceeded ${timeoutMs}ms; aborting title session ${titleSessionID ?? "(uncreated)"}`);
+    } else if (!isAbort(error)) {
+      log?.(`[looper] title gen threw: ${formatError(error)}`);
+    }
     return undefined;
   } finally {
+    clearTimeout(timer);
     if (titleSessionID !== undefined) {
-      if (preserveSession) {
-        log?.(`[looper] title gen: kept failed title session ${titleSessionID} for review`);
-      } else {
-        // Success or cancellation. The throwaway title session keeps generating
-        // server-side even after our client request returns/aborts, so abort it
-        // first, then delete it. Both are awaited and their failures logged so a
-        // silently-failed delete can no longer leak a session whose first
-        // message is a copy of the step's assistant output.
-        try {
-          await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
-        } catch (error) {
-          log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
+      // Always abort then delete the throwaway: it keeps generating server-side
+      // even after our client request returns/aborts, and on failure it holds a
+      // copy of the step's work-log. Keeping failed sessions "for review" leaked
+      // them (the error is already logged), so success and failure both clean up.
+      try {
+        await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
+      } catch (error) {
+        log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
+      }
+      try {
+        const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
+        if (deleted?.error) {
+          log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
         }
-        try {
-          const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
-          if (deleted?.error) {
-            log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
-          }
-        } catch (error) {
-          log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
-        }
+      } catch (error) {
+        log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
       }
     }
   }
