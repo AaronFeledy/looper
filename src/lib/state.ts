@@ -1,5 +1,16 @@
 export type StepStatus = "pending" | "running" | "waiting" | "done" | "failed" | "skipped";
 
+/** Terminal display statuses a step row settles into once its attempt is over. */
+export type TerminalStepStatus = "done" | "failed" | "skipped";
+
+/**
+ * Statuses accepted by {@link finalizeStepRow}: the terminals plus `"restart"`,
+ * which is a {@link StepStatus}-less signal that resets the row back to
+ * `pending` (the runner returns `"restart"` as a {@link import("./runner.ts").StepResult},
+ * never as a displayed status).
+ */
+export type FinalizeStepStatus = TerminalStepStatus | "restart";
+
 export type LoopPane = "steps" | "output";
 
 export type StepRestartReason = "manual" | "timeout";
@@ -390,6 +401,118 @@ export function setStepSessionID(state: LoopState, stepIndex: number, sessionID:
   if (!step || step.sessionID === sessionID) return;
   step.sessionID = sessionID;
   notifyStateChange();
+}
+
+/*
+ * Step-row status transitions — the single place that moves a row's display
+ * status and keeps its companion fields (statusMessage, startedAt, finishedAt,
+ * state.activeStepIndex, backgroundAgents) in lockstep:
+ *
+ *   pending --beginStepRun--> running --finalizeStepRow--> done | failed | skipped
+ *      ^                         |
+ *      |                         +--markStepWaiting--> waiting --(resume)--> running
+ *      +--finalizeStepRow("restart") / resetStepRowToPending--+
+ *
+ * The renderer (src/tui/step-list.ts) reads only `status` (+ restartReason);
+ * notify() is debounced and idempotent within a frame, so folding it into these
+ * helpers cannot let a listener observe a half-updated row.
+ */
+
+/**
+ * pending -> running. Marks `stepIndex` active, syncs selection to it, and
+ * (re)starts the row. `startedAt` is set once (`??=`) so a reattach of the same
+ * row keeps its original start time.
+ */
+export function beginStepRun(state: LoopState, stepIndex: number, options: { statusMessage?: string } = {}): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  state.activeStepIndex = stepIndex;
+  syncSelectionToActiveStep(state);
+  step.status = "running";
+  step.statusMessage = options.statusMessage;
+  step.startedAt ??= Date.now();
+  step.finishedAt = undefined;
+  notify();
+}
+
+/**
+ * -> waiting. The row stays "live" (spinner) while its background tasks run but
+ * yields no terminal status. Deliberately leaves `state.activeStepIndex` alone:
+ * callers differ on whether the step is still active during the wait.
+ */
+export function markStepWaiting(state: LoopState, stepIndex: number): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.status = "waiting";
+  step.statusMessage = undefined;
+  notify();
+}
+
+/**
+ * -> pending, in place (no row insertion). Resets a freshly-inserted
+ * retry/restart row before its next attempt: preserves `startedAt`, clears
+ * `finishedAt`, optionally shows a `statusMessage` (e.g. "retry in 5s").
+ */
+export function resetStepRowToPending(state: LoopState, stepIndex: number, options: { statusMessage?: string } = {}): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.status = "pending";
+  step.statusMessage = options.statusMessage;
+  step.finishedAt = undefined;
+  notify();
+}
+
+/**
+ * Runner finalization: running -> done | failed | skipped, or `"restart"` ->
+ * pending. Clears the row's background-agent rows AND `state.activeStepIndex`.
+ * Do NOT use for orchestrator inline failures that must keep background rows
+ * visible — use {@link failStepRow}. `finishedAt` is stamped for every terminal
+ * (including "skipped"); "restart" clears it instead.
+ */
+export function finalizeStepRow(
+  state: LoopState,
+  stepIndex: number,
+  status: FinalizeStepStatus,
+  options: { statusMessage?: string } = {},
+): void {
+  const step = state.steps[stepIndex];
+  if (step) {
+    if (status === "restart") {
+      step.status = "pending";
+      step.statusMessage = undefined;
+      step.finishedAt = undefined;
+    } else {
+      step.status = status;
+      step.statusMessage = options.statusMessage;
+      step.finishedAt = Date.now();
+    }
+  }
+  syncStepBackgroundAgents(state, stepIndex, []);
+  state.activeStepIndex = null;
+  notify();
+}
+
+/**
+ * Orchestrator inline outcome: -> failed | skipped. Clears
+ * `state.activeStepIndex` but PRESERVES background-agent rows — some inline
+ * paths (e.g. the background-resume-limit branch) fire while a continuation
+ * placeholder row is still installed, and clearing it would change visible TUI
+ * state and selection.
+ */
+export function failStepRow(
+  state: LoopState,
+  stepIndex: number,
+  status: "failed" | "skipped" = "failed",
+  options: { statusMessage?: string } = {},
+): void {
+  const step = state.steps[stepIndex];
+  if (step) {
+    step.status = status;
+    step.statusMessage = options.statusMessage;
+    step.finishedAt = Date.now();
+  }
+  state.activeStepIndex = null;
+  notify();
 }
 
 export function pushStepOutputLine(state: LoopState, stepIndex: number, line: string): void {
