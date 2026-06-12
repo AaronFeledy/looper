@@ -53,6 +53,7 @@ function requireConfigDir(): string {
 const STOP_FILE_NAME = ".looper-stop";
 const STOP_AFTER_ITERATION_FILE_NAME = ".looper-stop-after-iteration";
 const RESUME_STEP_FILE_NAME = ".looper-resume-step.json";
+const RUN_STATE_FILE_NAME = ".looper-run.json";
 const LAST_BRANCH_FILE_NAME = ".last-branch";
 
 function stopFilePath(): string {
@@ -65,6 +66,10 @@ function stopAfterIterationFilePath(): string {
 
 function resumeStepFilePath(): string {
   return join(requireConfigDir(), RESUME_STEP_FILE_NAME);
+}
+
+function runStateFilePath(): string {
+  return join(requireConfigDir(), RUN_STATE_FILE_NAME);
 }
 
 function lastBranchFilePath(): string {
@@ -171,6 +176,82 @@ export function resumeStepIndex(steps: NamedStep[]): number {
   const namedIndex = steps.findIndex((step) => step.name === resume.stepName);
   if (namedIndex !== -1) return namedIndex;
   return Math.max(0, Math.min(steps.length - 1, resume.stepIndex));
+}
+
+/**
+ * Durable, iteration-aware run pointer (`.looper-run.json`). Superset of
+ * {@link ResumeStep}: also records the iteration the loop is on and, while a
+ * step is in flight, the opencode `sessionID`/`messageID` so a resume
+ * after a crash/exit can reattach to a still-live generation (or restart it).
+ *
+ * `sessionID`/`messageID` are only present for an IN-PROGRESS step; once a step
+ * finishes the pointer is advanced to the next step (or next iteration) WITHOUT
+ * session fields, so resume never reattaches to an already-completed step.
+ */
+export type RunState = {
+  iteration: number;
+  stepIndex: number;
+  stepName: string;
+  sessionID?: string;
+  messageID?: string;
+  updatedAt: string;
+};
+
+export type RunStateInput = {
+  iteration: number;
+  stepIndex: number;
+  stepName: string;
+  sessionID?: string;
+  messageID?: string;
+};
+
+function parseRunState(value: unknown): RunState | null {
+  if (!isRecord(value)) return null;
+  const iteration = value.iteration;
+  const stepIndex = value.stepIndex;
+  const stepName = value.stepName;
+  const updatedAt = value.updatedAt;
+  if (typeof iteration !== "number" || !Number.isInteger(iteration) || iteration < 1) return null;
+  if (typeof stepIndex !== "number" || !Number.isInteger(stepIndex) || stepIndex < 0) return null;
+  if (typeof stepName !== "string" || stepName.length === 0) return null;
+  if (typeof updatedAt !== "string" || updatedAt.length === 0) return null;
+  const sessionID = typeof value.sessionID === "string" && value.sessionID.length > 0 ? value.sessionID : undefined;
+  const messageID = typeof value.messageID === "string" && value.messageID.length > 0 ? value.messageID : undefined;
+  return {
+    iteration,
+    stepIndex,
+    stepName,
+    ...(sessionID !== undefined ? { sessionID } : {}),
+    ...(messageID !== undefined ? { messageID } : {}),
+    updatedAt,
+  };
+}
+
+export function readRunState(): RunState | null {
+  try {
+    const content = tolerantRead(runStateFilePath());
+    if (content === null) return null;
+    return parseRunState(JSON.parse(content));
+  } catch (error) {
+    logStateDiagnostic(`ignoring unreadable run-state file: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+export function writeRunState(input: RunStateInput): void {
+  const record: RunState = {
+    iteration: input.iteration,
+    stepIndex: input.stepIndex,
+    stepName: input.stepName,
+    ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}),
+    ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  writeFileAtomically(runStateFilePath(), `${JSON.stringify(record, null, 2)}\n`);
+}
+
+export function clearRunStateFile(): void {
+  tolerantRm(runStateFilePath());
 }
 
 export function readLastBranch() {

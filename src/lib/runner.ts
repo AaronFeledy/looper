@@ -117,6 +117,7 @@ export type RunOpenCodeStepOptions = {
   step: Step;
   sessionID?: string;
   onFirstAssistantContent?: () => void;
+  onSessionBound?: (info: { sessionID: string; messageID: string }) => void;
   timeoutMsOverride?: number;
 };
 
@@ -1018,6 +1019,7 @@ export async function runOpenCodeStep({
   step,
   sessionID,
   onFirstAssistantContent,
+  onSessionBound,
   timeoutMsOverride,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
@@ -1260,6 +1262,7 @@ export async function runOpenCodeStep({
     const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
+    onSessionBound?.({ sessionID: sid, messageID });
     supervisorPromise = supervise();
     pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(

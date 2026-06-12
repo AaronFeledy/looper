@@ -16,9 +16,9 @@ ln -sfn "$PWD/bin/looper" "$HOME/.local/bin/looper"
 In any project that has a `.local/looper/looper.yaml`:
 
 ```bash
-looper                                  # open the TUI, press [g]o or [enter] to start
-looper --start                          # start immediately
-looper --continue                       # resume from the last completed step
+looper                                  # open the TUI, press [g]o or [enter] to start (resumes by default)
+looper --start                          # start immediately (resumes where the last run left off)
+looper --fresh --start                  # start immediately, ignoring any saved checkpoint
 looper --attach=http://127.0.0.1:4096   # connect to an existing OpenCode server
 looper --wait=10                        # pause 10 minutes between iterations
 looper --wait                           # pause for the previous iteration's runtime
@@ -30,9 +30,24 @@ CLI flags:
 
 - `--attach[=url]` &mdash; connect to an existing opencode server instead of spawning one. Without a URL: tries `opencode.serverUrl` from `looper.yaml`, then `$OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 - `--start` &mdash; skip the TUI start prompt and begin immediately.
-- `--continue` &mdash; start immediately at the last saved step checkpoint (`.looper-resume-step.json`).
+- `--fresh` &mdash; ignore any saved checkpoint and start a new run from iteration 1, step 1.
+- `--continue` &mdash; deprecated alias of `--start` (resuming is now the default).
 - `--wait[=minutes]` &mdash; sleep between iterations. With `=N`, sleep N minutes. Without a value, sleep for the previous iteration's wall-clock duration.
 - `max_iterations` (positional, default `100`) &mdash; stop after this many iterations if no step has written `.looper-stop`.
+
+## Resuming
+
+Looper resumes the previous run by default. If you quit (or it stops) mid-run, the next start picks up at the
+same iteration and step. While a step is running, looper records its opencode session in `.looper-run.json`; on
+resume it reattaches to that session if it is still generating, otherwise it restarts the step in a fresh session.
+A run that reaches `max_iterations` clears its checkpoint, so the next start begins a new run. Pass `--fresh` to
+ignore the checkpoint and start over from iteration 1.
+
+## History
+
+Press `h` in the TUI to browse the output of previous iterations from the current run. Use `Left`/`Right` to move
+between iterations, `Up`/`Down` to pick a step, and `Tab` to focus the output pane and scroll. Step output is
+refetched from opencode on demand; history is kept in memory for the current run only and is not written to disk.
 
 ## Project layout in the consuming project
 
@@ -44,7 +59,8 @@ CLI flags:
     ├── .last-branch         # optional, written by your own prompts
     ├── .looper-stop         # written when a step decides to stop the loop
     ├── .looper-stop-after-iteration
-    └── .looper-resume-step.json
+    ├── .looper-resume-step.json   # legacy step-only checkpoint
+    └── .looper-run.json           # resume pointer: iteration + step (+ live session while a step runs)
 ```
 
 `looper.yaml` shape:
