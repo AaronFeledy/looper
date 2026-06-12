@@ -186,32 +186,48 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   state.branch = await currentBranch();
   state.started = options.start;
 
-  let startIteration = 1;
-  let firstIterationStartStepIndex = 0;
-  let firstIterationResume: ResumeSession | undefined;
-  if (!options.fresh) {
-    const runState = readRunState();
-    if (runState !== null) {
-      startIteration = Math.max(1, runState.iteration);
-      const named = steps.findIndex((step) => step.name === runState.stepName);
-      firstIterationStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(steps.length - 1, runState.stepIndex));
-      if (runState.sessionID !== undefined) {
-        firstIterationResume = {
-          sessionID: runState.sessionID,
-          ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
-          stepName: runState.stepName,
-        };
+  // Re-read on-disk checkpoints both at boot and at go: a checkpoint edited
+  // while the idle TUI was open must not be ignored (boot values go stale).
+  type ResumePlan = {
+    startIteration: number;
+    firstIterationStartStepIndex: number;
+    firstIterationResume: ResumeSession | undefined;
+  };
+  const computeResumePlan = (planSteps: Step[]): ResumePlan => {
+    let planStartIteration = 1;
+    let planStartStepIndex = 0;
+    let planResume: ResumeSession | undefined;
+    if (!options.fresh) {
+      const runState = readRunState();
+      if (runState !== null) {
+        planStartIteration = Math.max(1, runState.iteration);
+        const named = planSteps.findIndex((step) => step.name === runState.stepName);
+        planStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(planSteps.length - 1, runState.stepIndex));
+        if (runState.sessionID !== undefined) {
+          planResume = {
+            sessionID: runState.sessionID,
+            ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
+            stepName: runState.stepName,
+          };
+        }
+      } else {
+        planStartStepIndex = resumeStepIndex(planSteps);
       }
-    } else {
-      firstIterationStartStepIndex = resumeStepIndex(steps);
     }
-  }
-  if (startIteration > options.maxIterations) {
-    startIteration = 1;
-    firstIterationStartStepIndex = 0;
-    firstIterationResume = undefined;
-    clearRunArtifactsForNewRun();
-  }
+    if (planStartIteration > options.maxIterations) {
+      planStartIteration = 1;
+      planStartStepIndex = 0;
+      planResume = undefined;
+      clearRunArtifactsForNewRun();
+    }
+    return {
+      startIteration: planStartIteration,
+      firstIterationStartStepIndex: planStartStepIndex,
+      firstIterationResume: planResume,
+    };
+  };
+
+  let { startIteration, firstIterationStartStepIndex, firstIterationResume } = computeResumePlan(steps);
   let resumeAfterStepFailure = false;
   let renderer: CliRenderer | undefined;
   let bootScreen: BootScreen | undefined;
@@ -405,6 +421,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
             resumeAfterStepFailure = false;
           } else if (state.manualStepSelection && state.selectedStepIndex !== null) {
             firstIterationStartStepIndex = state.selectedStepIndex;
+          } else {
+            ({ startIteration, firstIterationStartStepIndex, firstIterationResume } = computeResumePlan(loadSteps(configDir)));
           }
         }
         state.started = true;

@@ -200,7 +200,7 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     scratch = repoDir;
     const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
     let statusReads = 0;
-    const sessionCalls: Array<{ index: number; stepName: string; sessionID: string; messageID: string }> = [];
+    const sessionCalls: Array<{ iteration: number; index: number; stepName: string; sessionID: string; messageID: string }> = [];
 
     const client = {
       session: {
