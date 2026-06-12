@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   classifyBugbot,
+  classifyMergeable,
   computeCiRollup,
   countUnresolvedBugbotThreads,
   isBugbotEntry,
@@ -175,6 +176,7 @@ describe("parsePrListJson", () => {
         ciPending: 1,
         ciNeutral: 0,
         ciTotal: 2,
+        mergeable: "unknown",
       },
     });
   });
@@ -199,6 +201,7 @@ describe("parsePrListJson", () => {
         ciPending: 0,
         ciNeutral: 0,
         ciTotal: 0,
+        mergeable: "unknown",
       },
     });
   });
@@ -219,6 +222,7 @@ describe("parsePrListJson", () => {
         ciPending: 0,
         ciNeutral: 0,
         ciTotal: 0,
+        mergeable: "unknown",
       },
     });
   });
@@ -333,6 +337,7 @@ describe("parsePrListJson with bugbot", () => {
         ciPending: 0,
         ciNeutral: 0,
         ciTotal: 1,
+        mergeable: "unknown",
         bugbot: { state: "issues" },
       },
     });
@@ -356,6 +361,47 @@ describe("parsePrListJson with bugbot", () => {
     const result = parsePrListJson(JSON.stringify([{ number: 1 }]));
     if (result.kind !== "pr") throw new Error("expected pr");
     expect(result.pr.bugbot).toBeUndefined();
+  });
+});
+
+describe("classifyMergeable", () => {
+  test("maps GitHub's mergeable states", () => {
+    expect(classifyMergeable("MERGEABLE")).toBe("mergeable");
+    expect(classifyMergeable("CONFLICTING")).toBe("conflicting");
+    expect(classifyMergeable("UNKNOWN")).toBe("unknown");
+  });
+
+  test("is case-insensitive", () => {
+    expect(classifyMergeable("conflicting")).toBe("conflicting");
+  });
+
+  test("treats a missing / unrecognized value as unknown", () => {
+    expect(classifyMergeable(undefined)).toBe("unknown");
+    expect(classifyMergeable("")).toBe("unknown");
+    expect(classifyMergeable("DIRTY")).toBe("unknown");
+  });
+});
+
+describe("parsePrListJson mergeable", () => {
+  test("surfaces a conflicting PR", () => {
+    const payload = JSON.stringify([
+      { number: 339, url: "https://github.com/AaronFeledy/core4/pull/339", mergeable: "CONFLICTING" },
+    ]);
+    const result = parsePrListJson(payload);
+    if (result.kind !== "pr") throw new Error("expected pr");
+    expect(result.pr.mergeable).toBe("conflicting");
+  });
+
+  test("a clean PR is mergeable", () => {
+    const result = parsePrListJson(JSON.stringify([{ number: 1, mergeable: "MERGEABLE" }]));
+    if (result.kind !== "pr") throw new Error("expected pr");
+    expect(result.pr.mergeable).toBe("mergeable");
+  });
+
+  test("a PR without a mergeable field defaults to unknown", () => {
+    const result = parsePrListJson(JSON.stringify([{ number: 1 }]));
+    if (result.kind !== "pr") throw new Error("expected pr");
+    expect(result.pr.mergeable).toBe("unknown");
   });
 });
 

@@ -1,6 +1,6 @@
 import { $ } from "bun";
 
-import type { GithubBugbot, GithubStatus } from "./state.ts";
+import type { GithubBugbot, GithubMergeable, GithubStatus } from "./state.ts";
 
 /**
  * GitHub PR/CI integration.
@@ -51,6 +51,7 @@ type GhPrJson = {
   state?: string;
   isDraft?: boolean;
   url?: string;
+  mergeable?: string;
   statusCheckRollup?: StatusCheckRollupEntry[] | null;
 };
 
@@ -134,6 +135,23 @@ export function computeCiRollup(entries: StatusCheckRollupEntry[]): CiRollup {
             ? "neutral"
             : "none";
   return { overall, passing, failing, pending, neutral, total };
+}
+
+/**
+ * Map GitHub's raw `mergeable` value (MERGEABLE | CONFLICTING | UNKNOWN) to a
+ * {@link GithubMergeable}. Anything unrecognized — including a missing field —
+ * is treated as `unknown` so a degraded payload never falsely reports a clean
+ * merge.
+ */
+export function classifyMergeable(raw: string | undefined): GithubMergeable {
+  switch ((raw ?? "").toUpperCase()) {
+    case "MERGEABLE":
+      return "mergeable";
+    case "CONFLICTING":
+      return "conflicting";
+    default:
+      return "unknown";
+  }
 }
 
 /**
@@ -334,6 +352,7 @@ export function parsePrListJson(stdout: string): GithubStatus {
       ciPending: ci.pending,
       ciNeutral: ci.neutral,
       ciTotal: ci.total,
+      mergeable: classifyMergeable(pr.mergeable),
       ...(bugbot !== null ? { bugbot: { state: classifyBugbot(bugbot) } } : {}),
     },
   };
@@ -361,7 +380,7 @@ export async function fetchPrStatus(repoDir: string, branch: string, signal?: Ab
   }
 
   const result = await runGh(
-    ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "number,title,state,isDraft,url,statusCheckRollup"],
+    ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "number,title,state,isDraft,url,mergeable,statusCheckRollup"],
     repoDir,
     withTimeout(signal, GH_TIMEOUT_MS),
   );
