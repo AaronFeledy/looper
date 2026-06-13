@@ -63,6 +63,15 @@ function neutralLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null
   return { content: formatRow("~ neutral", `${ciNeutral}`, TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
 }
 
+/**
+ * Merge-conflict line; null unless GitHub reports the PR as conflicting. A
+ * clean or still-computing (`unknown`) merge stays quiet to avoid noise.
+ */
+function mergeLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null {
+  if (status.pr.mergeable !== "conflicting") return null;
+  return { content: formatRow("✗ merge", "conflicts", TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
+}
+
 /** Dedicated Bugbot line; null when no Bugbot check is attached to the PR. */
 function bugbotLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line | null {
   const bugbot = status.pr.bugbot;
@@ -88,6 +97,8 @@ function buildLines(status: Extract<GithubStatus, { kind: "pr" }>, frame: string
   ];
   const neutral = neutralLine(status);
   if (neutral !== null) lines.push(neutral);
+  const merge = mergeLine(status);
+  if (merge !== null) lines.push(merge);
   const bugbot = bugbotLine(status, frame);
   if (bugbot !== null) lines.push(bugbot);
   return lines;

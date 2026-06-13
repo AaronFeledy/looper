@@ -22,6 +22,16 @@ export type ScrollIntent = { direction: ScrollDirection; stepIndex: number; seq:
 export type GithubCiOverall = "none" | "pending" | "passing" | "failing" | "neutral";
 
 /**
+ * Whether a PR can be merged cleanly into its base branch, mapped from
+ * GitHub's `mergeable` field:
+ * - `mergeable`: no conflicts; merges cleanly (MERGEABLE)
+ * - `conflicting`: merge conflicts against the base (CONFLICTING)
+ * - `unknown`: GitHub hasn't finished computing mergeability yet (UNKNOWN),
+ *   which is the transient state right after a push
+ */
+export type GithubMergeable = "mergeable" | "conflicting" | "unknown";
+
+/**
  * Status of Cursor Bugbot (a code-review check) when present on a PR.
  * Bugbot is surfaced apart from CI because its NEUTRAL conclusion is a signal
  * ("found issues"), not a skip. State meanings:
@@ -54,6 +64,8 @@ export type GithubPr = {
   /** Checks with a NEUTRAL conclusion; tracked apart from passing. */
   ciNeutral: number;
   ciTotal: number;
+  /** How cleanly the PR merges into its base; see {@link GithubMergeable}. */
+  mergeable: GithubMergeable;
   /** Present only when a Cursor Bugbot check is attached to the PR head. */
   bugbot?: GithubBugbot;
 };
