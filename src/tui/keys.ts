@@ -1,7 +1,8 @@
 import type { CliRenderer, KeyEvent } from "@opentui/core";
 
-import type { LoopState, ScrollDirection } from "../lib/state.ts";
+import type { LoopState, RecoveryChoice, ScrollDirection } from "../lib/state.ts";
 import {
+  dismissEscConfirm,
   enterHistoryView,
   exitHistoryView,
   historyMoveIteration,
@@ -15,8 +16,10 @@ import {
 } from "../lib/state.ts";
 
 export type KeyHooks = {
+  onEscape: () => void;
   onInterrupt: () => void;
   onQuit: () => void;
+  onRecoveryChoice: (choice: RecoveryChoice) => void;
   onRestart: () => void;
   onSkip: () => void;
   onStart: () => void;
@@ -76,17 +79,47 @@ function historyNavAction(state: LoopState, keyName: string): (() => void) | nul
 
 export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHooks): () => void {
   const handleKeyPress = (event: KeyEvent): void => {
+    const keyName = normalizeKeyName(event);
+    const isEscape = keyName === "escape" || keyName === "esc";
+
     if (isInterruptKey(event)) {
-      hooks.onInterrupt();
+      if (state.escConfirm !== null) dismissEscConfirm(state);
+      const selectedText = renderer.getSelection()?.getSelectedText() ?? "";
+      if (selectedText.length > 0) {
+        renderer.copyToClipboardOSC52(selectedText);
+        renderer.clearSelection();
+      } else {
+        hooks.onInterrupt();
+      }
       if (typeof event.preventDefault === "function") {
         event.preventDefault();
       }
       return;
     }
 
+    if (isEscape) {
+      hooks.onEscape();
+      if (typeof event.preventDefault === "function") {
+        event.preventDefault();
+      }
+      return;
+    }
+
+    // Any other key cancels a pending two-press esc confirmation.
+    if (state.escConfirm !== null) dismissEscConfirm(state);
+
     if (event.ctrl) return;
 
-    const keyName = normalizeKeyName(event);
+    if (state.recovery !== null) {
+      const choice: RecoveryChoice | null = keyName === "r" ? "restart" : keyName === "n" ? "nudge" : keyName === "q" ? "quit" : null;
+      if (choice !== null) {
+        hooks.onRecoveryChoice(choice);
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        return;
+      }
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
 
     if (keyName === "h") {
       if (state.historyView !== null) exitHistoryView(state);

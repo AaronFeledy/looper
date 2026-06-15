@@ -53,13 +53,19 @@ export function promptText(step: Step): string {
   return parts.join("");
 }
 
-function syncStepsUiState(state: LoopState, cfgSteps: Step[], nextIndex: number, completed: LoopStep[]): void {
+function syncStepsUiState(
+  state: LoopState,
+  cfgSteps: Step[],
+  nextIndex: number,
+  completed: LoopStep[],
+  priorStatus: "skipped" | "done" = "skipped",
+): void {
   const rows: LoopStep[] = completed.map((step) => ({ ...step }));
   if (rows.length === 0 && nextIndex > 0) {
     for (let j = 0; j < nextIndex; j += 1) {
       const step = cfgSteps[j];
       if (!step) continue;
-      rows.push(createStepRow(step.name, { status: "skipped", finishedAt: Date.now() }));
+      rows.push(createStepRow(step.name, { status: priorStatus, finishedAt: Date.now() }));
     }
   }
   for (let j = nextIndex; j < cfgSteps.length; j += 1) {
@@ -101,8 +107,15 @@ export type RunIterationOptions = {
   configDir: string;
   startStepIndex?: number;
   resume?: ResumeSession;
+  recoveryNudge?: boolean;
   hooks?: RunIterationHooks;
   titleGenConfig?: TitleGenConfig;
+  /**
+   * When resuming a partially-completed iteration, the steps before
+   * `startStepIndex` were already finished in the prior run, so render them as
+   * `done` rather than the default `skipped` used for a manual mid-run start.
+   */
+  resumedPriorSteps?: boolean;
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -114,6 +127,7 @@ async function waitWhilePaused(state: LoopState): Promise<void> {
 const MAX_BACKGROUND_RESUMES_PER_STEP = 10;
 const MAX_FAILURE_RETRIES_PER_STEP = 2;
 const MAX_REATTACH_PER_STEP = 5;
+const MAX_ORPHANED_BACKGROUND_NUDGES_PER_STEP = 1;
 /**
  * Shorter confirm-stop budget used when the loop is quitting / a stop file is
  * present, so Ctrl-C does not feel hung waiting for opencode to confirm an
@@ -140,14 +154,22 @@ async function sleepInterruptible(state: LoopState, totalMs: number): Promise<vo
 }
 
 export class StepFailureError extends Error {
-  constructor(message: string) {
+  readonly stepName?: string;
+  readonly sessionID?: string;
+  constructor(message: string, info?: { stepName?: string; sessionID?: string }) {
     super(message);
     this.name = "StepFailureError";
+    if (info?.stepName !== undefined) this.stepName = info.stepName;
+    if (info?.sessionID !== undefined) this.sessionID = info.sessionID;
   }
 }
 
 function backgroundContinuationPrompt(): string {
   return "Background agents are done. Check their results, incorporate what you learned, and continue this step until it is complete. If more background tasks are needed, wait for them before reporting completion.\n";
+}
+
+function orphanedBackgroundNudgePrompt(): string {
+  return "Your background task is no longer running but never reported completion. Verify its result directly in the foreground — do NOT start another background task. If the work finished successfully, complete this step. If it failed or cannot be verified, stop and report the failure clearly.\n";
 }
 
 function failureRetryPrompt(step: Step, failedSessionID: string | undefined): string {
@@ -160,6 +182,10 @@ function failureRetryPrompt(step: Step, failedSessionID: string | undefined): st
 function cleanRestartPrompt(step: Step, reason: StepRestartReason): string {
   const label = reason === "timeout" ? "timed out" : "was manually restarted";
   return `Note: This is a clean restart in a new session because the previous attempt ${label}. The previous attempt may have been interrupted after making partial progress, so inspect the existing workspace/state and continue from any useful work rather than blindly starting over.\n\n${promptText(step)}`;
+}
+
+function recoveryNudgePrompt(step: Step): string {
+  return `Note: You are resuming after the previous attempt at this step failed and the run was paused for manual recovery. Inspect the existing workspace/state, diagnose why it failed, and continue from any useful work to finish the step. Do not blindly start over, and do not run work in the background — finish in the foreground.\n\n${promptText(step)}`;
 }
 
 /**
@@ -380,12 +406,15 @@ export async function runIteration({
   configDir,
   startStepIndex = 0,
   resume,
+  recoveryNudge = false,
   hooks,
   titleGenConfig,
+  resumedPriorSteps = false,
 }: RunIterationOptions): Promise<"complete" | "stopped"> {
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
+  let recoveryNudgePending = recoveryNudge;
   let workDescription: string | undefined;
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
 
@@ -422,7 +451,7 @@ export async function runIteration({
 
     if (index >= steps.length) break;
 
-    syncStepsUiState(state, steps, index, completed);
+    syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
     let currentStepIndex = state.steps.length - (steps.length - index);
 
     if (stopFileExists() || state.quitting) {
@@ -559,7 +588,12 @@ export async function runIteration({
     let reattachCount = 0;
     let resumeSessionID: string | undefined;
     let resumePrompt: string | undefined;
+    if (recoveryNudgePending) {
+      recoveryNudgePending = false;
+      resumePrompt = recoveryNudgePrompt(step);
+    }
     let backgroundResumeCount = 0;
+    let orphanNudgeCount = 0;
     let lastErrorMessage: string | undefined;
     let lastPromptMessageID: string | undefined;
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
@@ -673,6 +707,27 @@ export async function runIteration({
           resumePrompt = backgroundContinuationPrompt();
           pushAgentLine(state, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
           pushStepOutputLine(state, currentStepIndex, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
+          notify();
+          continue;
+        }
+
+        if (waitResult === "orphaned" && !state.quitting && !stopFileExists()) {
+          orphanNudgeCount += 1;
+          if (orphanNudgeCount > MAX_ORPHANED_BACKGROUND_NUDGES_PER_STEP) {
+            result = { status: "failed" };
+            suppressFailureRetry = true;
+            suppressReason = `background marker still orphaned after nudge for session ${waitSessionID}`;
+            lastErrorMessage = lastErrorMessage ?? suppressReason;
+            const line = `[looper] background marker still orphaned after nudge; failing closed for session ${waitSessionID}`;
+            pushAgentLine(state, line);
+            pushStepOutputLine(state, currentStepIndex, line);
+            failStepRow(state, currentStepIndex, "failed");
+            break;
+          }
+          resumeSessionID = waitSessionID;
+          resumePrompt = orphanedBackgroundNudgePrompt();
+          pushAgentLine(state, `[looper] background marker orphaned; nudging session ${resumeSessionID} to verify and finish`);
+          pushStepOutputLine(state, currentStepIndex, `[looper] background marker orphaned; nudging session ${resumeSessionID} to verify and finish`);
           notify();
           continue;
         }
@@ -872,6 +927,7 @@ export async function runIteration({
       const reason = lastErrorMessage ?? "unknown error (no message reported)";
       throw new StepFailureError(
         `${step.name} failed after ${failureRetryCount} retr${failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
+        { stepName: step.name, ...(terminalSessionID !== undefined ? { sessionID: terminalSessionID } : {}) },
       );
     }
 

@@ -21,7 +21,7 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import type { Step } from "./lib/runner.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { cancelPendingNotify, createLoopState, createStepRow, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
+import { cancelPendingNotify, createLoopState, createStepRow, dismissEscConfirm, type EscConfirmMode, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
 import {
   clearStopAfterIterationFile,
@@ -46,6 +46,7 @@ import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys } from "./tui/keys.ts";
+import { createRecoveryMenu } from "./tui/recovery-menu.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
@@ -121,6 +122,14 @@ async function waitForStart(state: ReturnType<typeof createLoopState>): Promise<
   }
 }
 
+async function waitForRecoveryChoice(state: ReturnType<typeof createLoopState>): Promise<"restart" | "nudge" | "quit"> {
+  while (state.recoveryChoice === null && !state.quitting && !stopFileExists() && !stopAfterIterationFileExists()) {
+    notify();
+    await Bun.sleep(100);
+  }
+  return state.recoveryChoice ?? "quit";
+}
+
 function clearStopFilesForNewRun(): void {
   clearStopFile();
   clearStopAfterIterationFile();
@@ -192,14 +201,17 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     startIteration: number;
     firstIterationStartStepIndex: number;
     firstIterationResume: ResumeSession | undefined;
+    resumed: boolean;
   };
   const computeResumePlan = (planSteps: Step[]): ResumePlan => {
     let planStartIteration = 1;
     let planStartStepIndex = 0;
     let planResume: ResumeSession | undefined;
+    let planResumed = false;
     if (!options.fresh) {
       const runState = readRunState();
       if (runState !== null) {
+        planResumed = true;
         planStartIteration = Math.max(1, runState.iteration);
         const named = planSteps.findIndex((step) => step.name === runState.stepName);
         planStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(planSteps.length - 1, runState.stepIndex));
@@ -212,23 +224,55 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         }
       } else {
         planStartStepIndex = resumeStepIndex(planSteps);
+        planResumed = planStartStepIndex > 0;
       }
     }
     if (planStartIteration > options.maxIterations) {
       planStartIteration = 1;
       planStartStepIndex = 0;
       planResume = undefined;
+      planResumed = false;
       clearRunArtifactsForNewRun();
     }
     return {
       startIteration: planStartIteration,
       firstIterationStartStepIndex: planStartStepIndex,
       firstIterationResume: planResume,
+      resumed: planResumed,
     };
   };
 
-  let { startIteration, firstIterationStartStepIndex, firstIterationResume } = computeResumePlan(steps);
-  let resumeAfterStepFailure = false;
+  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
+    computeResumePlan(steps);
+
+  // Snapshot the original resume point and "was resumed" flag computed from
+  // on-disk state. These are used below to decide whether a manual Up/Down
+  // selection that lands back on the checkpoint step should still pass
+  // resumedPriorSteps (so the TUI shows prior steps as "done" rather than
+  // "skipped"). Resetting the run clears both so a fresh manual start after
+  // ESC reset does not inherit stale "resumed" semantics.
+  let firstIterationWasResumed = firstIterationResumed;
+  let firstIterationResumePoint = firstIterationStartStepIndex;
+
+  // Make a resumable boot look like the prior run never exited: mark the
+  // already-completed steps of the resume iteration as done and pre-select the
+  // step we will resume on. On a clean slate, pre-select the first step so it is
+  // obvious that pressing enter starts it.
+  if (!state.started) {
+    if (firstIterationResumed) {
+      state.resumable = true;
+      for (let i = 0; i < firstIterationStartStepIndex && i < state.steps.length; i += 1) {
+        state.steps[i]!.status = "done";
+      }
+    }
+    if (state.steps.length > 0) {
+      state.selectedStepIndex = firstIterationResumed
+        ? Math.min(firstIterationStartStepIndex, state.steps.length - 1)
+        : 0;
+      state.selectedBackgroundSessionID = null;
+    }
+  }
+  let recoveryNudgeNext = false;
   let renderer: CliRenderer | undefined;
   let bootScreen: BootScreen | undefined;
   let booting = true;
@@ -263,6 +307,36 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     notify();
   };
 
+  // Restore the terminal (raw mode / alt screen / mouse) before a hard exit so
+  // the shell is left usable, then exit with the SIGINT convention code.
+  let forceKilling = false;
+  const forceKill = (): never => {
+    if (!forceKilling) {
+      forceKilling = true;
+      try {
+        cleanupKeys?.();
+      } catch {}
+      try {
+        renderer?.destroy();
+      } catch {}
+      void server?.close();
+    }
+    process.exit(130);
+  };
+
+  const FORCE_KILL_WINDOW_MS = 1_500;
+  let lastInterruptAt = 0;
+  const handleInterrupt = (reason: string) => {
+    const now = Date.now();
+    const doublePress = now - lastInterruptAt <= FORCE_KILL_WINDOW_MS;
+    lastInterruptAt = now;
+    if (doublePress || state.quitting) {
+      forceKill();
+      return;
+    }
+    requestStopAfterIteration(reason);
+  };
+
   const throwIfBootAborted = () => {
     if (!bootAbort.signal.aborted) return;
     const reason = bootAbort.signal.reason;
@@ -276,7 +350,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       bootAbort.abort(new Error("looper startup interrupted by SIGINT"));
       return;
     }
-    requestStopAfterIteration("SIGINT received by looper TUI");
+    handleInterrupt("SIGINT received by looper TUI");
   };
 
   const handleSigterm = () => {
@@ -394,18 +468,115 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     body.add(leftColumn);
     body.add(stream);
     root.add(body);
+    root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));
 
     bootScreen.destroy();
     bootScreen = undefined;
     renderer.root.add(root);
 
+    const ESC_CONFIRM_MS = 3_000;
+    let escConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+    const disarmEscConfirm = () => {
+      if (escConfirmTimer !== undefined) {
+        clearTimeout(escConfirmTimer);
+        escConfirmTimer = undefined;
+      }
+      dismissEscConfirm(state);
+    };
+    const armEscConfirm = (mode: EscConfirmMode) => {
+      if (escConfirmTimer !== undefined) clearTimeout(escConfirmTimer);
+      state.escConfirm = mode;
+      notify();
+      escConfirmTimer = setTimeout(() => {
+        escConfirmTimer = undefined;
+        dismissEscConfirm(state);
+      }, ESC_CONFIRM_MS);
+      escConfirmTimer.unref?.();
+    };
+    const resetToFreshSlate = () => {
+      clearRunArtifactsForNewRun();
+      startIteration = 1;
+      firstIterationStartStepIndex = 0;
+      firstIterationResume = undefined;
+      firstIterationResumed = false;
+      firstIterationWasResumed = false;
+      firstIterationResumePoint = 0;
+      const freshSteps = loadSteps(configDir);
+      state.steps = freshSteps.map((step) => createStepRow(step.name));
+      state.stepOutputLines = freshSteps.map(() => []);
+      state.selectedStepIndex = freshSteps.length > 0 ? 0 : null;
+      state.selectedBackgroundSessionID = null;
+      state.manualStepSelection = false;
+      state.activeStepIndex = null;
+      state.resumable = false;
+      notify();
+    };
+    const handleEscape = () => {
+      if (state.recovery !== null || state.historyView !== null) {
+        disarmEscConfirm();
+        return;
+      }
+      if (state.started) {
+        if (state.escConfirm === "stop") {
+          disarmEscConfirm();
+          requestQuit("stopped from looper TUI");
+          return;
+        }
+        armEscConfirm("stop");
+        return;
+      }
+      if (state.resumable) {
+        if (state.escConfirm === "reset") {
+          disarmEscConfirm();
+          resetToFreshSlate();
+          return;
+        }
+        armEscConfirm("reset");
+        return;
+      }
+      disarmEscConfirm();
+    };
+
+    const beginRun = () => {
+      disarmEscConfirm();
+      state.resumable = false;
+      clearStopFilesForNewRun();
+      if (options.fresh) clearRunArtifactsForNewRun();
+      if (!state.started) {
+        if (state.manualStepSelection && state.selectedStepIndex !== null) {
+          firstIterationStartStepIndex = state.selectedStepIndex;
+          firstIterationResume = undefined;
+          // If the idle boot was a checkpoint resume and the user selected at/after
+          // that checkpoint, the prefix steps were done in a prior process → pass
+          // resumedPriorSteps so they render "done", not "skipped".
+          firstIterationResumed = firstIterationWasResumed && (state.selectedStepIndex >= firstIterationResumePoint);
+        } else {
+          ({ startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
+            computeResumePlan(loadSteps(configDir)));
+        }
+      }
+      state.started = true;
+      state.stopAfterIteration = false;
+      state.quitting = false;
+      notify();
+    };
+
     cleanupKeys = bindKeys(renderer, state, {
+      onEscape: () => {
+        handleEscape();
+      },
       onQuit: () => {
         requestQuit("quit requested from looper TUI");
       },
       onInterrupt: () => {
-        requestStopAfterIteration("Ctrl-C received by looper TUI");
+        handleInterrupt("Ctrl-C received by looper TUI");
+      },
+      onRecoveryChoice: (choice) => {
+        if (state.recovery === null) return;
+        state.recoveryChoice = choice;
+        if (choice === "quit") requestQuit("quit requested from recovery menu");
+        notify();
       },
       onSkip: () => {
         if (state.activeStepIndex === null) return;
@@ -413,22 +584,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         notify();
       },
       onStart: () => {
-        clearStopFilesForNewRun();
-        if (options.fresh && !resumeAfterStepFailure) clearRunArtifactsForNewRun();
-        if (!state.started) {
-          if (resumeAfterStepFailure) {
-            firstIterationStartStepIndex = resumeStepIndex(loadSteps(configDir));
-            resumeAfterStepFailure = false;
-          } else if (state.manualStepSelection && state.selectedStepIndex !== null) {
-            firstIterationStartStepIndex = state.selectedStepIndex;
-          } else {
-            ({ startIteration, firstIterationStartStepIndex, firstIterationResume } = computeResumePlan(loadSteps(configDir)));
-          }
-        }
-        state.started = true;
-        state.stopAfterIteration = false;
-        state.quitting = false;
-        notify();
+        beginRun();
       },
       onRestart: () => {
         if (state.activeStepIndex === null) return;
@@ -457,6 +613,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       resetIterationState(state, iteration, state.branch || (await currentBranch()), iterationSteps);
       const startedAt = Date.now();
       const resumeForThisIteration = iteration === startIteration ? firstIterationResume : undefined;
+      const recoveryNudgeForThisIteration = recoveryNudgeNext;
+      recoveryNudgeNext = false;
       let result: Awaited<ReturnType<typeof runIteration>>;
       try {
         result = await runIteration({
@@ -466,7 +624,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           repoDir,
           configDir,
           startStepIndex: iteration === startIteration ? firstIterationStartStepIndex : 0,
+          ...(iteration === startIteration && firstIterationResumed ? { resumedPriorSteps: true } : {}),
           ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
+          ...(recoveryNudgeForThisIteration ? { recoveryNudge: true } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
           hooks: {
             onStepBegin: ({ index, iteration: stepIteration }) => {
@@ -495,12 +655,41 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         if (!(error instanceof StepFailureError)) throw error;
         state.started = false;
         state.paused = false;
+        state.recovery = {
+          stepName: error.stepName ?? "step",
+          reason: error.message,
+          ...(error.sessionID !== undefined ? { sessionID: error.sessionID } : {}),
+        };
+        state.recoveryChoice = null;
         notify();
-        await waitForStart(state);
-        if (state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()) {
+        const choice = await waitForRecoveryChoice(state);
+        state.recovery = null;
+        state.recoveryChoice = null;
+        notify();
+        if (choice === "quit" || state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()) {
           return finish(1, exitReason ?? error.message);
         }
-        resumeAfterStepFailure = true;
+        recoveryNudgeNext = choice === "nudge";
+        // Retry the failed step in the SAME iteration. `continue` still runs the
+        // loop's `iteration += 1`, so we pin `startIteration` to this iteration
+        // and pre-decrement to cancel that increment; otherwise a single-iteration
+        // run exits ("max iterations reached") and a multi-iteration run jumps to
+        // the next iteration from step 0. Both restart and nudge re-prompt a fresh
+        // session (the failed step's session is finished), so resume stays unset.
+        const failedStepIndex = resumeStepIndex(loadSteps(configDir));
+        startIteration = iteration;
+        firstIterationStartStepIndex = failedStepIndex;
+        firstIterationResumed = failedStepIndex > 0;
+        firstIterationResume = undefined;
+        disarmEscConfirm();
+        clearStopFilesForNewRun();
+        state.resumable = false;
+        state.started = true;
+        state.paused = false;
+        state.stopAfterIteration = false;
+        state.quitting = false;
+        notify();
+        iteration -= 1;
         continue;
       }
 

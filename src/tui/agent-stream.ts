@@ -20,10 +20,13 @@ type SelectedOutput = {
   times: number[];
 };
 
-type OutputBlock =
+export type OutputBlock =
   | { kind: "lines"; lines: string[] }
   | { kind: "group"; title: string; borderColor: string; contentColor: string; lines: string[]; firstSeenAt: number }
   | { kind: "reasoning"; lines: string[]; firstSeenAt: number }
+  | { kind: "looper"; lines: string[]; firstSeenAt: number }
+  | { kind: "step-start"; firstSeenAt: number }
+  | { kind: "step-finish"; summary: string; firstSeenAt: number }
   | { kind: "tool"; tool: string; callLine: string; status: "waiting" | "done" | "error"; outputLines: string[]; firstSeenAt: number };
 
 type ToolBlock = Extract<OutputBlock, { kind: "tool" }>;
@@ -71,6 +74,15 @@ function toolFailureName(line: string): string | null {
   return visible.slice("✗ tool failed ".length).split(" ")[0] || null;
 }
 
+function isLooperLine(line: string): boolean {
+  return stripAnsi(line).startsWith("[looper]");
+}
+
+function stepDoneSummary(line: string): string | null {
+  if (!stripAnsi(line).startsWith("✓ step done")) return null;
+  return line;
+}
+
 function isStandaloneStatusLine(line: string): boolean {
   const visible = stripAnsi(line);
   return (
@@ -79,17 +91,18 @@ function isStandaloneStatusLine(line: string): boolean {
     visible.startsWith("✗ tool failed") ||
     visible.startsWith("✗ session error") ||
     visible.startsWith("↻ retry") ||
-    visible.startsWith("[loop]")
+    visible.startsWith("[looper]")
   );
 }
 
-function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
+export function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
   const blocks: OutputBlock[] = [];
   const pendingTools = new Map<string, ToolBlock[]>();
   const pendingToolOrder: ToolBlock[] = [];
   let pendingLines: string[] = [];
   let currentGroup: Extract<OutputBlock, { kind: "group" }> | undefined;
   let currentReasoning: Extract<OutputBlock, { kind: "reasoning" }> | undefined;
+  let currentLooper: Extract<OutputBlock, { kind: "looper" }> | undefined;
   let currentTool: ToolBlock | undefined;
   let currentToolAlreadyRendered = false;
   const timeAt = (index: number): number => times[index] ?? Date.now();
@@ -110,6 +123,12 @@ function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
     if (currentReasoning === undefined) return;
     blocks.push(currentReasoning);
     currentReasoning = undefined;
+  };
+
+  const flushLooper = () => {
+    if (currentLooper === undefined) return;
+    blocks.push(currentLooper);
+    currentLooper = undefined;
   };
 
   const flushTool = () => {
@@ -155,6 +174,28 @@ function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex]!;
+
+    if (isLooperLine(line)) {
+      flushTool();
+      flushReasoning();
+      flushGroup();
+      flushLines();
+      if (currentLooper === undefined) currentLooper = { kind: "looper", lines: [], firstSeenAt: timeAt(lineIndex) };
+      currentLooper.lines.push(line);
+      continue;
+    }
+    flushLooper();
+
+    const stepDone = stepDoneSummary(line);
+    if (stepDone !== null) {
+      flushTool();
+      flushReasoning();
+      flushGroup();
+      flushLines();
+      blocks.push({ kind: "step-finish", summary: stepDone, firstSeenAt: timeAt(lineIndex) });
+      continue;
+    }
+
     const title = headerTitle(line);
     const toolName = toolCallName(line);
 
@@ -169,6 +210,15 @@ function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
     }
 
     if (title !== null) {
+      if (title === "OpenCode step") {
+        flushTool();
+        flushReasoning();
+        flushGroup();
+        flushLines();
+        blocks.push({ kind: "step-start", firstSeenAt: timeAt(lineIndex) });
+        continue;
+      }
+
       const outputToolName = toolOutputName(title);
       if (outputToolName !== null) {
         const pendingTool = takePendingTool(outputToolName);
@@ -232,6 +282,7 @@ function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
 
   flushTool();
   flushReasoning();
+  flushLooper();
   flushGroup();
   flushLines();
 
@@ -302,6 +353,57 @@ function createReasoningBlock(renderer: CliRenderer, id: string, block: Extract<
     marginBottom: 1,
   });
   if (block.lines.length > 0) box.add(createTextBlock(renderer, `${id}-body`, block.lines, "#6c7086"));
+  return box;
+}
+
+function createLooperBlock(renderer: CliRenderer, id: string, block: Extract<OutputBlock, { kind: "looper" }>): BoxRenderable {
+  const box = new BoxRenderable(renderer, {
+    id,
+    width: "100%",
+    minWidth: 0,
+    alignSelf: "stretch",
+    flexDirection: "column",
+    border: true,
+    borderStyle: "rounded",
+    borderColor: "#94e2d5",
+    title: "looper",
+    titleAlignment: "left",
+    bottomTitle: formatTimestamp(block.firstSeenAt),
+    bottomTitleAlignment: "right",
+    paddingX: 1,
+    marginBottom: 1,
+  });
+  if (block.lines.length > 0) box.add(createTextBlock(renderer, `${id}-body`, block.lines, "#94e2d5"));
+  return box;
+}
+
+function createStepStartBlock(renderer: CliRenderer, id: string, block: Extract<OutputBlock, { kind: "step-start" }>): BoxRenderable {
+  return new BoxRenderable(renderer, {
+    id,
+    width: "100%",
+    minWidth: 0,
+    alignSelf: "stretch",
+    border: ["top", "left", "right"],
+    borderStyle: "rounded",
+    borderColor: "#89dceb",
+    title: ` OpenCode step · ${formatTimestamp(block.firstSeenAt)} `,
+    titleAlignment: "left",
+  });
+}
+
+function createStepFinishBlock(renderer: CliRenderer, id: string, block: Extract<OutputBlock, { kind: "step-finish" }>): BoxRenderable {
+  const box = new BoxRenderable(renderer, {
+    id,
+    width: "100%",
+    minWidth: 0,
+    alignSelf: "stretch",
+    border: ["bottom", "left", "right"],
+    borderStyle: "rounded",
+    borderColor: "#a6e3a1",
+    paddingX: 1,
+    marginBottom: 1,
+  });
+  box.add(createTextBlock(renderer, `${id}-summary`, [block.summary], "#a6e3a1"));
   return box;
 }
 
@@ -470,6 +572,12 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
         renderable = createGroupBlock(renderer, `loop-agent-group-${index}`, block);
       } else if (block.kind === "reasoning") {
         renderable = createReasoningBlock(renderer, `loop-agent-reasoning-${index}`, block);
+      } else if (block.kind === "looper") {
+        renderable = createLooperBlock(renderer, `loop-agent-looper-${index}`, block);
+      } else if (block.kind === "step-start") {
+        renderable = createStepStartBlock(renderer, `loop-agent-step-start-${index}`, block);
+      } else if (block.kind === "step-finish") {
+        renderable = createStepFinishBlock(renderer, `loop-agent-step-finish-${index}`, block);
       } else if (block.kind === "tool") {
         renderable = createToolBlock(renderer, `loop-agent-tool-${index}`, block);
       } else {

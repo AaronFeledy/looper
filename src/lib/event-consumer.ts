@@ -20,6 +20,7 @@ type ToolPartState = {
   kind: "tool";
   tool: string;
   status: string;
+  callPrinted: boolean;
 };
 
 type MarkerPartState = {
@@ -193,15 +194,27 @@ function handlePartUpdate(
     case "tool": {
       const prev = parts.get(part.id);
       const status = part.state.status;
-      if (prev && prev.kind === "tool" && prev.status === status) return;
-      parts.set(part.id, { kind: "tool", tool: part.tool, status });
-      if (status === "pending" || status === "running") {
-        const state = part.state as { input?: Record<string, unknown> };
+      const state = part.state as { input?: Record<string, unknown>; output?: string; error?: string };
+      const hasInput = state.input !== undefined && Object.keys(state.input).length > 0;
+
+      if (prev && prev.kind === "tool" && prev.status === status) {
+        if (status !== "pending" || prev.callPrinted || !hasInput) return;
+      }
+
+      let callPrinted = prev && prev.kind === "tool" ? prev.callPrinted : false;
+      const printCall = (): void => {
+        if (callPrinted) return;
         push(`${ui.yellow("◌ tool")} ${ui.bold(part.tool)} ${ui.dim(formatInput(state.input ?? {}))}`);
+        callPrinted = true;
+      };
+      if (status === "pending") {
+        if (hasInput) printCall();
+      } else if (status === "running") {
+        printCall();
       } else if (status === "completed") {
-        const state = part.state as { output: string };
+        printCall();
         const outputLines = [groupHeader(`Tool output · ${part.tool}`, ui.green)];
-        const lines = state.output
+        const lines = (state.output ?? "")
           .split("\n")
           .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
           .filter((line) => line.length > 0);
@@ -209,9 +222,10 @@ function handlePartUpdate(
         for (const line of lines) outputLines.push(groupLine(line));
         pushLines(outputLines);
       } else if (status === "error") {
-        const state = part.state as { error: string };
-        push(`${ui.red("✗ tool failed")} ${ui.bold(part.tool)} ${state.error}`);
+        printCall();
+        push(`${ui.red("✗ tool failed")} ${ui.bold(part.tool)} ${state.error ?? ""}`);
       }
+      parts.set(part.id, { kind: "tool", tool: part.tool, status, callPrinted });
       return;
     }
     default:
