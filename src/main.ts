@@ -245,6 +245,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
     computeResumePlan(steps);
 
+  // Snapshot the original resume point and "was resumed" flag computed from
+  // on-disk state. These are used below to decide whether a manual Up/Down
+  // selection that lands back on the checkpoint step should still pass
+  // resumedPriorSteps (so the TUI shows prior steps as "done" rather than
+  // "skipped").
+  const firstIterationWasResumed = firstIterationResumed;
+  const firstIterationResumePoint = firstIterationStartStepIndex;
+
   // Make a resumable boot look like the prior run never exited: mark the
   // already-completed steps of the resume iteration as done and pre-select the
   // step we will resume on. On a clean slate, pre-select the first step so it is
@@ -535,7 +543,11 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       if (!state.started) {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {
           firstIterationStartStepIndex = state.selectedStepIndex;
-          firstIterationResumed = false;
+          firstIterationResume = undefined;
+          // If the idle boot was a checkpoint resume and the user selected at/after
+          // that checkpoint, the prefix steps were done in a prior process → pass
+          // resumedPriorSteps so they render "done", not "skipped".
+          firstIterationResumed = firstIterationWasResumed && (state.selectedStepIndex >= firstIterationResumePoint);
         } else {
           ({ startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
             computeResumePlan(loadSteps(configDir)));
