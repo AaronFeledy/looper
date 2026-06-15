@@ -67,7 +67,7 @@ type LiveBackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: 
 
 type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMessage?: string };
 
-export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout";
+export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
@@ -588,6 +588,56 @@ async function snapshotLiveBackgroundAgents({
   return { agents: liveAgents };
 }
 
+type BackgroundLivenessProbe = {
+  parent: SessionPendingState;
+  pendingChildren: LiveBackgroundAgentSnapshot[];
+  errorMessage?: string;
+};
+
+/**
+ * Authoritative liveness probe for a step's background work, used to decide
+ * whether an "active" continuation marker is genuinely orphaned or merely
+ * un-heartbeated. Unlike {@link snapshotLiveBackgroundAgents}, this preserves
+ * the difference between "confirmed no live children" and "could not read a
+ * reliable signal" (errorMessage / parent="unknown"), which the orphan
+ * decision MUST NOT collapse — a transient scan failure must never be read as
+ * "orphaned".
+ */
+async function probeBackgroundLiveness({
+  client,
+  repoDir,
+  parentSessionID,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  parentSessionID: string;
+}): Promise<BackgroundLivenessProbe> {
+  const [childrenResult, statusResult] = await Promise.all([
+    client.session.children({ sessionID: parentSessionID, directory: repoDir }),
+    client.session.status({ directory: repoDir }),
+  ]);
+  if (statusResult.error) return { parent: "unknown", pendingChildren: [], errorMessage: `session.status failed: ${formatRequestError(statusResult.error)}` };
+  if (!statusResult.data) return { parent: "unknown", pendingChildren: [], errorMessage: "session.status returned no data" };
+
+  const statusMap = statusResult.data;
+  const parent: SessionPendingState = isPendingSessionStatus(statusMap[parentSessionID]) ? "pending" : "idle";
+
+  if (childrenResult.error) return { parent, pendingChildren: [], errorMessage: `session.children failed: ${formatRequestError(childrenResult.error)}` };
+  if (!childrenResult.data) return { parent, pendingChildren: [], errorMessage: "session.children returned no data" };
+
+  const pendingChildren: LiveBackgroundAgentSnapshot[] = [];
+  for (const child of childrenResult.data) {
+    if (!isPendingSessionStatus(statusMap[child.id])) continue;
+    pendingChildren.push({
+      sessionID: child.id,
+      ...(child.agent !== undefined ? { agent: child.agent } : {}),
+      ...(child.title !== undefined && child.title.length > 0 ? { title: child.title } : {}),
+      startedAt: child.time?.created ?? Date.now(),
+    });
+  }
+  return { parent, pendingChildren };
+}
+
 type BackgroundAgentPoller = { stop: () => void };
 
 function startBackgroundAgentPoller({
@@ -689,7 +739,20 @@ export async function waitForLoopContinuationIdle({
       if (backgroundActive) {
         setContinuationStatus(state, stepIndex, record!);
         const updatedAt = Date.parse(record!.source.updatedAt);
-        if (Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS) return "stale";
+        const markerStale = Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS;
+        if (markerStale) {
+          let probe: BackgroundLivenessProbe;
+          try {
+            probe = await probeBackgroundLiveness({ client, repoDir, parentSessionID: sessionID });
+          } catch (error) {
+            probe = { parent: "unknown", pendingChildren: [], errorMessage: toError(error).message };
+          }
+          const orphaned = probe.errorMessage === undefined && probe.parent === "idle" && probe.pendingChildren.length === 0;
+          if (orphaned) {
+            logContinuationState(state, stepIndex, record!, "background marker orphaned (stale, no live children)");
+            return "orphaned";
+          }
+        }
       } else {
         // Background tasks report idle: resume only once the session is
         // CONFIRMED idle. sessionPendingState treats a status-read error as
