@@ -194,15 +194,19 @@ function handlePartUpdate(
     case "tool": {
       const prev = parts.get(part.id);
       const status = part.state.status;
-      if (prev && prev.kind === "tool" && prev.status === status) return;
       const state = part.state as { input?: Record<string, unknown>; output?: string; error?: string };
+      const hasInput = state.input !== undefined && Object.keys(state.input).length > 0;
+
+      if (prev && prev.kind === "tool" && prev.status === status) {
+        if (status !== "pending" || prev.callPrinted || !hasInput) return;
+      }
+
       let callPrinted = prev && prev.kind === "tool" ? prev.callPrinted : false;
       const printCall = (): void => {
         if (callPrinted) return;
         push(`${ui.yellow("◌ tool")} ${ui.bold(part.tool)} ${ui.dim(formatInput(state.input ?? {}))}`);
         callPrinted = true;
       };
-      const hasInput = state.input !== undefined && Object.keys(state.input).length > 0;
       if (status === "pending") {
         if (hasInput) printCall();
       } else if (status === "running") {

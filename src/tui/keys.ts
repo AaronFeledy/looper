@@ -117,6 +117,8 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         if (typeof event.preventDefault === "function") event.preventDefault();
         return;
       }
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
     }
 
     if (keyName === "h") {
