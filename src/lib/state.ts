@@ -156,6 +156,16 @@ export type HistoryView = {
   outputPinnedToBottom: boolean;
 };
 
+export type RecoveryChoice = "restart" | "nudge" | "quit";
+
+export type RecoveryPrompt = {
+  stepName: string;
+  reason: string;
+  sessionID?: string;
+};
+
+export type EscConfirmMode = "reset" | "stop";
+
 export type LoopState = {
   iteration: number;
   maxIterations: number;
@@ -174,6 +184,10 @@ export type LoopState = {
   skipRequested: boolean;
   restartRequested: boolean;
   restartReason?: StepRestartReason;
+  recovery: RecoveryPrompt | null;
+  recoveryChoice: RecoveryChoice | null;
+  escConfirm: EscConfirmMode | null;
+  resumable: boolean;
   agentLines: string[];
   agentLineTimes: number[];
   stepOutputLines: string[][];
@@ -286,6 +300,10 @@ export function createLoopState({
     skipRequested: false,
     restartRequested: false,
     restartReason: undefined,
+    recovery: null,
+    recoveryChoice: null,
+    escConfirm: null,
+    resumable: false,
     agentLines: [],
     agentLineTimes: [],
     stepOutputLines: stepNames.map(() => []),
@@ -594,6 +612,12 @@ export function setSelectedStepOutputScroll(state: LoopState, scrollTop: number,
   if (target === null) return;
   target.outputScrollTop = Math.max(0, scrollTop);
   target.outputPinnedToBottom = pinnedToBottom;
+  notifyStateChange();
+}
+
+export function dismissEscConfirm(state: LoopState): void {
+  if (state.escConfirm === null) return;
+  state.escConfirm = null;
   notifyStateChange();
 }
 
