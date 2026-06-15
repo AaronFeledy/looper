@@ -249,9 +249,10 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   // on-disk state. These are used below to decide whether a manual Up/Down
   // selection that lands back on the checkpoint step should still pass
   // resumedPriorSteps (so the TUI shows prior steps as "done" rather than
-  // "skipped").
-  const firstIterationWasResumed = firstIterationResumed;
-  const firstIterationResumePoint = firstIterationStartStepIndex;
+  // "skipped"). Resetting the run clears both so a fresh manual start after
+  // ESC reset does not inherit stale "resumed" semantics.
+  let firstIterationWasResumed = firstIterationResumed;
+  let firstIterationResumePoint = firstIterationStartStepIndex;
 
   // Make a resumable boot look like the prior run never exited: mark the
   // already-completed steps of the resume iteration as done and pre-select the
@@ -499,6 +500,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
       firstIterationResumed = false;
+      firstIterationWasResumed = false;
+      firstIterationResumePoint = 0;
       const freshSteps = loadSteps(configDir);
       state.steps = freshSteps.map((step) => createStepRow(step.name));
       state.stepOutputLines = freshSteps.map(() => []);
