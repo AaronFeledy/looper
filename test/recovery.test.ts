@@ -148,6 +148,22 @@ describe("keys recovery interception", () => {
     expect(calls).toEqual(["restart"]);
     expect(calls).not.toContain("recovery:restart");
   });
+
+  test("while recovery is active, g/enter are swallowed (do not call onStart)", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    state.activeStepIndex = 0;
+    state.recovery = { stepName: "Build", reason: "boom" };
+    const fake = fakeRenderer();
+    const { hooks, calls } = recordingHooks();
+    bindKeys(fake.renderer as never, state, hooks);
+
+    fake.press({ name: "g" });
+    fake.press({ name: "enter" });
+    fake.press({ name: "return" });
+
+    expect(calls).toEqual([]);
+    expect(calls).not.toContain("start");
+  });
 });
 
 describe("keys escape gesture", () => {

@@ -171,6 +171,24 @@ describe("tool call line is emitted once per part", () => {
     expect(lines.filter((line) => line.includes("◌ tool")).length).toBe(1);
     expect(lines.some((line) => line.includes("Tool output · bash"))).toBe(true);
   });
+
+  test("pending(empty) then pending(with input) then completed still prints exactly one call line", async () => {
+    const lines: string[] = [];
+    await consumeSessionEvents(
+      makeStream([
+        assistantMessageUpdated(),
+        toolPartUpdated("pending", { input: {} }),
+        toolPartUpdated("pending", { input: { command: "git status" } }),
+        toolPartUpdated("completed", { input: { command: "git status" }, output: "clean" }),
+      ]),
+      SID,
+      { pushLine: (line) => lines.push(line) },
+    );
+
+    const callLines = lines.filter((line) => line.includes("◌ tool"));
+    expect(callLines.length).toBe(1);
+    expect(callLines[0]).toContain("git status");
+  });
 });
 
 describe("assistant message errors", () => {
