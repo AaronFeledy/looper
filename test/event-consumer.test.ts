@@ -132,6 +132,47 @@ describe("onFirstAssistantContent", () => {
   });
 });
 
+function toolPartUpdated(status: string, state: Record<string, unknown>): Event {
+  return {
+    type: "message.part.updated",
+    properties: { part: { id: "tool_1", sessionID: SID, messageID: MID, type: "tool", tool: "bash", state: { status, ...state } } },
+  } as unknown as Event;
+}
+
+describe("tool call line is emitted once per part", () => {
+  test("pending(empty) then running(full) then completed yields a single ◌ tool line with full input", async () => {
+    const lines: string[] = [];
+    await consumeSessionEvents(
+      makeStream([
+        assistantMessageUpdated(),
+        toolPartUpdated("pending", { input: {} }),
+        toolPartUpdated("running", { input: { command: "git status" } }),
+        toolPartUpdated("completed", { input: { command: "git status" }, output: "clean" }),
+      ]),
+      SID,
+      { pushLine: (line) => lines.push(line) },
+    );
+
+    const callLines = lines.filter((line) => line.includes("◌ tool"));
+    expect(callLines.length).toBe(1);
+    expect(callLines[0]).toContain("git status");
+    expect(callLines[0]).not.toContain("{}");
+    expect(lines.some((line) => line.includes("Tool output · bash"))).toBe(true);
+  });
+
+  test("completed-only (backfill shape) still prints the call line", async () => {
+    const lines: string[] = [];
+    await consumeSessionEvents(
+      makeStream([assistantMessageUpdated(), toolPartUpdated("completed", { input: { command: "ls" }, output: "a\nb" })]),
+      SID,
+      { pushLine: (line) => lines.push(line) },
+    );
+
+    expect(lines.filter((line) => line.includes("◌ tool")).length).toBe(1);
+    expect(lines.some((line) => line.includes("Tool output · bash"))).toBe(true);
+  });
+});
+
 describe("assistant message errors", () => {
   test("prints assistant info.error from message.updated", async () => {
     const lines: string[] = [];
