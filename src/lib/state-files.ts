@@ -187,6 +187,11 @@ export function resumeStepIndex(steps: NamedStep[]): number {
  * `sessionID`/`messageID` are only present for an IN-PROGRESS step; once a step
  * finishes the pointer is advanced to the next step (or next iteration) WITHOUT
  * session fields, so resume never reattaches to an already-completed step.
+ *
+ * `title` is the iteration's generated work-description. It rides along with
+ * the pointer (across step advances within an iteration) so a resumed run can
+ * re-apply the title to steps that only inherit it, and is dropped when the
+ * pointer crosses into a new iteration.
  */
 export type RunState = {
   iteration: number;
@@ -194,6 +199,7 @@ export type RunState = {
   stepName: string;
   sessionID?: string;
   messageID?: string;
+  title?: string;
   updatedAt: string;
 };
 
@@ -203,6 +209,7 @@ export type RunStateInput = {
   stepName: string;
   sessionID?: string;
   messageID?: string;
+  title?: string;
 };
 
 function parseRunState(value: unknown): RunState | null {
@@ -217,12 +224,14 @@ function parseRunState(value: unknown): RunState | null {
   if (typeof updatedAt !== "string" || updatedAt.length === 0) return null;
   const sessionID = typeof value.sessionID === "string" && value.sessionID.length > 0 ? value.sessionID : undefined;
   const messageID = typeof value.messageID === "string" && value.messageID.length > 0 ? value.messageID : undefined;
+  const title = typeof value.title === "string" && value.title.length > 0 ? value.title : undefined;
   return {
     iteration,
     stepIndex,
     stepName,
     ...(sessionID !== undefined ? { sessionID } : {}),
     ...(messageID !== undefined ? { messageID } : {}),
+    ...(title !== undefined ? { title } : {}),
     updatedAt,
   };
 }
@@ -245,6 +254,7 @@ export function writeRunState(input: RunStateInput): void {
     stepName: input.stepName,
     ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}),
     ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
+    ...(input.title !== undefined ? { title: input.title } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileAtomically(runStateFilePath(), `${JSON.stringify(record, null, 2)}\n`);
