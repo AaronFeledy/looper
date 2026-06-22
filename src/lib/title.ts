@@ -67,8 +67,17 @@ async function resolveHeuristicTitleModel({
     }
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
-    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
-    if (models.length === 0) return undefined;
+    const available = Object.values(provider.models).filter((m) => m.status !== "deprecated");
+    if (available.length === 0) return undefined;
+    // Drop rolling "-latest" aliases when any concrete snapshot id remains.
+    // models.dev keeps a provider's "<model>-latest" entry un-deprecated even
+    // after its underlying snapshot retires, so the API 404s on it (live case:
+    // anthropic claude-3-5-haiku-latest, while the dated claude-3-5-haiku
+    // snapshot is already flagged deprecated). Since non-reasoning models are
+    // preferred below, that dead alias was chosen over the live, variant-safe
+    // claude-haiku-4-5. Keep a -latest alias only as a last resort.
+    const concrete = available.filter((m) => !/-latest$/i.test(m.id));
+    const models = concrete.length > 0 ? concrete : available;
     const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
       if (pool.length === 0) return undefined;
       for (const fragment of PRIORITY_SMALL_MODELS) {

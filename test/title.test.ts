@@ -703,6 +703,40 @@ describe("title orchestration", () => {
     expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
   });
 
+  test("hybrid: skips a stale non-reasoning -latest alias for the live curated model (anthropic 404 regression)", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": model("claude-haiku-4-5-20251001", true, 1),
+              "claude-haiku-4-5": model("claude-haiku-4-5", true, 1),
+              "claude-3-5-haiku-latest": model("claude-3-5-haiku-latest", false, 0.8),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
+    expect(models.some((m) => m?.modelID.startsWith("claude-haiku-4-5"))).toBe(true);
+  });
+
   test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
