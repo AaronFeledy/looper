@@ -32,7 +32,7 @@ function durationSecondsFrom(startedAt: number | undefined, finishedAt: number |
   const seconds = Math.max(0, Math.floor((end - startedAt) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 600) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h`;
 }
 
