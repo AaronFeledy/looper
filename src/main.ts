@@ -152,22 +152,23 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
-function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number): void {
+function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number, title?: string): void {
   const step = steps[stepIndex];
   if (step === undefined) return;
-  writeRunState({ iteration, stepIndex, stepName: step.name });
+  writeRunState({ iteration, stepIndex, stepName: step.name, ...(title !== undefined ? { title } : {}) });
 }
 
-function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number): void {
+function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number, title?: string): void {
   if (steps.length === 0) {
     clearRunStateFile();
     return;
   }
   if (nextIndex >= steps.length) {
+    // Crossing into a new iteration: the prior iteration's title does not carry.
     writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name });
     return;
   }
-  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name });
+  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name, ...(title !== undefined ? { title } : {}) });
 }
 
 function clearRunArtifactsForNewRun(): void {
@@ -202,12 +203,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     firstIterationStartStepIndex: number;
     firstIterationResume: ResumeSession | undefined;
     resumed: boolean;
+    firstIterationTitle: string | undefined;
   };
   const computeResumePlan = (planSteps: Step[]): ResumePlan => {
     let planStartIteration = 1;
     let planStartStepIndex = 0;
     let planResume: ResumeSession | undefined;
     let planResumed = false;
+    let planTitle: string | undefined;
     if (!options.fresh) {
       const runState = readRunState();
       if (runState !== null) {
@@ -215,6 +218,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         planStartIteration = Math.max(1, runState.iteration);
         const named = planSteps.findIndex((step) => step.name === runState.stepName);
         planStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(planSteps.length - 1, runState.stepIndex));
+        planTitle = runState.title;
         if (runState.sessionID !== undefined) {
           planResume = {
             sessionID: runState.sessionID,
@@ -232,6 +236,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       planStartStepIndex = 0;
       planResume = undefined;
       planResumed = false;
+      planTitle = undefined;
       clearRunArtifactsForNewRun();
     }
     return {
@@ -239,10 +244,11 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       firstIterationStartStepIndex: planStartStepIndex,
       firstIterationResume: planResume,
       resumed: planResumed,
+      firstIterationTitle: planTitle,
     };
   };
 
-  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
+  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle } =
     computeResumePlan(steps);
 
   // Snapshot the original resume point and "was resumed" flag computed from
@@ -502,6 +508,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       firstIterationResumed = false;
       firstIterationWasResumed = false;
       firstIterationResumePoint = 0;
+      firstIterationTitle = undefined;
       const freshSteps = loadSteps(configDir);
       state.steps = freshSteps.map((step) => createStepRow(step.name));
       state.stepOutputLines = freshSteps.map(() => []);
@@ -551,8 +558,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           // that checkpoint, the prefix steps were done in a prior process → pass
           // resumedPriorSteps so they render "done", not "skipped".
           firstIterationResumed = firstIterationWasResumed && (state.selectedStepIndex >= firstIterationResumePoint);
+          // Clear the title only if selecting before the checkpoint; keep it if
+          // resuming at/after the checkpoint so inherited-title steps still apply it.
+          if (!firstIterationResumed) {
+            firstIterationTitle = undefined;
+          }
         } else {
-          ({ startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed } =
+          ({ startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle } =
             computeResumePlan(loadSteps(configDir)));
         }
       }
@@ -625,26 +637,27 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           configDir,
           startStepIndex: iteration === startIteration ? firstIterationStartStepIndex : 0,
           ...(iteration === startIteration && firstIterationResumed ? { resumedPriorSteps: true } : {}),
+          ...(iteration === startIteration && firstIterationTitle !== undefined ? { initialWorkDescription: firstIterationTitle } : {}),
           ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
           ...(recoveryNudgeForThisIteration ? { recoveryNudge: true } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
           hooks: {
-            onStepBegin: ({ index, iteration: stepIteration }) => {
+            onStepBegin: ({ index, iteration: stepIteration, title }) => {
               saveResumeStep(loadSteps(configDir), index);
-              saveRunStatePosition(stepIteration, loadSteps(configDir), index);
+              saveRunStatePosition(stepIteration, loadSteps(configDir), index, title);
               // Step boundaries are common branch-change moments (the previous
               // step may have run `git checkout`); re-read HEAD immediately so
               // the header doesn't lag up to 5s behind reality.
               branchWatcher?.refresh();
               githubWatcher?.refresh();
             },
-            onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID }) => {
-              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID });
+            onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID, title }) => {
+              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID, ...(title !== undefined ? { title } : {}) });
             },
-            onStepFinish: ({ nextIndex, status, iteration: stepIteration }) => {
+            onStepFinish: ({ nextIndex, status, iteration: stepIteration, title }) => {
               if (status === "done") {
                 saveNextResumeStep(loadSteps(configDir), nextIndex);
-                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex);
+                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex, title);
               }
               branchWatcher?.refresh();
               githubWatcher?.refresh();
@@ -681,6 +694,10 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         firstIterationStartStepIndex = failedStepIndex;
         firstIterationResumed = failedStepIndex > 0;
         firstIterationResume = undefined;
+        // Preserve any title generated earlier in this iteration so the
+        // recovered step keeps applying it (the failed step's run-state write
+        // carries it for inherited-title steps).
+        firstIterationTitle = readRunState()?.title;
         disarmEscConfirm();
         clearStopFilesForNewRun();
         state.resumable = false;

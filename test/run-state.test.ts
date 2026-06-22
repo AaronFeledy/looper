@@ -50,6 +50,26 @@ describe("run-state file", () => {
     expect("messageID" in onDisk).toBe(false);
   });
 
+  test("round-trips the iteration title so a resumed run can re-apply it", () => {
+    writeRunState({ iteration: 2, stepIndex: 1, stepName: "review", title: "Widget X export" });
+    expect(readRunState()!.title).toBe("Widget X export");
+  });
+
+  test("omits the title field entirely when no title is set", () => {
+    writeRunState({ iteration: 1, stepIndex: 0, stepName: "build" });
+    expect(readRunState()!.title).toBeUndefined();
+    const onDisk = JSON.parse(readFileSync(join(scratch, ".looper-run.json"), "utf8"));
+    expect("title" in onDisk).toBe(false);
+  });
+
+  test("drops an empty-string title on read", () => {
+    writeFileSync(
+      join(scratch, ".looper-run.json"),
+      JSON.stringify({ iteration: 1, stepIndex: 0, stepName: "build", title: "", updatedAt: "t" }),
+    );
+    expect(readRunState()!.title).toBeUndefined();
+  });
+
   test("clearRunStateFile removes the pointer", () => {
     writeRunState({ iteration: 1, stepIndex: 0, stepName: "build" });
     expect(readRunState()).not.toBeNull();

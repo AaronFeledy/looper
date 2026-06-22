@@ -88,9 +88,9 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
 }
 
 export type RunIterationHooks = {
-  onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number }) => void;
-  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult }) => void;
-  onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string }) => void;
+  onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
+  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; title?: string }) => void;
+  onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; title?: string }) => void;
 };
 
 export type ResumeSession = {
@@ -116,6 +116,13 @@ export type RunIterationOptions = {
    * `done` rather than the default `skipped` used for a manual mid-run start.
    */
   resumedPriorSteps?: boolean;
+  /**
+   * Title generated earlier in this iteration by a prior run, recovered from
+   * the resume pointer. Seeds `workDescription` so steps that only inherit the
+   * title (no own `title:` config) still apply it to their fresh sessions
+   * instead of letting opencode auto-title from the prompt.
+   */
+  initialWorkDescription?: string;
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -410,12 +417,13 @@ export async function runIteration({
   hooks,
   titleGenConfig,
   resumedPriorSteps = false,
+  initialWorkDescription,
 }: RunIterationOptions): Promise<"complete" | "stopped"> {
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
   let recoveryNudgePending = recoveryNudge;
-  let workDescription: string | undefined;
+  let workDescription: string | undefined = initialWorkDescription;
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
 
   /**
@@ -466,7 +474,7 @@ export async function runIteration({
       break;
     }
 
-    hooks?.onStepBegin?.({ step: steps[index]!, index, totalSteps: steps.length, iteration });
+    hooks?.onStepBegin?.({ step: steps[index]!, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 
     const step = steps[index]!;
 
@@ -527,14 +535,17 @@ export async function runIteration({
     // and the rename doesn't race the session-create. Step end is the
     // fallback if no first response is seen.
     const usingInheritedTitle = titleCoordinator === undefined && workDescription !== undefined;
-    let inheritedTitleApplied = false;
+    // Track the session the inherited title was last written to (not a boolean
+    // latch): a retry/timeout/restart swaps in a fresh session, and the title
+    // must follow to the new session rather than staying on the abandoned one.
+    let inheritedTitleAppliedSessionID: string | undefined;
     let inheritedTitleTimer: ReturnType<typeof setTimeout> | undefined;
     let inheritedTitleInflight: Promise<void> | undefined;
     const applyInheritedOpencodeTitle = async (): Promise<void> => {
-      if (inheritedTitleApplied) return;
-      inheritedTitleApplied = true;
       const sid = state.steps[stepIndexForTitle]?.sessionID;
       if (sid === undefined || workDescription === undefined) return;
+      if (inheritedTitleAppliedSessionID === sid) return;
+      inheritedTitleAppliedSessionID = sid;
       await setSessionTitle({
         client,
         repoDir,
@@ -544,7 +555,9 @@ export async function runIteration({
       });
     };
     const onInheritedFirstResponse = (): void => {
-      if (inheritedTitleApplied || inheritedTitleTimer !== undefined) return;
+      if (inheritedTitleTimer !== undefined) return;
+      const sid = state.steps[stepIndexForTitle]?.sessionID;
+      if (sid !== undefined && inheritedTitleAppliedSessionID === sid) return;
       inheritedTitleTimer = setTimeout(() => {
         inheritedTitleTimer = undefined;
         if (inheritedTitleInflight === undefined) inheritedTitleInflight = startInheritedTitleApply();
@@ -628,6 +641,7 @@ export async function runIteration({
             stepName: step.name,
             sessionID: resumeSession,
             messageID: resumeInfo.messageID,
+            ...(workDescription !== undefined ? { title: workDescription } : {}),
           });
           pendingResult = await reattachOpenCodeStep({
             state,
@@ -665,7 +679,7 @@ export async function runIteration({
           sessionID: resumeSessionID,
           timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
           onSessionBound: ({ sessionID, messageID }) =>
-            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID }),
+            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, ...(workDescription !== undefined ? { title: workDescription } : {}) }),
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
@@ -939,14 +953,18 @@ export async function runIteration({
         await titleCoordinator.resolve(result.sessionID);
       } else if (usingInheritedTitle) {
         cancelInheritedTitleTimer();
-        await (inheritedTitleInflight ?? startInheritedTitleApply());
+        // A mid-step apply may have targeted an earlier session (before a
+        // retry/timeout swapped it out). Drain it, then force one apply against
+        // the FINAL session (no-op if that session was already titled).
+        if (inheritedTitleInflight !== undefined) await inheritedTitleInflight;
+        await startInheritedTitleApply();
       }
     } else {
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
     }
 
-    hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status });
+    hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 
     completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
 

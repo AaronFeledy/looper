@@ -18,6 +18,19 @@ function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
   );
 }
 
+function abortError(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
 import { loadSteps } from "../src/lib/config.ts";
 import { DEFAULT_STEP_TIMEOUT_MS } from "../src/lib/runner.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
@@ -514,6 +527,40 @@ describe("title orchestration", () => {
     expect(state.steps[1]?.title).toBe("Widget X export");
   });
 
+  test("resume seeds initialWorkDescription so an inherited-title step titles its fresh session", async () => {
+    writeTwoStepConfig();
+    const captured: Array<{ sessionID: string; title: string }> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_review_resumed",
+      reviewSessionID: "ses_unused",
+      titleSessionID: "ses_title",
+      titleText: "should-not-be-generated",
+      capturedUpdates: captured,
+      capturedDeletes: [],
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+
+    // Simulate a startup resume at the Review step: Build already finished in a
+    // prior process and generated the iteration title, which the run-state
+    // pointer recovered into initialWorkDescription.
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: scratch,
+      configDir,
+      startStepIndex: 1,
+      resumedPriorSteps: true,
+      initialWorkDescription: "Widget X export",
+    });
+
+    expect(result).toBe("complete");
+    expect(captured).toContainEqual({ sessionID: "ses_review_resumed", title: "Review: Widget X export" });
+    // No title session should have been created for an inherited title.
+    expect(captured.every((c) => c.sessionID !== "ses_title")).toBe(true);
+  });
+
   test("defaults title model to opencode small_model when none configured", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
@@ -654,6 +701,40 @@ describe("title orchestration", () => {
 
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "plain-chat" });
     expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+  });
+
+  test("hybrid: skips a stale non-reasoning -latest alias for the live curated model (anthropic 404 regression)", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": model("claude-haiku-4-5-20251001", true, 1),
+              "claude-haiku-4-5": model("claude-haiku-4-5", true, 1),
+              "claude-3-5-haiku-latest": model("claude-3-5-haiku-latest", false, 0.8),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
+    expect(models.some((m) => m?.modelID.startsWith("claude-haiku-4-5"))).toBe(true);
   });
 
   test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
@@ -936,4 +1017,96 @@ describe("title orchestration", () => {
     expect(captured).toEqual([]);
     expect(deletes).toEqual([]);
   });
+});
+
+describe("inherited title across retry/timeout", () => {
+  let scratch: string;
+  let configDir: string;
+  const prevDelay = process.env["LOOPER_INHERITED_TITLE_DELAY_MS"];
+
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), "looper-title-retry-"));
+    configDir = join(scratch, ".local", "looper");
+    mkdirSync(configDir, { recursive: true });
+    initStatePaths({ configDir });
+    writeFileSync(join(configDir, "review.md"), "review the build\n");
+    // Single step with NO own title config: it inherits via initialWorkDescription.
+    writeFileSync(
+      join(configDir, "looper.yaml"),
+      "steps:\n  review:\n    name: Review\n    agent: build\n    prompt: review.md\n    timeout: 1s\n",
+    );
+    process.env["LOOPER_INHERITED_TITLE_DELAY_MS"] = "20";
+  });
+
+  afterEach(() => {
+    if (prevDelay === undefined) delete process.env["LOOPER_INHERITED_TITLE_DELAY_MS"];
+    else process.env["LOOPER_INHERITED_TITLE_DELAY_MS"] = prevDelay;
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test("re-applies the inherited title to the new session after a timeout restart", async () => {
+    const updates: Array<{ sessionID: string; title: string }> = [];
+    const sessionIDs = ["ses_old", "ses_new"];
+    const created: string[] = [];
+
+    async function* oldStream(signal: AbortSignal): AsyncGenerator<unknown> {
+      yield { type: "message.updated", properties: { info: { id: "msg1", role: "assistant" } } };
+      yield { type: "message.part.updated", properties: { part: { id: "p1", messageID: "msg1", type: "text", text: "working" } } };
+      await waitForAbort(signal);
+    }
+    async function* emptyStream(signal: AbortSignal): AsyncGenerator<never> {
+      await waitForAbort(signal);
+    }
+
+    const client = {
+      config: { get: async () => ({ data: {} }) },
+      provider: { list: async () => ({ data: { all: [] } }) },
+      event: {
+        subscribe: async (_p: unknown, opts: { signal: AbortSignal }) => ({
+          stream: created.length <= 1 ? oldStream(opts.signal) : emptyStream(opts.signal),
+        }),
+      },
+      session: {
+        create: async () => {
+          const id = sessionIDs[created.length];
+          if (id === undefined) throw new Error("unexpected extra session.create");
+          created.push(id);
+          return { data: { id } };
+        },
+        prompt: async (params: { sessionID: string }, opts: { signal: AbortSignal }) => {
+          if (params.sessionID === "ses_old") {
+            await waitForAbort(opts.signal);
+            throw abortError();
+          }
+          writeIdleContinuationRecord(scratch, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { ses_old: { type: "idle" }, ses_new: { type: "idle" } } }),
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+        update: async ({ sessionID, title }: { sessionID: string; title: string }) => {
+          updates.push({ sessionID, title });
+          return {};
+        },
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Review"] });
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir: scratch,
+      configDir,
+      initialWorkDescription: "Widget X export",
+    });
+
+    expect(result).toBe("complete");
+    expect(created).toEqual(["ses_old", "ses_new"]);
+    // The abandoned first session may have been titled, but the FINAL (restart)
+    // session must end up with the inherited title.
+    expect(updates).toContainEqual({ sessionID: "ses_new", title: "Review: Widget X export" });
+  }, 15000);
 });
