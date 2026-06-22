@@ -554,6 +554,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {
           firstIterationStartStepIndex = state.selectedStepIndex;
           firstIterationResume = undefined;
+          firstIterationTitle = undefined;
           // If the idle boot was a checkpoint resume and the user selected at/after
           // that checkpoint, the prefix steps were done in a prior process → pass
           // resumedPriorSteps so they render "done", not "skipped".
