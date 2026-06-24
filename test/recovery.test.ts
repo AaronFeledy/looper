@@ -142,6 +142,53 @@ describe("recoveryNudge prompt injection", () => {
     expect(promptTexts[0]).toContain("If the work is already complete, report the result.");
     expect(promptTexts[0]).toContain("build from scratch\n");
   });
+
+  test("quit during resume health recovery stops without finishing the step as skipped", async () => {
+    const originalProbeTimeout = process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+    process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
+    const { repoDir, configDir, state } = setup();
+    const finished: string[] = [];
+    let statusCalls = 0;
+    const client = {
+      session: {
+        status: async () => {
+          statusCalls += 1;
+          if (statusCalls === 1) throw new Error("server unavailable");
+          state.quitting = true;
+          await new Promise<never>(() => {});
+        },
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
+          stream: (async function* (): AsyncGenerator<never> {
+            await waitForAbort(options.signal);
+          })(),
+        }),
+      },
+    } as unknown as OpencodeClient;
+
+    try {
+      const result = await runIteration({
+        state,
+        iteration: 1,
+        client,
+        repoDir,
+        configDir,
+        resume: { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" },
+        hooks: { onStepFinish: (info) => finished.push(info.status) },
+      });
+
+      expect(result).toBe("stopped");
+      expect(finished).toEqual([]);
+      expect(state.steps[0]!.status).toBe("skipped");
+    } finally {
+      if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+      else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;
+    }
+  });
 });
 
 type KeyEventLike = { name?: string; ctrl?: boolean; sequence?: string; raw?: string; preventDefault?: () => void };

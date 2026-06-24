@@ -642,6 +642,13 @@ export async function runIteration({
         logStepLine(stepIdx, `[looper] server health check stopped by ${reason} restart request for session ${sessionID}`);
         return { status: "restart", sessionID, restartReason: reason };
       }
+      if (state.quitting || stopFileExists()) {
+        const reason = `stop requested while checking session ${sessionID}`;
+        lastErrorMessage = reason;
+        logStepLine(stepIdx, `[looper] ${reason}`);
+        failStepRow(state, stepIdx, "failed");
+        return { status: "failed", sessionID, errorMessage: reason };
+      }
       logStepLine(stepIdx, `[looper] server health check stopped for session ${sessionID}`);
       failStepRow(state, stepIdx, "skipped");
       return { status: "skipped", sessionID };
