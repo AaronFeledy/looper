@@ -637,7 +637,7 @@ describe("title orchestration", () => {
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
   });
 
-  test("hybrid: falls back to cheapest non-reasoning model when no curated match", async () => {
+  test("hybrid: falls back to cheapest model when no curated match", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -670,7 +670,7 @@ describe("title orchestration", () => {
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "cheap-chat" });
   });
 
-  test("hybrid: skips a curated-name model that is reasoning-capable", async () => {
+  test("hybrid: matches a curated-name model even when it is reasoning-capable", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -699,11 +699,11 @@ describe("title orchestration", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
     await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
 
-    expect(models).toContainEqual({ providerID: "anthropic", modelID: "plain-chat" });
-    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "plain-chat" });
   });
 
-  test("hybrid: skips a stale non-reasoning -latest alias for the live curated model (anthropic 404 regression)", async () => {
+  test("hybrid: takes the first priority-fragment match in provider order", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -733,8 +733,7 @@ describe("title orchestration", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
     await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
 
-    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
-    expect(models.some((m) => m?.modelID.startsWith("claude-haiku-4-5"))).toBe(true);
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5-20251001" });
   });
 
   test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
@@ -768,6 +767,39 @@ describe("title orchestration", () => {
 
     expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5-nano" });
     expect(models).not.toContain(undefined);
+  });
+
+  test("hybrid: falls back to Anthropic provider metadata when only reasoning models are available", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": model("claude-haiku-4-5-20251001", true, 0.5),
+              "claude-sonnet-4-5-20250929": model("claude-sonnet-4-5-20250929", true, 2),
+              "claude-opus-4-8": model("claude-opus-4-8", true, 15),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5-20251001" });
   });
 
   test("model error response deletes the title session and applies no title", async () => {

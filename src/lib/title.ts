@@ -36,11 +36,11 @@ function modelTotalCost(model: { cost?: { input?: number; output?: number } }): 
 
 /**
  * Pick a cheap title model the way opencode resolves its hidden title agent
- * when `small_model` is unset: scope to the provider that ran the step, prefer
- * opencode's curated cheap-model names, then fall back to the cheapest
- * non-reasoning model that provider offers. opencode's `getSmallModel`
- * heuristic isn't reachable via the public API, so this reproduces it from the
- * provider/model list (which exposes per-model `reasoning` + `cost`).
+ * when `small_model` is unset: scope to the provider that ran the step, match
+ * opencode's curated cheap-model names directly against that provider's model
+ * list, then fall back to the cheapest model that provider offers. opencode's
+ * `getSmallModel` heuristic isn't reachable via the public API, so this
+ * reproduces it from the provider/model list.
  *
  * Returns undefined (caller falls through to opencode's heavyweight default)
  * when the provider can't be determined, the list can't be read, or no
@@ -67,17 +67,8 @@ async function resolveHeuristicTitleModel({
     }
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
-    const available = Object.values(provider.models).filter((m) => m.status !== "deprecated");
-    if (available.length === 0) return undefined;
-    // Drop rolling "-latest" aliases when any concrete snapshot id remains.
-    // models.dev keeps a provider's "<model>-latest" entry un-deprecated even
-    // after its underlying snapshot retires, so the API 404s on it (live case:
-    // anthropic claude-3-5-haiku-latest, while the dated claude-3-5-haiku
-    // snapshot is already flagged deprecated). Since non-reasoning models are
-    // preferred below, that dead alias was chosen over the live, variant-safe
-    // claude-haiku-4-5. Keep a -latest alias only as a last resort.
-    const concrete = available.filter((m) => !/-latest$/i.test(m.id));
-    const models = concrete.length > 0 ? concrete : available;
+    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
+    if (models.length === 0) return undefined;
     const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
       if (pool.length === 0) return undefined;
       for (const fragment of PRIORITY_SMALL_MODELS) {
@@ -87,13 +78,12 @@ async function resolveHeuristicTitleModel({
       const cheapest = pool.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
       return { providerID: provider.id, modelID: cheapest.id };
     };
-    // Prefer non-reasoning models (reasoning ones can reject opencode's
-    // adaptive-thinking variant with a 400), but fall back to a cheap reasoning
-    // model rather than returning undefined: a reasoning-only provider (openai
-    // gpt-5.x) would otherwise fall through to opencode's heavyweight default,
-    // which is what ran the title agent on opus.
-    const nonReasoning = models.filter((m) => m.capabilities.reasoning === false);
-    return pickCheap(nonReasoning) ?? pickCheap(models);
+    // Match opencode's getSmallModel priority behavior: walk the curated
+    // fragments against all provider models in insertion order, without a
+    // reasoning pre-filter. Keep Looper's deliberate fallback to the cheapest
+    // model so title generation does not inherit opencode's heavyweight default
+    // when no priority fragment matches.
+    return pickCheap(models);
   } catch (error) {
     if (isAbort(error)) return undefined;
     log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
