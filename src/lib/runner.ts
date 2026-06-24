@@ -68,6 +68,7 @@ type LiveBackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: 
 type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMessage?: string };
 
 export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
+export type ResumeSessionWorkState = "running" | "idle" | "unknown";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
@@ -636,6 +637,47 @@ async function probeBackgroundLiveness({
     });
   }
   return { parent, pendingChildren };
+}
+
+export async function resumeSessionWorkState({
+  client,
+  repoDir,
+  sessionID,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+}): Promise<ResumeSessionWorkState> {
+  let parentState: SessionPendingState;
+  try {
+    parentState = await sessionPendingState(client, repoDir, sessionID);
+  } catch {
+    parentState = "unknown";
+  }
+  if (parentState === "pending") return "running";
+
+  let record: RunContinuationRecord | null;
+  try {
+    record = readProjectContinuationRecord(repoDir, sessionID);
+  } catch {
+    record = null;
+  }
+  if (record !== null && record.source.state === "active") {
+    const updatedAt = Date.parse(record.source.updatedAt);
+    const markerStale = Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS;
+    if (!markerStale) return "running";
+
+    try {
+      const probe = await probeBackgroundLiveness({ client, repoDir, parentSessionID: sessionID });
+      if (probe.errorMessage !== undefined) return "unknown";
+      if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
+      return probe.parent === "idle" ? "idle" : "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  return parentState;
 }
 
 type BackgroundAgentPoller = { stop: () => void };

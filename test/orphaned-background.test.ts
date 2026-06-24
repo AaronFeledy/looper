@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { waitForLoopContinuationIdle } from "../src/lib/runner.ts";
+import { resumeSessionWorkState, waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
 
@@ -119,6 +119,43 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
 
     const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+
+    expect(result).toBe("idle");
+  });
+});
+
+describe("resumeSessionWorkState", () => {
+  test("reports a busy saved foreground session as running", async () => {
+    const repoDir = freshRepo();
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("running");
+  });
+
+  test("reports a fresh active background marker as running even when the parent is idle", async () => {
+    const repoDir = freshRepo();
+    const dir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(dir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "active", reason: "1 background task(s) active", updatedAt: now } } }),
+    );
+    const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("running");
+  });
+
+  test("does not treat a stale orphaned background marker as running", async () => {
+    const repoDir = freshRepo();
+    writeActiveStaleRecord(repoDir);
+    const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
 
     expect(result).toBe("idle");
   });
