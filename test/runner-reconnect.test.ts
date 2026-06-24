@@ -284,6 +284,57 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(result.errorMessage).toContain("completed without assistant output");
   });
 
+  test("reattach backfill is bounded when messages hangs during teardown", async () => {
+    const originalProbeTimeout = process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+    process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-backfill-timeout-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let messagesCalls = 0;
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => {
+          messagesCalls += 1;
+          if (messagesCalls === 1) return await new Promise<never>(() => {});
+          return { data: [assistantDone(MID)] };
+        },
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    try {
+      const result = await reattachOpenCodeStep({
+        state,
+        stepIndex: 0,
+        client,
+        repoDir,
+        step,
+        sessionID: SID,
+        messageID: MID,
+      });
+
+      expect(result.status).toBe("done");
+      expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach backfill timed out"))).toBe(true);
+    } finally {
+      if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+      else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;
+    }
+  });
+
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;

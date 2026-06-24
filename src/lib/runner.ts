@@ -467,6 +467,24 @@ async function boundedSessionPendingState(
   return result === DEADLINE_EXCEEDED ? "unknown" : result;
 }
 
+async function boundedBackgroundLivenessProbe({
+  client,
+  repoDir,
+  parentSessionID,
+  timeoutMs,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  parentSessionID: string;
+  timeoutMs: number | undefined;
+}): Promise<BackgroundLivenessProbe> {
+  const effectiveTimeoutMs = timeoutMs ?? serverRecoveryProbeTimeoutMs();
+  const result = await withDeadline(probeBackgroundLiveness({ client, repoDir, parentSessionID }), effectiveTimeoutMs);
+  return result === DEADLINE_EXCEEDED
+    ? { parent: "unknown", pendingChildren: [], errorMessage: `background liveness probe timed out after ${effectiveTimeoutMs}ms` }
+    : result;
+}
+
 /**
  * Tell opencode to abort `sessionID` and wait until the server confirms it is
  * no longer pending (or the timeout elapses). Returns `true` only when the
@@ -772,7 +790,7 @@ export async function resumeSessionWorkState({
     if (!markerStale) return "running";
 
     try {
-      const probe = await probeBackgroundLiveness({ client, repoDir, parentSessionID: sessionID });
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs: statusTimeoutMs });
       if (probe.errorMessage !== undefined) return "unknown";
       if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
       return probe.parent === "idle" ? "idle" : "unknown";
@@ -1188,8 +1206,10 @@ export async function reattachOpenCodeStep({
       if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
     }
     try {
-      const msgs = await client.session.messages({ sessionID, directory: repoDir });
-      if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
+      const timeoutMs = serverRecoveryProbeTimeoutMs();
+      const msgs = await withDeadline(client.session.messages({ sessionID, directory: repoDir }), timeoutMs);
+      if (msgs === DEADLINE_EXCEEDED) pushLine(`[looper] reattach backfill timed out after ${timeoutMs}ms`);
+      else if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
     } catch (error) {
       pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
     }

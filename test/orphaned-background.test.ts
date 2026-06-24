@@ -172,4 +172,19 @@ describe("resumeSessionWorkState", () => {
 
     expect(result).toBe("unknown");
   });
+
+  test("can bound stale marker live probes", async () => {
+    const repoDir = freshRepo();
+    writeActiveStaleRecord(repoDir);
+    const client = {
+      session: {
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        children: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 1 });
+
+    expect(result).toBe("unknown");
+  });
 });
