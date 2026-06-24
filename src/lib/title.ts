@@ -156,6 +156,56 @@ const TITLE_MAX_CHARS = 100;
 
 const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
 
+const TITLE_SMALL_WORDS = new Set(["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "the", "to", "vs", "via", "with"]);
+
+function shouldPreserveTitleToken(token: string): boolean {
+  return /[A-Z0-9./]/.test(token);
+}
+
+function capitalizeToken(token: string): string {
+  const lower = token.toLowerCase();
+  return lower.replace(/[A-Za-z]/, (letter) => letter.toUpperCase());
+}
+
+export function toBookTitleCase(text: string): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return words
+    .map((word, index) => {
+      if (shouldPreserveTitleToken(word)) return word;
+      const lower = word.toLowerCase();
+      if (index > 0 && index < words.length - 1 && TITLE_SMALL_WORDS.has(lower)) return lower;
+      return capitalizeToken(word);
+    })
+    .join(" ");
+}
+
+export function humanizeBranchName(branch: string): string {
+  const parts = branch.trim().split(/[-_/]+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  const titleParts: string[] = [];
+  const first = parts[0]!;
+  const second = parts[1];
+  if (/^[A-Za-z]{1,6}$/.test(first) && second !== undefined && /^\d+$/.test(second)) {
+    titleParts.push(`${first.toUpperCase()}-${second}`);
+    titleParts.push(...parts.slice(2));
+  } else {
+    titleParts.push(...parts);
+  }
+  return toBookTitleCase(titleParts.join(" "));
+}
+
+export function isBoilerplateTitle(title: string): boolean {
+  const trimmed = title.trim();
+  if (trimmed.length === 0) return false;
+  if (/\bultra(?:work(?:er)?|think)\b/i.test(trimmed)) return true;
+  if (/^(?:plan|tl;dr)\b:?/i.test(trimmed)) return true;
+  if (/\bmode(?: enabled)?!?$/i.test(trimmed)) return true;
+  if (/^(?:i['’]?ll|i['’]?m|i am|i need|i will|let me|now i|continuing|starting|beginning)\b/i.test(trimmed)) return true;
+  const letters = trimmed.replace(/[^A-Za-z]/g, "");
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  return letters.length > 0 && wordCount <= 6 && letters === letters.toUpperCase();
+}
+
 function titleGenTimeoutMs(): number {
   const raw = Number(process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
@@ -183,11 +233,13 @@ Use the <examples> so you know what a good title looks like.
 Your output must be:
 - A single line
 - ≤50 characters
+- Book Title Case / headline case
 - No explanations
 </task>
 
 <rules>
 - Title must be grammatically correct and read naturally - no word salad.
+- Return the title in Book Title Case (headline case): capitalize major words, keep short connector words lowercase when they are not first or last, and preserve exact casing for story IDs, filenames, versions, HTTP codes, and established technical names.
 - Focus on the concrete subject of the work: the feature, bug, file, story ID, system, or refactor being executed.
 - IGNORE mode banners, role declarations, agent identity statements, status preambles, and meta narration. Examples that must NEVER become titles: "ULTRAWORKER MODE", "ULTRAWORK MODE", "ULTRATHINK", "Starting work", "I'll handle this", "Plan:", "TL;DR:", "Continuing where I left off", any single-line ALL-CAPS banner, any sentence whose only content is the agent's mode, identity, or current state.
 - If the log opens with such a banner, skip past it and title from the actual work that follows.
@@ -205,16 +257,16 @@ Your output must be:
 </rules>
 
 <examples>
-"ULTRAWORKER MODE\n\nReading spec/beta/prd.json to pick the next story. Selected US-057, checking out us-057-guide-frontmatter-schema..." → US-057 guide frontmatter schema
-"ULTRAWORK MODE\n\nFixed the 500 error in /api/users — the JWT middleware was throwing on null session cookies. Added a guard and a test." → 500 error fix in JWT middleware
-"Plan: refactor the user service to extract billing logic into its own module." → User service billing extraction
-"TL;DR: bumped @opencode-ai/sdk to v2.3.1 and adjusted the new prompt() signature across runner.ts and title.ts." → opencode-ai/sdk v2.3.1 bump
-"I'll handle the dark mode toggle. Added a theme context provider to App.tsx and wired the toggle into the header." → Dark mode toggle in App
-"Continuing where I left off. The migration script needs IF NOT EXISTS guards on every CREATE TABLE." → Migration IF NOT EXISTS guards
-"Investigating why pg connection times out. Pool config was missing max=10, fixed." → Postgres pool max fix
-"ULTRATHINK\n\nRan bun typecheck and bun test — both green. Committed feat: US-001 provider-lando Linux setup." → US-001 provider-lando Linux setup
-"[branch: us-057-guide-frontmatter-schema]\n\nULTRAWORKER MODE\n\nReading spec/beta/prd.json to decide which story to pick up." → US-057 guide frontmatter schema
-"[branch: fix-pg-pool-timeout]\n\nPlan: bump max=10 and add a backoff." → Fix pg pool timeout
+"ULTRAWORKER MODE\n\nReading spec/beta/prd.json to pick the next story. Selected US-057, checking out us-057-guide-frontmatter-schema..." → US-057 Guide Frontmatter Schema
+"ULTRAWORK MODE\n\nFixed the 500 error in /api/users — the JWT middleware was throwing on null session cookies. Added a guard and a test." → 500 Error Fix in JWT Middleware
+"Plan: refactor the user service to extract billing logic into its own module." → User Service Billing Extraction
+"TL;DR: bumped @opencode-ai/sdk to v2.3.1 and adjusted the new prompt() signature across runner.ts and title.ts." → @opencode-ai/sdk v2.3.1 Bump
+"I'll handle the dark mode toggle. Added a theme context provider to App.tsx and wired the toggle into the header." → Dark Mode Toggle in App
+"Continuing where I left off. The migration script needs IF NOT EXISTS guards on every CREATE TABLE." → Migration IF NOT EXISTS Guards
+"Investigating why pg connection times out. Pool config was missing max=10, fixed." → Postgres Pool Max Fix
+"ULTRATHINK\n\nRan bun typecheck and bun test — both green. Committed feat: US-001 provider-lando Linux setup." → US-001 Provider Lando Linux Setup
+"[branch: us-057-guide-frontmatter-schema]\n\nULTRAWORKER MODE\n\nReading spec/beta/prd.json to decide which story to pick up." → US-057 Guide Frontmatter Schema
+"[branch: fix-pg-pool-timeout]\n\nPlan: bump max=10 and add a backoff." → Fix Pg Pool Timeout
 </examples>`
 
 /**
@@ -407,7 +459,12 @@ export async function generateWorkDescription({
       log?.("[looper] title gen: title empty after postprocessing");
       return undefined;
     }
-    return cleaned;
+    if (isBoilerplateTitle(cleaned)) {
+      const fallback = branchHint !== undefined ? humanizeBranchName(branchHint) : "";
+      log?.(`[looper] title gen: rejected boilerplate title: ${cleaned}`);
+      return fallback.length > 0 ? fallback : undefined;
+    }
+    return toBookTitleCase(cleaned);
   } catch (error) {
     if (isAbort(error) && timedOut) {
       log?.(`[looper] title gen: exceeded ${timeoutMs}ms; aborting title session ${titleSessionID ?? "(uncreated)"}`);
