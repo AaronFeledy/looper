@@ -69,6 +69,7 @@ type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMes
 
 export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
 export type ResumeSessionWorkState = "running" | "idle" | "unknown";
+export type SessionHealthState = SessionPendingState | "stopped";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
@@ -410,12 +411,12 @@ export async function waitForSessionHealth({
   maxWaitMs?: number;
   log?: (line: string) => void;
   shouldStop?: () => boolean;
-}): Promise<SessionPendingState> {
+}): Promise<SessionHealthState> {
   const deadline = Date.now() + Math.max(0, maxWaitMs);
   let attempt = 0;
 
   while (true) {
-    if (shouldStop?.()) return "unknown";
+    if (shouldStop?.()) return "stopped";
     const probeBudget = Math.min(serverRecoveryProbeTimeoutMs(), Math.max(1, deadline - Date.now()));
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), probeBudget);
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
@@ -424,7 +425,7 @@ export async function waitForSessionHealth({
       return state;
     }
 
-    if (shouldStop?.()) return "unknown";
+    if (shouldStop?.()) return "stopped";
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       log?.(`[looper] server still unavailable after ${Math.round(maxWaitMs / 1000)}s while checking session ${sessionID}`);
@@ -434,7 +435,7 @@ export async function waitForSessionHealth({
     attempt += 1;
     const delay = serverRecoveryDelayMs(attempt, remaining);
     log?.(`[looper] server unavailable while checking session ${sessionID}; retrying health check in ${Math.ceil(delay / 1000)}s`);
-    if (!(await sleepUntilServerRecoveryRetry(delay, shouldStop))) return "unknown";
+    if (!(await sleepUntilServerRecoveryRetry(delay, shouldStop))) return "stopped";
   }
 }
 

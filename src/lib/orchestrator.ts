@@ -16,6 +16,7 @@ import {
   type Step,
   type StepResult,
   type StepRunResult,
+  type SessionHealthState,
 } from "./runner.ts";
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
@@ -635,8 +636,18 @@ export async function runIteration({
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+    const stopAfterInterruptedHealthWait = (sessionID: string, stepIdx: number): StepRunResult => {
+      if (state.restartRequested) {
+        const reason = state.restartReason ?? "manual";
+        logStepLine(stepIdx, `[looper] server health check stopped by ${reason} restart request for session ${sessionID}`);
+        return { status: "restart", sessionID, restartReason: reason };
+      }
+      logStepLine(stepIdx, `[looper] server health check stopped for session ${sessionID}`);
+      failStepRow(state, stepIdx, "skipped");
+      return { status: "skipped", sessionID };
+    };
 
-    const waitForRecoverableHealth = async (sessionID: string, stepIdx: number): Promise<"pending" | "idle" | "unknown"> =>
+    const waitForRecoverableHealth = async (sessionID: string, stepIdx: number): Promise<SessionHealthState> =>
       await waitForSessionHealth({
         client,
         repoDir,
@@ -654,9 +665,13 @@ export async function runIteration({
         let workState = await resumeSessionWorkState({ client, repoDir, sessionID: resumeSession });
         if (stepMatches && workState === "unknown") {
           const recovered = await waitForRecoverableHealth(resumeSession, currentStepIndex);
-          workState = recovered === "pending" ? "running" : recovered;
+          if (recovered === "stopped") {
+            pendingResult = stopAfterInterruptedHealthWait(resumeSession, currentStepIndex);
+          } else {
+            workState = recovered === "pending" ? "running" : recovered;
+          }
         }
-        if (stepMatches && workState === "running" && resumeInfo.messageID !== undefined) {
+        if (pendingResult === undefined && stepMatches && workState === "running" && resumeInfo.messageID !== undefined) {
           logStepLine(currentStepIndex, `[looper] resuming ${step.name}: session ${resumeSession} still active; reattaching`);
           lastPromptMessageID = resumeInfo.messageID;
           // onStepBegin's saveRunStatePosition just cleared the live session ids
@@ -680,16 +695,16 @@ export async function runIteration({
             sessionID: resumeSession,
             messageID: resumeInfo.messageID,
           });
-        } else if (stepMatches && workState === "idle") {
+        } else if (pendingResult === undefined && stepMatches && workState === "idle") {
           if (recoveryNudgeActive && resumeInfo.messageID !== undefined) {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
             resumeSessionID = resumeSession;
           } else {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; restarting step in a fresh session`);
           }
-        } else if (stepMatches && workState === "unknown") {
+        } else if (pendingResult === undefined && stepMatches && workState === "unknown") {
           pendingResult = failAfterUnrecoveredServer(resumeSession, currentStepIndex);
-        } else {
+        } else if (pendingResult === undefined) {
           const why = !stepMatches
             ? "step changed since the session was recorded"
             : workState === "running"
@@ -883,6 +898,10 @@ export async function runIteration({
           });
           if (!ev.statusKnown && ev.classification.kind === "missing") {
             const recovered = await waitForRecoverableHealth(priorSessionForCheck, currentStepIndex);
+            if (recovered === "stopped") {
+              pendingResult = stopAfterInterruptedHealthWait(priorSessionForCheck, currentStepIndex);
+              continue;
+            }
             if (recovered === "unknown") {
               result = failAfterUnrecoveredServer(priorSessionForCheck, currentStepIndex);
               break;
@@ -926,8 +945,12 @@ export async function runIteration({
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
 
         if (priorSessionID !== undefined) {
-          let pending = await sessionPendingState(client, repoDir, priorSessionID);
+          let pending: SessionHealthState = await sessionPendingState(client, repoDir, priorSessionID);
           if (pending === "unknown") pending = await waitForRecoverableHealth(priorSessionID, currentStepIndex);
+          if (pending === "stopped") {
+            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
+            continue;
+          }
           if (pending === "unknown") {
             result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
             break;

@@ -134,6 +134,18 @@ describe("waitForSessionHealth", () => {
 
     expect(state).toBe("unknown");
   });
+
+  test("reports user stop separately from unrecovered server", async () => {
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = await waitForSessionHealth({ client, repoDir: "/x", sessionID: "sid", shouldStop: () => true });
+
+    expect(state).toBe("stopped");
+  });
 });
 
 /**
