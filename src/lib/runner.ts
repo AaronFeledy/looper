@@ -455,15 +455,37 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
   }
 }
 
+function abortReason(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error ? reason : new Error("operation aborted");
+}
+
+async function withAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return await promise;
+  if (signal.aborted) throw abortReason(signal);
+  let removeAbortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    removeAbortListener?.();
+  }
+}
+
 async function boundedSessionPendingState(
   client: OpencodeClient,
   repoDir: string,
   sessionID: string,
   timeoutMs: number | undefined,
+  signal?: AbortSignal,
 ): Promise<SessionPendingState> {
   const pending = sessionPendingState(client, repoDir, sessionID);
-  if (timeoutMs === undefined) return await pending;
-  const result = await withDeadline(pending, timeoutMs);
+  const bounded = timeoutMs === undefined ? pending : withDeadline(pending, timeoutMs);
+  const result = await withAbortSignal(bounded, signal);
   return result === DEADLINE_EXCEEDED ? "unknown" : result;
 }
 
@@ -472,14 +494,16 @@ async function boundedBackgroundLivenessProbe({
   repoDir,
   parentSessionID,
   timeoutMs,
+  signal,
 }: {
   client: OpencodeClient;
   repoDir: string;
   parentSessionID: string;
   timeoutMs: number | undefined;
+  signal?: AbortSignal;
 }): Promise<BackgroundLivenessProbe> {
   const effectiveTimeoutMs = timeoutMs ?? serverRecoveryProbeTimeoutMs();
-  const result = await withDeadline(probeBackgroundLiveness({ client, repoDir, parentSessionID }), effectiveTimeoutMs);
+  const result = await withAbortSignal(withDeadline(probeBackgroundLiveness({ client, repoDir, parentSessionID }), effectiveTimeoutMs), signal);
   return result === DEADLINE_EXCEEDED
     ? { parent: "unknown", pendingChildren: [], errorMessage: `background liveness probe timed out after ${effectiveTimeoutMs}ms` }
     : result;
@@ -764,15 +788,17 @@ export async function resumeSessionWorkState({
   repoDir,
   sessionID,
   statusTimeoutMs,
+  signal,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
   statusTimeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<ResumeSessionWorkState> {
   let parentState: SessionPendingState;
   try {
-    parentState = await boundedSessionPendingState(client, repoDir, sessionID, statusTimeoutMs);
+    parentState = await boundedSessionPendingState(client, repoDir, sessionID, statusTimeoutMs, signal);
   } catch {
     parentState = "unknown";
   }
@@ -790,7 +816,7 @@ export async function resumeSessionWorkState({
     if (!markerStale) return "running";
 
     try {
-      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs: statusTimeoutMs });
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs: statusTimeoutMs, signal });
       if (probe.errorMessage !== undefined) return "unknown";
       if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
       return probe.parent === "idle" ? "idle" : "unknown";

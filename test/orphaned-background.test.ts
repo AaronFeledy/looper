@@ -173,6 +173,25 @@ describe("resumeSessionWorkState", () => {
     expect(result).toBe("unknown");
   });
 
+  test("honors aborts while probing saved-session status", async () => {
+    const repoDir = freshRepo();
+    const controller = new AbortController();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const startedAt = Date.now();
+    const pending = resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 60_000, signal: controller.signal });
+    controller.abort(new Error("startup interrupted"));
+
+    const result = await pending;
+
+    expect(result).toBe("unknown");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
   test("can bound stale marker live probes", async () => {
     const repoDir = freshRepo();
     writeActiveStaleRecord(repoDir);
