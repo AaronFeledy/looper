@@ -34,6 +34,10 @@ function modelTotalCost(model: { cost?: { input?: number; output?: number } }): 
   return (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
 }
 
+function isRollingLatestModel(modelID: string): boolean {
+  return modelID.endsWith("-latest");
+}
+
 /**
  * Pick a cheap title model the way opencode resolves its hidden title agent
  * when `small_model` is unset: scope to the provider that ran the step, match
@@ -67,7 +71,7 @@ async function resolveHeuristicTitleModel({
     }
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
-    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
+    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated" && !isRollingLatestModel(m.id));
     if (models.length === 0) return undefined;
     const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
       if (pool.length === 0) return undefined;

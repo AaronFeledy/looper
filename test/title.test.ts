@@ -787,6 +787,40 @@ describe("title orchestration", () => {
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5-20251001" });
   });
 
+  test("hybrid: skips rolling latest aliases when resolving title models", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": { ...model("claude-haiku-4-5-20251001", true, 1), status: "deprecated" },
+              "claude-3-5-haiku-latest": model("claude-3-5-haiku-latest", false, 0.1),
+              "cheap-chat": model("cheap-chat", false, 0.25),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "cheap-chat" });
+    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
+  });
+
   test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
