@@ -4,7 +4,7 @@ import { join, resolve, sep } from "node:path";
 
 import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { consumeSessionEvents, createSessionEventConsumer } from "./event-consumer.ts";
+import { createSessionEventConsumer } from "./event-consumer.ts";
 import {
   beginStepRun,
   finalizeStepRow,
@@ -106,8 +106,48 @@ const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIB
  * the server — so callers about to create a NEW session for a step must
  * confirm the old one actually stopped to avoid two concurrent generations.
  */
-const STOP_SESSION_CONFIRM_TIMEOUT_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", 10_000);
 const STOP_SESSION_CONFIRM_POLL_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_POLL_MS", 250);
+const STOP_SESSION_CONFIRM_TIMEOUT_MS = 10_000;
+const SERVER_RECOVERY_DEFAULT_MAX_WAIT_MS = 10 * 60 * 1000;
+const SERVER_RECOVERY_DEFAULT_BACKOFF_BASE_MS = 2_000;
+const SERVER_RECOVERY_DEFAULT_BACKOFF_MAX_MS = 30_000;
+const SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+
+function stopSessionConfirmTimeoutMs(): number {
+  return positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", STOP_SESSION_CONFIRM_TIMEOUT_MS);
+}
+
+function serverRecoveryMaxWaitMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_MAX_WAIT_MS", SERVER_RECOVERY_DEFAULT_MAX_WAIT_MS);
+}
+
+function serverRecoveryBackoffBaseMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS", SERVER_RECOVERY_DEFAULT_BACKOFF_BASE_MS);
+}
+
+function serverRecoveryBackoffMaxMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS", SERVER_RECOVERY_DEFAULT_BACKOFF_MAX_MS);
+}
+
+function serverRecoveryProbeTimeoutMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS", SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS);
+}
+
+function serverRecoveryDelayMs(attempt: number, remainingMs: number): number {
+  const base = serverRecoveryBackoffBaseMs();
+  const cap = serverRecoveryBackoffMaxMs();
+  const delay = Math.min(cap, base * 2 ** Math.max(0, attempt - 1));
+  return Math.min(delay, Math.max(1, remainingMs));
+}
+
+async function sleepUntilServerRecoveryRetry(ms: number, shouldStop?: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, ms);
+  while (Date.now() < deadline) {
+    if (shouldStop?.()) return false;
+    await Bun.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+  return true;
+}
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -356,6 +396,48 @@ export async function sessionPendingState(
   }
 }
 
+export async function waitForSessionHealth({
+  client,
+  repoDir,
+  sessionID,
+  maxWaitMs = serverRecoveryMaxWaitMs(),
+  log,
+  shouldStop,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  maxWaitMs?: number;
+  log?: (line: string) => void;
+  shouldStop?: () => boolean;
+}): Promise<SessionPendingState> {
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+  let attempt = 0;
+
+  while (true) {
+    if (shouldStop?.()) return "unknown";
+    const probeBudget = Math.min(serverRecoveryProbeTimeoutMs(), Math.max(1, deadline - Date.now()));
+    const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), probeBudget);
+    const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
+    if (state !== "unknown") {
+      if (attempt > 0) log?.(`[looper] server health recovered while checking session ${sessionID}; session is ${state}`);
+      return state;
+    }
+
+    if (shouldStop?.()) return "unknown";
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      log?.(`[looper] server still unavailable after ${Math.round(maxWaitMs / 1000)}s while checking session ${sessionID}`);
+      return "unknown";
+    }
+
+    attempt += 1;
+    const delay = serverRecoveryDelayMs(attempt, remaining);
+    log?.(`[looper] server unavailable while checking session ${sessionID}; retrying health check in ${Math.ceil(delay / 1000)}s`);
+    if (!(await sleepUntilServerRecoveryRetry(delay, shouldStop))) return "unknown";
+  }
+}
+
 const DEADLINE_EXCEEDED = Symbol("deadline-exceeded");
 
 /** Race a promise against a deadline. Returns the sentinel if it does not settle in time. */
@@ -397,7 +479,7 @@ export async function stopServerSession({
   client,
   repoDir,
   sessionID,
-  timeoutMs = STOP_SESSION_CONFIRM_TIMEOUT_MS,
+  timeoutMs,
   log,
 }: {
   client: OpencodeClient;
@@ -406,13 +488,14 @@ export async function stopServerSession({
   timeoutMs?: number;
   log?: (line: string) => void;
 }): Promise<boolean> {
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const effectiveTimeoutMs = timeoutMs ?? stopSessionConfirmTimeoutMs();
+  const deadline = Date.now() + Math.max(0, effectiveTimeoutMs);
   const remaining = (): number => deadline - Date.now();
 
   try {
     const aborted = await withDeadline(client.session.abort({ sessionID, directory: repoDir }), remaining());
     if (aborted === DEADLINE_EXCEEDED) {
-      log?.(`[looper] session.abort for ${sessionID} did not return within ${timeoutMs}ms; could not confirm stop`);
+      log?.(`[looper] session.abort for ${sessionID} did not return within ${effectiveTimeoutMs}ms; could not confirm stop`);
       return false;
     }
     if (aborted?.error) log?.(`[looper] session.abort failed for ${sessionID}: ${formatRequestError(aborted.error)}`);
@@ -420,15 +503,21 @@ export async function stopServerSession({
     log?.(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
   }
 
+  let unknownStatusAttempts = 0;
   while (true) {
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
     if (state === "idle") return true;
+    if (state === "unknown") unknownStatusAttempts += 1;
+    else unknownStatusAttempts = 0;
     if (remaining() <= 0) {
-      log?.(`[looper] session ${sessionID} still ${state} ${timeoutMs}ms after abort; could not confirm stop`);
+      log?.(`[looper] session ${sessionID} still ${state} ${effectiveTimeoutMs}ms after abort; could not confirm stop`);
       return false;
     }
-    await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, Math.max(1, remaining())));
+    const delay = state === "unknown"
+      ? serverRecoveryDelayMs(unknownStatusAttempts, remaining())
+      : Math.min(STOP_SESSION_CONFIRM_POLL_MS, Math.max(1, remaining()));
+    await Bun.sleep(delay);
   }
 }
 
@@ -1016,18 +1105,19 @@ export async function reattachOpenCodeStep({
   let sessionEventError: Error | undefined;
   let timedOut = false;
   let consecutiveStatusErrors = 0;
+  const consumer = createSessionEventConsumer(sessionID, {
+    pushLine,
+    pushLines,
+    onSessionError: (message) => {
+      sessionEventError ??= new Error(`session.error: ${message}`);
+    },
+  });
 
   try {
     const sub = await client.event.subscribe({ directory: repoDir }, { signal: ctrl.signal });
     if (!sub.stream) throw new Error("event.subscribe returned no stream");
     pushLine(`[looper] subscribed to events for reattach`);
-    consumerPromise = consumeSessionEvents(sub.stream, sessionID, {
-      pushLine,
-      pushLines,
-      onSessionError: (message) => {
-        sessionEventError ??= new Error(`session.error: ${message}`);
-      },
-    }).catch((err) => {
+    consumerPromise = consumer.consume(sub.stream).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
       pushLine(`[error] event consumer crashed during reattach: ${error.message}`);
@@ -1082,6 +1172,13 @@ export async function reattachOpenCodeStep({
       ]).catch(() => undefined);
       if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
     }
+    try {
+      const msgs = await client.session.messages({ sessionID, directory: repoDir });
+      if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
+    } catch (error) {
+      pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
+    }
+    consumer.flush();
   }
 
   const finalize = (

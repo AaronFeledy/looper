@@ -6,7 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { runIteration } from "../src/lib/orchestrator.ts";
-import { bindKeys, type KeyHooks } from "../src/tui/keys.ts";
+import { bindKeys, installBootInterruptHandler, type KeyHooks } from "../src/tui/keys.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState, type RecoveryChoice } from "../src/lib/state.ts";
 
@@ -77,7 +77,8 @@ describe("recoveryNudge prompt injection", () => {
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, recoveryNudge: true });
 
     expect(result).toBe("complete");
-    expect(stub.promptTexts[0]).toContain("resuming after the previous attempt");
+    expect(stub.promptTexts[0]).toContain("Continue working to completion if you haven't already.");
+    expect(stub.promptTexts[0]).toContain("If the work is already complete, report the result.");
     expect(stub.promptTexts[0]).toContain("build from scratch\n");
   });
 
@@ -89,7 +90,57 @@ describe("recoveryNudge prompt injection", () => {
 
     expect(result).toBe("complete");
     expect(stub.promptTexts[0]).toBe("build from scratch\n");
-    expect(stub.promptTexts[0]).not.toContain("resuming after the previous attempt");
+    expect(stub.promptTexts[0]).not.toContain("Continue working to completion if you haven't already.");
+  });
+
+  test("recoveryNudge with an idle resume sends the nudge to the existing session", async () => {
+    const { repoDir, configDir, state } = setup();
+    const created: string[] = [];
+    const prompted: string[] = [];
+    const promptTexts: string[] = [];
+
+    const client = {
+      session: {
+        create: async () => {
+          created.push("ses_new");
+          return { data: { id: "ses_new" } };
+        },
+        prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
+          prompted.push(params.sessionID);
+          promptTexts.push(params.parts.map((part) => part.text).join("\n"));
+          writeIdleContinuationRecord(repoDir, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { ses_old: { type: "idle" } } }),
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
+          stream: (async function* (): AsyncGenerator<never> {
+            await waitForAbort(options.signal);
+          })(),
+        }),
+      },
+    } as unknown as OpencodeClient;
+
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir,
+      configDir,
+      recoveryNudge: true,
+      resume: { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" },
+    });
+
+    expect(result).toBe("complete");
+    expect(created).toEqual([]);
+    expect(prompted).toEqual(["ses_old"]);
+    expect(promptTexts[0]).toContain("Continue working to completion if you haven't already.");
+    expect(promptTexts[0]).toContain("If the work is already complete, report the result.");
+    expect(promptTexts[0]).toContain("build from scratch\n");
   });
 });
 
@@ -243,5 +294,40 @@ describe("keys ctrl+c", () => {
 
     expect(fake.copied).toEqual([]);
     expect(calls).toEqual(["interrupt"]);
+  });
+});
+
+describe("boot ctrl+c", () => {
+  test("ctrl+c interrupts before normal keybindings are installed", () => {
+    const fake = fakeRenderer();
+    const calls: string[] = [];
+    let prevented = 0;
+
+    installBootInterruptHandler(fake.renderer as never, () => calls.push("interrupt"));
+
+    fake.press({ ctrl: true, name: "c", preventDefault: () => prevented += 1 });
+
+    expect(calls).toEqual(["interrupt"]);
+    expect(prevented).toBe(1);
+  });
+
+  test("cleanup removes the temporary boot interrupt handler", () => {
+    const handlers: ((k: KeyEventLike) => void)[] = [];
+    const renderer = {
+      keyInput: {
+        on: (_event: string, handler: (k: KeyEventLike) => void) => handlers.push(handler),
+        off: (_event: string, handler: (k: KeyEventLike) => void) => {
+          const index = handlers.indexOf(handler);
+          if (index !== -1) handlers.splice(index, 1);
+        },
+      },
+    };
+    const calls: string[] = [];
+
+    const cleanup = installBootInterruptHandler(renderer as never, () => calls.push("interrupt"));
+    cleanup();
+    handlers.forEach((handler) => handler({ sequence: "\u0003" }));
+
+    expect(calls).toEqual([]);
   });
 });
