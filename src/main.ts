@@ -21,6 +21,7 @@ import {
   LOOPER_MANAGED_RESOURCES,
 } from "./lib/opencode-managed-resources.ts";
 import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
+import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import { cancelPendingNotify, createLoopState, createStepRow, dismissEscConfirm, type EscConfirmMode, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
@@ -261,7 +262,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   };
 
   const autoStartIfSavedSessionRunning = async (client: ReturnType<typeof createOpencodeClient>): Promise<void> => {
-    if (state.started || options.fresh) return;
+    if (!shouldAutoStartSavedSession({
+      started: state.started,
+      fresh: options.fresh,
+      stopFilePresent: stopFileExists(),
+      stopAfterIterationFilePresent: stopAfterIterationFileExists(),
+    })) return;
     const plan = computeResumePlan(loadSteps(configDir));
     const sessionID = plan.firstIterationResume?.sessionID;
     const messageID = plan.firstIterationResume?.messageID;
@@ -724,13 +730,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         }
         recoveryNudgeNext = choice === "nudge";
         const recoveryRunState = readRunState();
-        const recoveryResume = error.sessionID !== undefined && recoveryRunState?.sessionID === error.sessionID && recoveryRunState.messageID !== undefined
-          ? {
-              sessionID: error.sessionID,
-              messageID: recoveryRunState.messageID,
-              ...(error.stepName !== undefined ? { stepName: error.stepName } : {}),
-            }
-          : undefined;
+        const recoveryResume = recoveryResumeForChoice({ choice, failedSessionID: error.sessionID, failedStepName: error.stepName, runState: recoveryRunState });
         // Retry the failed step in the SAME iteration. `continue` still runs the
         // loop's `iteration += 1`, so we pin `startIteration` to this iteration
         // and pre-decrement to cancel that increment; otherwise a single-iteration
