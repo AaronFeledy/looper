@@ -455,6 +455,18 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
   }
 }
 
+async function boundedSessionPendingState(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+  timeoutMs: number | undefined,
+): Promise<SessionPendingState> {
+  const pending = sessionPendingState(client, repoDir, sessionID);
+  if (timeoutMs === undefined) return await pending;
+  const result = await withDeadline(pending, timeoutMs);
+  return result === DEADLINE_EXCEEDED ? "unknown" : result;
+}
+
 /**
  * Tell opencode to abort `sessionID` and wait until the server confirms it is
  * no longer pending (or the timeout elapses). Returns `true` only when the
@@ -733,14 +745,16 @@ export async function resumeSessionWorkState({
   client,
   repoDir,
   sessionID,
+  statusTimeoutMs,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
+  statusTimeoutMs?: number;
 }): Promise<ResumeSessionWorkState> {
   let parentState: SessionPendingState;
   try {
-    parentState = await sessionPendingState(client, repoDir, sessionID);
+    parentState = await boundedSessionPendingState(client, repoDir, sessionID, statusTimeoutMs);
   } catch {
     parentState = "unknown";
   }

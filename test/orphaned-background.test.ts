@@ -159,4 +159,17 @@ describe("resumeSessionWorkState", () => {
 
     expect(result).toBe("idle");
   });
+
+  test("can bound an unresponsive saved-session status check", async () => {
+    const repoDir = freshRepo();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 1 });
+
+    expect(result).toBe("unknown");
+  });
 });

@@ -17,6 +17,7 @@ import { runIteration, StepFailureError, type ResumeSession } from "./lib/orches
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
+  DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
   LOOPER_MANAGED_RESOURCES,
 } from "./lib/opencode-managed-resources.ts";
 import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
@@ -265,7 +266,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     const sessionID = plan.firstIterationResume?.sessionID;
     const messageID = plan.firstIterationResume?.messageID;
     if (sessionID === undefined || messageID === undefined) return;
-    const workState = await resumeSessionWorkState({ client, repoDir, sessionID });
+    const workState = await resumeSessionWorkState({ client, repoDir, sessionID, statusTimeoutMs: DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS });
     if (workState !== "running") return;
     applyResumePlan(plan);
     firstIterationWasResumed = plan.resumed;
