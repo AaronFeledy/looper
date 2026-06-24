@@ -796,9 +796,10 @@ export async function resumeSessionWorkState({
   statusTimeoutMs?: number;
   signal?: AbortSignal;
 }): Promise<ResumeSessionWorkState> {
+  const timeoutMs = statusTimeoutMs ?? serverRecoveryProbeTimeoutMs();
   let parentState: SessionPendingState;
   try {
-    parentState = await boundedSessionPendingState(client, repoDir, sessionID, statusTimeoutMs, signal);
+    parentState = await boundedSessionPendingState(client, repoDir, sessionID, timeoutMs, signal);
   } catch {
     parentState = "unknown";
   }
@@ -816,7 +817,7 @@ export async function resumeSessionWorkState({
     if (!markerStale) return "running";
 
     try {
-      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs: statusTimeoutMs, signal });
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs, signal });
       if (probe.errorMessage !== undefined) return "unknown";
       if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
       return probe.parent === "idle" ? "idle" : "unknown";

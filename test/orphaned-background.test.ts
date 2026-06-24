@@ -173,6 +173,26 @@ describe("resumeSessionWorkState", () => {
     expect(result).toBe("unknown");
   });
 
+  test("bounds saved-session status checks by default", async () => {
+    const originalProbeTimeout = process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+    process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
+    const repoDir = freshRepo();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    try {
+      const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+      expect(result).toBe("unknown");
+    } finally {
+      if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+      else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;
+    }
+  });
+
   test("honors aborts while probing saved-session status", async () => {
     const repoDir = freshRepo();
     const controller = new AbortController();
