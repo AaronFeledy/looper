@@ -20,7 +20,7 @@ import {
 } from "./runner.ts";
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
-import { extractAssistantModel, extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
+import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "./title.ts";
 
 function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
@@ -294,7 +294,7 @@ class TitleCoordinator {
       if (this.inflight !== undefined) return;
       const sid = this.getSessionID();
       if (sid === undefined) return;
-      this.inflight = this.runGeneration(sid);
+      this.inflight = this.runBranchTitle(sid) ?? this.runGeneration(sid);
     }, delaySeconds * 1000);
   };
 
@@ -318,7 +318,7 @@ class TitleCoordinator {
           return fromTimer;
         }
       }
-      return await this.runGeneration(finalSessionID);
+      return await (this.runBranchTitle(finalSessionID) ?? this.runGeneration(finalSessionID));
     } finally {
       this.clearTimers();
     }
@@ -341,8 +341,8 @@ class TitleCoordinator {
     const sid = this.getSessionID();
     if (sid === undefined) return; // session not bound yet; try again next tick
     this.clearBranchPoll();
-    this.log(`[looper] title gen: branch changed to ${hint}; firing title now`);
-    this.inflight = this.runGeneration(sid);
+    this.log(`[looper] title gen: branch changed to ${hint}; applying deterministic title now`);
+    this.inflight = this.applyDeterministicBranchTitle(sid, hint);
   }
 
   private clearTimers(): void {
@@ -362,6 +362,29 @@ class TitleCoordinator {
       clearInterval(this.branchPollTimer);
       this.branchPollTimer = undefined;
     }
+  }
+
+  private runBranchTitle(sessionID: string): Promise<string | undefined> | undefined {
+    if (this.mode.kind !== "branch") return undefined;
+    const hint = branchHintFor(this.getBranch());
+    if (hint === undefined) return undefined;
+    return this.applyDeterministicBranchTitle(sessionID, hint);
+  }
+
+  private async applyDeterministicBranchTitle(sessionID: string, branch: string): Promise<string | undefined> {
+    const desc = humanizeBranchName(branch);
+    if (desc.length === 0) return undefined;
+    if (!this.applied) {
+      this.applied = true;
+      this.appliedToSessionID = sessionID;
+      try {
+        await this.applyTitle(desc, sessionID);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[looper] title gen: applyTitle threw: ${message}`);
+      }
+    }
+    return desc;
   }
 
   private async runGeneration(sessionID: string): Promise<string | undefined> {

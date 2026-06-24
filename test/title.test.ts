@@ -938,7 +938,7 @@ describe("title orchestration", () => {
     expect(prompts[0]).not.toContain("[branch:");
   });
 
-  test("title: branch fires title gen when branch changes mid-step", async () => {
+  test("title: branch applies a deterministic branch title when branch changes mid-step", async () => {
     writeFileSync(
       join(configDir, "looper.yaml"),
       [
@@ -973,13 +973,12 @@ describe("title orchestration", () => {
       buildSessionID: "ses_build",
       reviewSessionID: "ses_review",
       titleSessionID: "ses_title",
-      titleText: "US-001 Feature",
+      titleText: "US-001 feature",
       capturedUpdates: captured,
       capturedDeletes: deletes,
       capturedTitlePrompts: prompts,
       streamPostHook: async () => {
         state.branch = "us-001-feature";
-        // Wait long enough for the 500ms branch poll + the title prompt round-trip + applyTitle.
         await Bun.sleep(800);
         midStepBuildTitle = state.steps[0]?.title;
         midStepCapturedCount = captured.length;
@@ -995,8 +994,8 @@ describe("title orchestration", () => {
     });
 
     expect(result).toBe("complete");
-    expect(prompts.length).toBeGreaterThan(0);
-    expect(prompts.some((text) => text.includes("[branch: us-001-feature]"))).toBe(true);
+    expect(prompts).toEqual([]);
+    expect(deletes).not.toContain("ses_title");
 
     // Mid-step assertions: title applied to TUI state AND opencode BEFORE step end.
     expect(midStepBuildTitle).toBe("US-001 Feature");
