@@ -40,6 +40,8 @@ CLI flags:
 Looper resumes the previous run by default. If you quit (or it stops) mid-run, the next start picks up at the
 same iteration and step. While a step is running, looper records its opencode session in `.looper-run.json`; on
 resume it reattaches to that session if it is still generating, otherwise it restarts the step in a fresh session.
+Manual recovery nudge is the exception: when the failed session is known and already idle, nudge sends its prompt
+to that existing session instead of creating a new one.
 A run that reaches `max_iterations` clears its checkpoint, so the next start begins a new run. Pass `--fresh` to
 ignore the checkpoint and start over from iteration 1.
 
