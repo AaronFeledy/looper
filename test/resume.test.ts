@@ -173,8 +173,8 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
           data: [
             { info: { id: "msg_old", role: "user" }, parts: [] },
             {
-              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 } },
-              parts: [],
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 }, tokens: { output: 1 } },
+              parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "done" }],
             },
           ],
         }),
@@ -215,8 +215,8 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
           data: [
             { info: { id: "msg_old", role: "user" }, parts: [] },
             {
-              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 } },
-              parts: [],
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 }, tokens: { output: 1 } },
+              parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "done" }],
             },
           ],
         }),

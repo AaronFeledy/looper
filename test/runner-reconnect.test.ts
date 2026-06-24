@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "../src/lib/event-consumer.ts";
-import { runOpenCodeStep, type Step } from "../src/lib/runner.ts";
+import { reattachOpenCodeStep, runOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { createLoopState } from "../src/lib/state.ts";
 
 const SID = "ses_reconnect";
@@ -18,7 +18,24 @@ function assistantUpdated(): Event {
 }
 
 function assistantDone(parentID: string): { info: unknown; parts: unknown[] } {
-  return { info: { id: "msg_done", role: "assistant", parentID, time: { completed: Date.now() } }, parts: [] };
+  return {
+    info: { id: "msg_done", role: "assistant", parentID, time: { completed: Date.now() }, tokens: { output: 1 } },
+    parts: [{ id: "prt_done", messageID: "msg_done", type: "text", text: "done" }],
+  };
+}
+
+function assistantEmpty(parentID: string): { info: unknown; parts: unknown[] } {
+  return {
+    info: {
+      id: "msg_empty",
+      role: "assistant",
+      parentID,
+      time: { completed: Date.now() },
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    },
+    parts: [{ id: "prt_start", messageID: "msg_empty", type: "step-start", snapshot: "" }],
+  };
 }
 
 function assistantFatalError(): { info: unknown; parts: unknown[] } {
@@ -146,6 +163,125 @@ describe("runOpenCodeStep event stream recovery", () => {
     const output = state.steps[0]?.outputLines ?? [];
     expect(output.some((line) => line.includes("hello"))).toBe(true);
     expect(output.some((line) => line.includes("resubscribed"))).toBe(true);
+  });
+
+  test("fails closed when opencode completes with only an empty assistant shell", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-empty-assistant-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let promptMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantEmpty(promptMessageID)] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("completed without assistant output");
+  });
+
+  test("keeps meaningful assistant completions successful", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-meaningful-assistant-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let promptMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantDone(promptMessageID)] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    expect(result.status).toBe("done");
+  });
+
+  test("reattach fails closed when the completed assistant message is empty", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-empty-assistant-"));
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantEmpty(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("completed without assistant output");
   });
 
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {

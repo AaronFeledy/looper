@@ -786,6 +786,7 @@ export async function waitForLoopContinuationIdle({
 
 export type AssistantClassification =
   | { kind: "done" }
+  | { kind: "empty"; errorMessage: string }
   | { kind: "failed"; errorMessage: string }
   | { kind: "in-progress" }
   | { kind: "missing" };
@@ -802,6 +803,28 @@ function isNonRetryableAssistantError(error: unknown): boolean {
   if (!isRecord(error)) return false;
   const data = isRecord(error.data) ? error.data : null;
   return data?.isRetryable === false;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function assistantHasMeaningfulActivity(entry: { info: unknown; parts?: unknown[] }): boolean {
+  const info = isRecord(entry.info) ? entry.info : {};
+  const tokens = isRecord(info.tokens) ? info.tokens : {};
+  if (numberValue(info.cost) > 0 || numberValue(tokens.output) > 0 || numberValue(tokens.reasoning) > 0) return true;
+
+  const parts = Array.isArray(entry.parts) ? entry.parts : [];
+  return parts.some((part) => {
+    if (!isRecord(part)) return false;
+    const type = part.type;
+    if (type === "text" || type === "reasoning") return stringValue(part.text) !== undefined;
+    return type === "tool" || type === "file" || type === "patch";
+  });
+}
+
+function emptyAssistantMessage(messageID: string): string {
+  return `assistant message ${messageID} completed without assistant output or tool activity`;
 }
 
 async function classifyAssistantForMessage(
@@ -832,7 +855,13 @@ async function classifyAssistantForMessage(
       tracked = { kind: "failed", errorMessage };
       continue;
     }
-    tracked = info.time.completed !== undefined ? { kind: "done" } : { kind: "in-progress" };
+    if (info.time.completed !== undefined) {
+      tracked = assistantHasMeaningfulActivity(entry)
+        ? { kind: "done" }
+        : { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(info.id) ?? parentMessageID) };
+    } else {
+      tracked = { kind: "in-progress" };
+    }
   }
   if (terminalError !== undefined) return terminalError;
   return tracked ?? { kind: "missing" };
@@ -1060,7 +1089,7 @@ export async function reattachOpenCodeStep({
     }
     return finalize("done");
   }
-  if (classification.kind === "failed") {
+  if (classification.kind === "failed" || classification.kind === "empty") {
     pushLine(`[error] reattach: ${classification.errorMessage}`);
     return finalize("failed", { errorMessage: classification.errorMessage });
   }
@@ -1291,9 +1320,9 @@ export async function runOpenCodeStep({
         if (sentMessageID !== undefined) {
           const cls = await classifyAssistantForMessage(client, repoDir, boundSessionID, sentMessageID);
           if (supervisorStopped || cancellation.action !== null) break;
-          if (cls.kind === "done" || cls.kind === "failed") {
+          if (cls.kind === "done" || cls.kind === "failed" || cls.kind === "empty") {
             const silentSeconds = Math.round((Date.now() - lastEventAt) / 1000);
-            const detail = cls.kind === "failed" ? `: ${cls.errorMessage}` : "";
+            const detail = cls.kind === "failed" || cls.kind === "empty" ? `: ${cls.errorMessage}` : "";
             watchdogStallReason = `event watchdog: session ${boundSessionID} idle with assistant message ${cls.kind}${detail} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
             pushLine(`[looper] ${watchdogStallReason}`);
             ctrl.abort();
@@ -1378,6 +1407,10 @@ export async function runOpenCodeStep({
   }
   if (finalError === undefined && cancellation.action === null && sessionEventError !== undefined) {
     finalError = sessionEventError;
+  }
+  if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
+    const classification = await classifyAssistantForMessage(client, repoDir, cancellation.activeSessionID, sentMessageID);
+    if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
   }
 
   const status: StepResult =
