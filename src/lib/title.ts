@@ -71,8 +71,9 @@ async function resolveHeuristicTitleModel({
     }
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
-    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated" && !isRollingLatestModel(m.id));
+    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
     if (models.length === 0) return undefined;
+    const stableModels = models.filter((m) => !isRollingLatestModel(m.id));
     const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
       if (pool.length === 0) return undefined;
       for (const fragment of PRIORITY_SMALL_MODELS) {
@@ -87,7 +88,7 @@ async function resolveHeuristicTitleModel({
     // reasoning pre-filter. Keep Looper's deliberate fallback to the cheapest
     // model so title generation does not inherit opencode's heavyweight default
     // when no priority fragment matches.
-    return pickCheap(models);
+    return pickCheap(stableModels) ?? pickCheap(models);
   } catch (error) {
     if (isAbort(error)) return undefined;
     log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
@@ -205,9 +206,7 @@ export function isBoilerplateTitle(title: string): boolean {
   if (/^(?:plan|tl;dr)\b:?/i.test(trimmed)) return true;
   if (/\bmode(?: enabled)?!?$/i.test(trimmed)) return true;
   if (/^(?:i['’]?ll|i['’]?m|i am|i need|i will|let me|now i|continuing|starting|beginning)\b/i.test(trimmed)) return true;
-  const letters = trimmed.replace(/[^A-Za-z]/g, "");
-  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-  return letters.length > 0 && wordCount <= 6 && letters === letters.toUpperCase();
+  return false;
 }
 
 function titleGenTimeoutMs(): number {
