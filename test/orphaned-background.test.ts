@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { waitForLoopContinuationIdle } from "../src/lib/runner.ts";
+import { resumeSessionWorkState, waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
 
@@ -121,5 +121,109 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("idle");
+  });
+});
+
+describe("resumeSessionWorkState", () => {
+  test("reports a busy saved foreground session as running", async () => {
+    const repoDir = freshRepo();
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("running");
+  });
+
+  test("reports a fresh active background marker as running even when the parent is idle", async () => {
+    const repoDir = freshRepo();
+    const dir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(dir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "active", reason: "1 background task(s) active", updatedAt: now } } }),
+    );
+    const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("running");
+  });
+
+  test("does not treat a stale orphaned background marker as running", async () => {
+    const repoDir = freshRepo();
+    writeActiveStaleRecord(repoDir);
+    const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("idle");
+  });
+
+  test("can bound an unresponsive saved-session status check", async () => {
+    const repoDir = freshRepo();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 1 });
+
+    expect(result).toBe("unknown");
+  });
+
+  test("bounds saved-session status checks by default", async () => {
+    const originalProbeTimeout = process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+    process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
+    const repoDir = freshRepo();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    try {
+      const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+      expect(result).toBe("unknown");
+    } finally {
+      if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+      else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;
+    }
+  });
+
+  test("honors aborts while probing saved-session status", async () => {
+    const repoDir = freshRepo();
+    const controller = new AbortController();
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const startedAt = Date.now();
+    const pending = resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 60_000, signal: controller.signal });
+    controller.abort(new Error("startup interrupted"));
+
+    const result = await pending;
+
+    expect(result).toBe("unknown");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  test("can bound stale marker live probes", async () => {
+    const repoDir = freshRepo();
+    writeActiveStaleRecord(repoDir);
+    const client = {
+      session: {
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        children: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, statusTimeoutMs: 1 });
+
+    expect(result).toBe("unknown");
   });
 });

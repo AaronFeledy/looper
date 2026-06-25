@@ -4,7 +4,7 @@ import { join, resolve, sep } from "node:path";
 
 import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { consumeSessionEvents, createSessionEventConsumer } from "./event-consumer.ts";
+import { createSessionEventConsumer } from "./event-consumer.ts";
 import {
   beginStepRun,
   finalizeStepRow,
@@ -68,6 +68,8 @@ type LiveBackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: 
 type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMessage?: string };
 
 export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
+export type ResumeSessionWorkState = "running" | "idle" | "unknown";
+export type SessionHealthState = SessionPendingState | "stopped";
 
 function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
@@ -105,8 +107,48 @@ const EVENT_RESUBSCRIBE_BACKOFF_MS = positiveIntegerEnv("LOOPER_EVENT_RESUBSCRIB
  * the server — so callers about to create a NEW session for a step must
  * confirm the old one actually stopped to avoid two concurrent generations.
  */
-const STOP_SESSION_CONFIRM_TIMEOUT_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", 10_000);
 const STOP_SESSION_CONFIRM_POLL_MS = positiveIntegerEnv("LOOPER_STOP_SESSION_POLL_MS", 250);
+const STOP_SESSION_CONFIRM_TIMEOUT_MS = 10_000;
+const SERVER_RECOVERY_DEFAULT_MAX_WAIT_MS = 10 * 60 * 1000;
+const SERVER_RECOVERY_DEFAULT_BACKOFF_BASE_MS = 2_000;
+const SERVER_RECOVERY_DEFAULT_BACKOFF_MAX_MS = 30_000;
+const SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+
+function stopSessionConfirmTimeoutMs(): number {
+  return positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", STOP_SESSION_CONFIRM_TIMEOUT_MS);
+}
+
+function serverRecoveryMaxWaitMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_MAX_WAIT_MS", SERVER_RECOVERY_DEFAULT_MAX_WAIT_MS);
+}
+
+function serverRecoveryBackoffBaseMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS", SERVER_RECOVERY_DEFAULT_BACKOFF_BASE_MS);
+}
+
+function serverRecoveryBackoffMaxMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS", SERVER_RECOVERY_DEFAULT_BACKOFF_MAX_MS);
+}
+
+function serverRecoveryProbeTimeoutMs(): number {
+  return positiveIntegerEnv("LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS", SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS);
+}
+
+function serverRecoveryDelayMs(attempt: number, remainingMs: number): number {
+  const base = serverRecoveryBackoffBaseMs();
+  const cap = serverRecoveryBackoffMaxMs();
+  const delay = Math.min(cap, base * 2 ** Math.max(0, attempt - 1));
+  return Math.min(delay, Math.max(1, remainingMs));
+}
+
+async function sleepUntilServerRecoveryRetry(ms: number, shouldStop?: () => boolean): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, ms);
+  while (Date.now() < deadline) {
+    if (shouldStop?.()) return false;
+    await Bun.sleep(Math.min(250, Math.max(1, deadline - Date.now())));
+  }
+  return true;
+}
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
@@ -355,6 +397,48 @@ export async function sessionPendingState(
   }
 }
 
+export async function waitForSessionHealth({
+  client,
+  repoDir,
+  sessionID,
+  maxWaitMs = serverRecoveryMaxWaitMs(),
+  log,
+  shouldStop,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  maxWaitMs?: number;
+  log?: (line: string) => void;
+  shouldStop?: () => boolean;
+}): Promise<SessionHealthState> {
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+  let attempt = 0;
+
+  while (true) {
+    if (shouldStop?.()) return "stopped";
+    const probeBudget = Math.min(serverRecoveryProbeTimeoutMs(), Math.max(1, deadline - Date.now()));
+    const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), probeBudget);
+    const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
+    if (state !== "unknown") {
+      if (attempt > 0) log?.(`[looper] server health recovered while checking session ${sessionID}; session is ${state}`);
+      return state;
+    }
+
+    if (shouldStop?.()) return "stopped";
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      log?.(`[looper] server still unavailable after ${Math.round(maxWaitMs / 1000)}s while checking session ${sessionID}`);
+      return "unknown";
+    }
+
+    attempt += 1;
+    const delay = serverRecoveryDelayMs(attempt, remaining);
+    log?.(`[looper] server unavailable while checking session ${sessionID}; retrying health check in ${Math.ceil(delay / 1000)}s`);
+    if (!(await sleepUntilServerRecoveryRetry(delay, shouldStop))) return "stopped";
+  }
+}
+
 const DEADLINE_EXCEEDED = Symbol("deadline-exceeded");
 
 /** Race a promise against a deadline. Returns the sentinel if it does not settle in time. */
@@ -369,6 +453,60 @@ async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | typ
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+function abortReason(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  return reason instanceof Error ? reason : new Error("operation aborted");
+}
+
+async function withAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return await promise;
+  if (signal.aborted) throw abortReason(signal);
+  let removeAbortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    removeAbortListener?.();
+  }
+}
+
+async function boundedSessionPendingState(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+  timeoutMs: number | undefined,
+  signal?: AbortSignal,
+): Promise<SessionPendingState> {
+  const pending = sessionPendingState(client, repoDir, sessionID);
+  const bounded = timeoutMs === undefined ? pending : withDeadline(pending, timeoutMs);
+  const result = await withAbortSignal(bounded, signal);
+  return result === DEADLINE_EXCEEDED ? "unknown" : result;
+}
+
+async function boundedBackgroundLivenessProbe({
+  client,
+  repoDir,
+  parentSessionID,
+  timeoutMs,
+  signal,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  parentSessionID: string;
+  timeoutMs: number | undefined;
+  signal?: AbortSignal;
+}): Promise<BackgroundLivenessProbe> {
+  const effectiveTimeoutMs = timeoutMs ?? serverRecoveryProbeTimeoutMs();
+  const result = await withAbortSignal(withDeadline(probeBackgroundLiveness({ client, repoDir, parentSessionID }), effectiveTimeoutMs), signal);
+  return result === DEADLINE_EXCEEDED
+    ? { parent: "unknown", pendingChildren: [], errorMessage: `background liveness probe timed out after ${effectiveTimeoutMs}ms` }
+    : result;
 }
 
 /**
@@ -396,7 +534,7 @@ export async function stopServerSession({
   client,
   repoDir,
   sessionID,
-  timeoutMs = STOP_SESSION_CONFIRM_TIMEOUT_MS,
+  timeoutMs,
   log,
 }: {
   client: OpencodeClient;
@@ -405,13 +543,14 @@ export async function stopServerSession({
   timeoutMs?: number;
   log?: (line: string) => void;
 }): Promise<boolean> {
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const effectiveTimeoutMs = timeoutMs ?? stopSessionConfirmTimeoutMs();
+  const deadline = Date.now() + Math.max(0, effectiveTimeoutMs);
   const remaining = (): number => deadline - Date.now();
 
   try {
     const aborted = await withDeadline(client.session.abort({ sessionID, directory: repoDir }), remaining());
     if (aborted === DEADLINE_EXCEEDED) {
-      log?.(`[looper] session.abort for ${sessionID} did not return within ${timeoutMs}ms; could not confirm stop`);
+      log?.(`[looper] session.abort for ${sessionID} did not return within ${effectiveTimeoutMs}ms; could not confirm stop`);
       return false;
     }
     if (aborted?.error) log?.(`[looper] session.abort failed for ${sessionID}: ${formatRequestError(aborted.error)}`);
@@ -419,15 +558,21 @@ export async function stopServerSession({
     log?.(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
   }
 
+  let unknownStatusAttempts = 0;
   while (true) {
     const probe = await withDeadline(sessionPendingState(client, repoDir, sessionID), remaining());
     const state = probe === DEADLINE_EXCEEDED ? "unknown" : probe;
     if (state === "idle") return true;
+    if (state === "unknown") unknownStatusAttempts += 1;
+    else unknownStatusAttempts = 0;
     if (remaining() <= 0) {
-      log?.(`[looper] session ${sessionID} still ${state} ${timeoutMs}ms after abort; could not confirm stop`);
+      log?.(`[looper] session ${sessionID} still ${state} ${effectiveTimeoutMs}ms after abort; could not confirm stop`);
       return false;
     }
-    await Bun.sleep(Math.min(STOP_SESSION_CONFIRM_POLL_MS, Math.max(1, remaining())));
+    const delay = state === "unknown"
+      ? serverRecoveryDelayMs(unknownStatusAttempts, remaining())
+      : Math.min(STOP_SESSION_CONFIRM_POLL_MS, Math.max(1, remaining()));
+    await Bun.sleep(delay);
   }
 }
 
@@ -638,6 +783,52 @@ async function probeBackgroundLiveness({
   return { parent, pendingChildren };
 }
 
+export async function resumeSessionWorkState({
+  client,
+  repoDir,
+  sessionID,
+  statusTimeoutMs,
+  signal,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  statusTimeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<ResumeSessionWorkState> {
+  const timeoutMs = statusTimeoutMs ?? serverRecoveryProbeTimeoutMs();
+  let parentState: SessionPendingState;
+  try {
+    parentState = await boundedSessionPendingState(client, repoDir, sessionID, timeoutMs, signal);
+  } catch {
+    parentState = "unknown";
+  }
+  if (parentState === "pending") return "running";
+
+  let record: RunContinuationRecord | null;
+  try {
+    record = readProjectContinuationRecord(repoDir, sessionID);
+  } catch {
+    record = null;
+  }
+  if (record !== null && record.source.state === "active") {
+    const updatedAt = Date.parse(record.source.updatedAt);
+    const markerStale = Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS;
+    if (!markerStale) return "running";
+
+    try {
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs, signal });
+      if (probe.errorMessage !== undefined) return "unknown";
+      if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
+      return probe.parent === "idle" ? "idle" : "unknown";
+    } catch {
+      return "unknown";
+    }
+  }
+
+  return parentState;
+}
+
 type BackgroundAgentPoller = { stop: () => void };
 
 function startBackgroundAgentPoller({
@@ -786,6 +977,7 @@ export async function waitForLoopContinuationIdle({
 
 export type AssistantClassification =
   | { kind: "done" }
+  | { kind: "empty"; errorMessage: string }
   | { kind: "failed"; errorMessage: string }
   | { kind: "in-progress" }
   | { kind: "missing" };
@@ -802,6 +994,28 @@ function isNonRetryableAssistantError(error: unknown): boolean {
   if (!isRecord(error)) return false;
   const data = isRecord(error.data) ? error.data : null;
   return data?.isRetryable === false;
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function assistantHasMeaningfulActivity(entry: { info: unknown; parts?: unknown[] }): boolean {
+  const info = isRecord(entry.info) ? entry.info : {};
+  const tokens = isRecord(info.tokens) ? info.tokens : {};
+  if (numberValue(info.cost) > 0 || numberValue(tokens.output) > 0 || numberValue(tokens.reasoning) > 0) return true;
+
+  const parts = Array.isArray(entry.parts) ? entry.parts : [];
+  return parts.some((part) => {
+    if (!isRecord(part)) return false;
+    const type = part.type;
+    if (type === "text" || type === "reasoning") return stringValue(part.text) !== undefined;
+    return type === "tool" || type === "file" || type === "patch";
+  });
+}
+
+function emptyAssistantMessage(messageID: string): string {
+  return `assistant message ${messageID} completed without assistant output or tool activity`;
 }
 
 async function classifyAssistantForMessage(
@@ -832,7 +1046,13 @@ async function classifyAssistantForMessage(
       tracked = { kind: "failed", errorMessage };
       continue;
     }
-    tracked = info.time.completed !== undefined ? { kind: "done" } : { kind: "in-progress" };
+    if (info.time.completed !== undefined) {
+      tracked = assistantHasMeaningfulActivity(entry)
+        ? { kind: "done" }
+        : { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(info.id) ?? parentMessageID) };
+    } else {
+      tracked = { kind: "in-progress" };
+    }
   }
   if (terminalError !== undefined) return terminalError;
   return tracked ?? { kind: "missing" };
@@ -945,18 +1165,19 @@ export async function reattachOpenCodeStep({
   let sessionEventError: Error | undefined;
   let timedOut = false;
   let consecutiveStatusErrors = 0;
+  const consumer = createSessionEventConsumer(sessionID, {
+    pushLine,
+    pushLines,
+    onSessionError: (message) => {
+      sessionEventError ??= new Error(`session.error: ${message}`);
+    },
+  });
 
   try {
     const sub = await client.event.subscribe({ directory: repoDir }, { signal: ctrl.signal });
     if (!sub.stream) throw new Error("event.subscribe returned no stream");
     pushLine(`[looper] subscribed to events for reattach`);
-    consumerPromise = consumeSessionEvents(sub.stream, sessionID, {
-      pushLine,
-      pushLines,
-      onSessionError: (message) => {
-        sessionEventError ??= new Error(`session.error: ${message}`);
-      },
-    }).catch((err) => {
+    consumerPromise = consumer.consume(sub.stream).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
       pushLine(`[error] event consumer crashed during reattach: ${error.message}`);
@@ -1011,6 +1232,15 @@ export async function reattachOpenCodeStep({
       ]).catch(() => undefined);
       if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
     }
+    try {
+      const timeoutMs = serverRecoveryProbeTimeoutMs();
+      const msgs = await withDeadline(client.session.messages({ sessionID, directory: repoDir }), timeoutMs);
+      if (msgs === DEADLINE_EXCEEDED) pushLine(`[looper] reattach backfill timed out after ${timeoutMs}ms`);
+      else if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
+    } catch (error) {
+      pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
+    }
+    consumer.flush();
   }
 
   const finalize = (
@@ -1060,7 +1290,7 @@ export async function reattachOpenCodeStep({
     }
     return finalize("done");
   }
-  if (classification.kind === "failed") {
+  if (classification.kind === "failed" || classification.kind === "empty") {
     pushLine(`[error] reattach: ${classification.errorMessage}`);
     return finalize("failed", { errorMessage: classification.errorMessage });
   }
@@ -1291,9 +1521,9 @@ export async function runOpenCodeStep({
         if (sentMessageID !== undefined) {
           const cls = await classifyAssistantForMessage(client, repoDir, boundSessionID, sentMessageID);
           if (supervisorStopped || cancellation.action !== null) break;
-          if (cls.kind === "done" || cls.kind === "failed") {
+          if (cls.kind === "done" || cls.kind === "failed" || cls.kind === "empty") {
             const silentSeconds = Math.round((Date.now() - lastEventAt) / 1000);
-            const detail = cls.kind === "failed" ? `: ${cls.errorMessage}` : "";
+            const detail = cls.kind === "failed" || cls.kind === "empty" ? `: ${cls.errorMessage}` : "";
             watchdogStallReason = `event watchdog: session ${boundSessionID} idle with assistant message ${cls.kind}${detail} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
             pushLine(`[looper] ${watchdogStallReason}`);
             ctrl.abort();
@@ -1378,6 +1608,10 @@ export async function runOpenCodeStep({
   }
   if (finalError === undefined && cancellation.action === null && sessionEventError !== undefined) {
     finalError = sessionEventError;
+  }
+  if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
+    const classification = await classifyAssistantForMessage(client, repoDir, cancellation.activeSessionID, sentMessageID);
+    if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
   }
 
   const status: StepResult =

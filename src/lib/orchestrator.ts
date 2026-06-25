@@ -7,17 +7,20 @@ import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
   reattachOpenCodeStep,
+  resumeSessionWorkState,
   runOpenCodeStep,
   sessionPendingState,
   stopServerSession,
+  waitForSessionHealth,
   waitForLoopContinuationIdle,
   type Step,
   type StepResult,
   type StepRunResult,
+  type SessionHealthState,
 } from "./runner.ts";
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
-import { extractAssistantModel, extractAssistantText, generateWorkDescription, setSessionTitle } from "./title.ts";
+import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "./title.ts";
 
 function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
@@ -192,7 +195,7 @@ function cleanRestartPrompt(step: Step, reason: StepRestartReason): string {
 }
 
 function recoveryNudgePrompt(step: Step): string {
-  return `Note: You are resuming after the previous attempt at this step failed and the run was paused for manual recovery. Inspect the existing workspace/state, diagnose why it failed, and continue from any useful work to finish the step. Do not blindly start over, and do not run work in the background — finish in the foreground.\n\n${promptText(step)}`;
+  return `Continue working to completion if you haven't already. If the work is already complete, report the result.\n\n${promptText(step)}`;
 }
 
 /**
@@ -291,7 +294,7 @@ class TitleCoordinator {
       if (this.inflight !== undefined) return;
       const sid = this.getSessionID();
       if (sid === undefined) return;
-      this.inflight = this.runGeneration(sid);
+      this.inflight = this.runBranchTitle(sid) ?? this.runGeneration(sid);
     }, delaySeconds * 1000);
   };
 
@@ -315,7 +318,7 @@ class TitleCoordinator {
           return fromTimer;
         }
       }
-      return await this.runGeneration(finalSessionID);
+      return await (this.runBranchTitle(finalSessionID) ?? this.runGeneration(finalSessionID));
     } finally {
       this.clearTimers();
     }
@@ -338,8 +341,8 @@ class TitleCoordinator {
     const sid = this.getSessionID();
     if (sid === undefined) return; // session not bound yet; try again next tick
     this.clearBranchPoll();
-    this.log(`[looper] title gen: branch changed to ${hint}; firing title now`);
-    this.inflight = this.runGeneration(sid);
+    this.log(`[looper] title gen: branch changed to ${hint}; applying deterministic title now`);
+    this.inflight = this.applyDeterministicBranchTitle(sid, hint);
   }
 
   private clearTimers(): void {
@@ -359,6 +362,29 @@ class TitleCoordinator {
       clearInterval(this.branchPollTimer);
       this.branchPollTimer = undefined;
     }
+  }
+
+  private runBranchTitle(sessionID: string): Promise<string | undefined> | undefined {
+    if (this.mode.kind !== "branch") return undefined;
+    const hint = branchHintFor(this.getBranch());
+    if (hint === undefined) return undefined;
+    return this.applyDeterministicBranchTitle(sessionID, hint);
+  }
+
+  private async applyDeterministicBranchTitle(sessionID: string, branch: string): Promise<string | undefined> {
+    const desc = humanizeBranchName(branch);
+    if (desc.length === 0) return undefined;
+    if (!this.applied) {
+      this.applied = true;
+      this.appliedToSessionID = sessionID;
+      try {
+        await this.applyTitle(desc, sessionID);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log(`[looper] title gen: applyTitle threw: ${message}`);
+      }
+    }
+    return desc;
   }
 
   private async runGeneration(sessionID: string): Promise<string | undefined> {
@@ -597,12 +623,15 @@ export async function runIteration({
     let pendingResult: StepRunResult | undefined;
     let suppressFailureRetry = false;
     let suppressReason: string | undefined;
+    let allowTerminalSessionToContinue = false;
     let failureRetryCount = 0;
     let reattachCount = 0;
     let resumeSessionID: string | undefined;
     let resumePrompt: string | undefined;
+    let recoveryNudgeActive = false;
     if (recoveryNudgePending) {
       recoveryNudgePending = false;
+      recoveryNudgeActive = true;
       resumePrompt = recoveryNudgePrompt(step);
     }
     let backgroundResumeCount = 0;
@@ -620,6 +649,42 @@ export async function runIteration({
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+    const failAfterUnrecoveredServer = (sessionID: string, stepIdx: number): StepRunResult => {
+      const reason = `server did not recover while checking session ${sessionID}; leaving the session alone so it can complete in the background`;
+      suppressFailureRetry = true;
+      suppressReason = reason;
+      allowTerminalSessionToContinue = true;
+      lastErrorMessage = reason;
+      logStepLine(stepIdx, `[looper] ${reason}`);
+      failStepRow(state, stepIdx, "failed");
+      return { status: "failed", sessionID, errorMessage: reason };
+    };
+    const stopAfterInterruptedHealthWait = (sessionID: string, stepIdx: number): StepRunResult => {
+      if (state.restartRequested) {
+        const reason = state.restartReason ?? "manual";
+        logStepLine(stepIdx, `[looper] server health check stopped by ${reason} restart request for session ${sessionID}`);
+        return { status: "restart", sessionID, restartReason: reason };
+      }
+      if (state.quitting || stopFileExists()) {
+        const reason = `stop requested while checking session ${sessionID}`;
+        lastErrorMessage = reason;
+        logStepLine(stepIdx, `[looper] ${reason}`);
+        failStepRow(state, stepIdx, "failed");
+        return { status: "failed", sessionID, errorMessage: reason };
+      }
+      logStepLine(stepIdx, `[looper] server health check stopped for session ${sessionID}`);
+      failStepRow(state, stepIdx, "skipped");
+      return { status: "skipped", sessionID };
+    };
+
+    const waitForRecoverableHealth = async (sessionID: string, stepIdx: number): Promise<SessionHealthState> =>
+      await waitForSessionHealth({
+        client,
+        repoDir,
+        sessionID,
+        log: (line) => logStepLine(stepIdx, line),
+        shouldStop: () => state.quitting || stopFileExists() || state.skipRequested || state.restartRequested,
+      });
 
     if (pendingResume !== undefined) {
       const resumeInfo = pendingResume;
@@ -627,8 +692,16 @@ export async function runIteration({
       const resumeSession = resumeInfo.sessionID;
       if (resumeSession !== undefined) {
         const stepMatches = resumeInfo.stepName === undefined || resumeInfo.stepName === step.name;
-        const pendingState = await sessionPendingState(client, repoDir, resumeSession);
-        if (stepMatches && pendingState === "pending" && resumeInfo.messageID !== undefined) {
+        let workState = await resumeSessionWorkState({ client, repoDir, sessionID: resumeSession });
+        if (stepMatches && workState === "unknown") {
+          const recovered = await waitForRecoverableHealth(resumeSession, currentStepIndex);
+          if (recovered === "stopped") {
+            pendingResult = stopAfterInterruptedHealthWait(resumeSession, currentStepIndex);
+          } else {
+            workState = recovered === "pending" ? "running" : recovered;
+          }
+        }
+        if (pendingResult === undefined && stepMatches && workState === "running" && resumeInfo.messageID !== undefined) {
           logStepLine(currentStepIndex, `[looper] resuming ${step.name}: session ${resumeSession} still active; reattaching`);
           lastPromptMessageID = resumeInfo.messageID;
           // onStepBegin's saveRunStatePosition just cleared the live session ids
@@ -652,10 +725,21 @@ export async function runIteration({
             sessionID: resumeSession,
             messageID: resumeInfo.messageID,
           });
-        } else if (stepMatches && pendingState === "idle") {
-          logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; restarting step in a fresh session`);
-        } else {
-          const why = !stepMatches ? "step changed since the session was recorded" : `prior session is ${pendingState}`;
+        } else if (pendingResult === undefined && stepMatches && workState === "idle") {
+          if (recoveryNudgeActive && resumeInfo.messageID !== undefined) {
+            logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
+            resumeSessionID = resumeSession;
+          } else {
+            logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; restarting step in a fresh session`);
+          }
+        } else if (pendingResult === undefined && stepMatches && workState === "unknown") {
+          pendingResult = failAfterUnrecoveredServer(resumeSession, currentStepIndex);
+        } else if (pendingResult === undefined) {
+          const why = !stepMatches
+            ? "step changed since the session was recorded"
+            : workState === "running"
+              ? "prior session is running but no messageID was recorded"
+              : `prior session is ${workState}`;
           logStepLine(currentStepIndex, `[looper] resuming ${step.name}: ${why}; confirming session ${resumeSession} is stopped before restarting`);
           if (!(await stopPriorSession(resumeSession, currentStepIndex))) {
             pendingResult = failAfterUnconfirmedStop(resumeSession, currentStepIndex, "restarting after resume");
@@ -836,12 +920,29 @@ export async function runIteration({
           lastPromptMessageID !== undefined &&
           reattachCount < MAX_REATTACH_PER_STEP
         ) {
-          const ev = await evaluatePriorSession({
+          let ev = await evaluatePriorSession({
             client,
             repoDir,
             sessionID: priorSessionForCheck,
             messageID: lastPromptMessageID,
           });
+          if (!ev.statusKnown && ev.classification.kind === "missing") {
+            const recovered = await waitForRecoverableHealth(priorSessionForCheck, currentStepIndex);
+            if (recovered === "stopped") {
+              pendingResult = stopAfterInterruptedHealthWait(priorSessionForCheck, currentStepIndex);
+              continue;
+            }
+            if (recovered === "unknown") {
+              result = failAfterUnrecoveredServer(priorSessionForCheck, currentStepIndex);
+              break;
+            }
+            ev = await evaluatePriorSession({
+              client,
+              repoDir,
+              sessionID: priorSessionForCheck,
+              messageID: lastPromptMessageID,
+            });
+          }
           const shouldReattach =
             ev.pending ||
             ev.classification.kind === "done" ||
@@ -866,7 +967,7 @@ export async function runIteration({
             });
             continue;
           }
-          if (ev.classification.kind === "failed") {
+          if (ev.classification.kind === "failed" || ev.classification.kind === "empty") {
             lastErrorMessage = ev.classification.errorMessage;
           }
         }
@@ -874,14 +975,23 @@ export async function runIteration({
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
 
         if (priorSessionID !== undefined) {
-          const pending = await sessionPendingState(client, repoDir, priorSessionID);
+          let pending: SessionHealthState = await sessionPendingState(client, repoDir, priorSessionID);
+          if (pending === "unknown") pending = await waitForRecoverableHealth(priorSessionID, currentStepIndex);
+          if (pending === "stopped") {
+            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
+            continue;
+          }
+          if (pending === "unknown") {
+            result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
+            break;
+          }
           if (pending !== "idle") {
             const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting before retrying in a fresh session`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
           }
-          if (!(await stopPriorSession(priorSessionID, currentStepIndex))) {
+          if (pending !== "idle" && !(await stopPriorSession(priorSessionID, currentStepIndex))) {
             result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "retrying in a fresh session");
             break;
           }
@@ -926,12 +1036,14 @@ export async function runIteration({
       // server-side after we surface the failure. Use a short budget when the
       // user is quitting so teardown stays responsive.
       const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
-      const terminalStopConfirmed = await stopPriorSession(
-        terminalSessionID,
-        currentStepIndex,
-        stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
-      );
-      if (!terminalStopConfirmed && terminalSessionID !== undefined) {
+      const terminalStopConfirmed = allowTerminalSessionToContinue
+        ? false
+        : await stopPriorSession(
+            terminalSessionID,
+            currentStepIndex,
+            stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
+          );
+      if ((allowTerminalSessionToContinue || !terminalStopConfirmed) && terminalSessionID !== undefined) {
         logStepLine(currentStepIndex, `[looper] ${step.name}: session ${terminalSessionID} may still be running after terminal failure`);
       }
       if (stopRequested) {

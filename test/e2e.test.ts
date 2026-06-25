@@ -459,8 +459,10 @@ test("reattach honors an older session-scoped active continuation record", async
             info: {
               role: "assistant",
               parentID: "msg_old",
+              tokens: { output: 1 },
               time: { completed: Date.now() },
             },
+            parts: [{ id: "prt_old", messageID: "msg_old", type: "text", text: "done" }],
           },
         ],
       }),
@@ -524,8 +526,10 @@ test("session-scoped continuation lookup rejects path traversal session IDs", as
             info: {
               role: "assistant",
               parentID: "msg_traversal",
+              tokens: { output: 1 },
               time: { completed: Date.now() },
             },
+            parts: [{ id: "prt_traversal", messageID: "msg_traversal", type: "text", text: "done" }],
           },
         ],
       }),

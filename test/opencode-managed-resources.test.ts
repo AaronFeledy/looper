@@ -24,6 +24,17 @@ function clientWithAgents(agents: Array<{ name: string }>): OpencodeClient {
   } as unknown as OpencodeClient;
 }
 
+function clientWithHangingAgents(): OpencodeClient {
+  return {
+    app: {
+      agents: (_parameters: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise((_, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason ?? new Error("aborted")), { once: true });
+        }),
+    },
+  } as unknown as OpencodeClient;
+}
+
 describe("opencode managed resources", () => {
   let xdg: string;
   let prevXdg: string | undefined;
@@ -159,6 +170,26 @@ describe("opencode managed resources", () => {
 
     expect(message).toContain("failed to check agents");
     expect(message).toContain("restart the opencode server");
+  });
+
+  test("assertion path times out unresponsive attached server agent discovery", async () => {
+    let message = "";
+    try {
+      await assertManagedOpencodeResourcesLoaded({
+        client: clientWithHangingAgents(),
+        repoDir: "/repo",
+        serverUrl: "http://127.0.0.1:4096",
+        timeoutMs: 5,
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("timed out after 5ms");
+    expect(message).toContain("http://127.0.0.1:4096");
+    expect(message).toContain("/repo");
+    expect(message).toContain("restart the opencode server");
+    expect(message).not.toContain("lock");
   });
 
   test("formats the restart prompt for missing managed agents", () => {

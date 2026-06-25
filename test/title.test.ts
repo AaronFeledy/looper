@@ -36,7 +36,7 @@ import { DEFAULT_STEP_TIMEOUT_MS } from "../src/lib/runner.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState } from "../src/lib/state.ts";
-import { extractAssistantText, generateWorkDescription, postprocessTitle } from "../src/lib/title.ts";
+import { extractAssistantText, generateWorkDescription, humanizeBranchName, isBoilerplateTitle, postprocessTitle, toBookTitleCase } from "../src/lib/title.ts";
 import { TITLE_AGENT_NAME } from "../src/lib/title-agent.ts";
 
 describe("postprocessTitle", () => {
@@ -65,6 +65,28 @@ describe("postprocessTitle", () => {
 
   test("returns empty when entire input is wrapped in <think>", () => {
     expect(postprocessTitle("<think>only reasoning</think>")).toBe("");
+  });
+});
+
+describe("title helpers", () => {
+  test("humanizes story branches in book title case", () => {
+    expect(humanizeBranchName("us-057-guide-frontmatter-schema")).toBe("US-057 Guide Frontmatter Schema");
+    expect(humanizeBranchName("fix-pg-pool-timeout")).toBe("Fix Pg Pool Timeout");
+  });
+
+  test("applies book title case while preserving technical tokens", () => {
+    expect(toBookTitleCase("dark mode toggle in app header")).toBe("Dark Mode Toggle in App Header");
+    expect(toBookTitleCase("runner.ts v2.3.1 500 error fix in JWT middleware")).toBe("runner.ts v2.3.1 500 Error Fix in JWT Middleware");
+  });
+
+  test("detects boilerplate titles", () => {
+    expect(isBoilerplateTitle("ULTRAWORK MODE ENABLED!")).toBe(true);
+    expect(isBoilerplateTitle("I'll handle this")).toBe(true);
+    expect(isBoilerplateTitle("Continuing where I left off")).toBe(true);
+    expect(isBoilerplateTitle("US-001")).toBe(false);
+    expect(isBoilerplateTitle("JWT API FIX")).toBe(false);
+    expect(isBoilerplateTitle("US-057 Guide Frontmatter Schema")).toBe(false);
+    expect(isBoilerplateTitle("500 Error Fix in JWT Middleware")).toBe(false);
   });
 });
 
@@ -121,7 +143,7 @@ describe("extractAssistantText", () => {
 });
 
 describe("generateWorkDescription agent selection", () => {
-  function stubClient(captured: { createAgents: Array<string | undefined>; promptAgents: Array<string | undefined> }) {
+  function stubClient(captured: { createAgents: Array<string | undefined>; promptAgents: Array<string | undefined> }, titleText = "A Title") {
     return {
       config: { get: async () => ({ data: {} }) },
       provider: { list: async () => ({ data: { all: [] } }) },
@@ -132,7 +154,7 @@ describe("generateWorkDescription agent selection", () => {
         },
         prompt: async (params: { agent?: string }) => {
           captured.promptAgents.push(params.agent);
-          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: "A Title" }] } };
+          return { data: { info: { role: "assistant" }, parts: [{ type: "text", text: titleText }] } };
         },
         abort: async () => ({}),
         delete: async () => ({}),
@@ -162,6 +184,37 @@ describe("generateWorkDescription agent selection", () => {
     });
     expect(captured.createAgents).toEqual(["my-custom-title-agent"]);
     expect(captured.promptAgents).toEqual(["my-custom-title-agent"]);
+  });
+
+  test("returns accepted model titles in book title case", async () => {
+    const captured = { createAgents: [] as Array<string | undefined>, promptAgents: [] as Array<string | undefined> };
+    const title = await generateWorkDescription({
+      client: stubClient(captured, "runner.ts 500 error fix in JWT middleware"),
+      repoDir: "/tmp/repo",
+      contextText: "fixed the title logic",
+    });
+    expect(title).toBe("runner.ts 500 Error Fix in JWT Middleware");
+  });
+
+  test("falls back to the humanized branch when the model returns boilerplate", async () => {
+    const captured = { createAgents: [] as Array<string | undefined>, promptAgents: [] as Array<string | undefined> };
+    const title = await generateWorkDescription({
+      client: stubClient(captured, "ULTRAWORK MODE ENABLED!"),
+      repoDir: "/tmp/repo",
+      contextText: "ULTRAWORK MODE ENABLED!",
+      branchHint: "us-057-guide-frontmatter-schema",
+    });
+    expect(title).toBe("US-057 Guide Frontmatter Schema");
+  });
+
+  test("rejects boilerplate model titles when no branch fallback exists", async () => {
+    const captured = { createAgents: [] as Array<string | undefined>, promptAgents: [] as Array<string | undefined> };
+    const title = await generateWorkDescription({
+      client: stubClient(captured, "I need to pause and gather context systematically before planning"),
+      repoDir: "/tmp/repo",
+      contextText: "startup narration",
+    });
+    expect(title).toBeUndefined();
   });
 
   test("aborts and deletes the title session when generation exceeds the timeout", async () => {
@@ -519,12 +572,12 @@ describe("title orchestration", () => {
 
     expect(result).toBe("complete");
     expect(captured).toEqual([
-      { sessionID: "ses_build", title: "Build: Widget X export" },
-      { sessionID: "ses_review", title: "Review: Widget X export" },
+      { sessionID: "ses_build", title: "Build: Widget X Export" },
+      { sessionID: "ses_review", title: "Review: Widget X Export" },
     ]);
     expect(deletes).toContain("ses_title");
-    expect(state.steps[0]?.title).toBe("Widget X export");
-    expect(state.steps[1]?.title).toBe("Widget X export");
+    expect(state.steps[0]?.title).toBe("Widget X Export");
+    expect(state.steps[1]?.title).toBe("Widget X Export");
   });
 
   test("resume seeds initialWorkDescription so an inherited-title step titles its fresh session", async () => {
@@ -637,7 +690,7 @@ describe("title orchestration", () => {
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
   });
 
-  test("hybrid: falls back to cheapest non-reasoning model when no curated match", async () => {
+  test("hybrid: falls back to cheapest model when no curated match", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -670,7 +723,7 @@ describe("title orchestration", () => {
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "cheap-chat" });
   });
 
-  test("hybrid: skips a curated-name model that is reasoning-capable", async () => {
+  test("hybrid: matches a curated-name model even when it is reasoning-capable", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -699,11 +752,11 @@ describe("title orchestration", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
     await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
 
-    expect(models).toContainEqual({ providerID: "anthropic", modelID: "plain-chat" });
-    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "plain-chat" });
   });
 
-  test("hybrid: skips a stale non-reasoning -latest alias for the live curated model (anthropic 404 regression)", async () => {
+  test("hybrid: takes the first priority-fragment match in provider order", async () => {
     writeTwoStepConfig();
     const models: Array<{ providerID: string; modelID: string } | undefined> = [];
     const client = makeStubClient({
@@ -733,8 +786,74 @@ describe("title orchestration", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
     await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
 
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5-20251001" });
+  });
+
+  test("hybrid: skips rolling latest aliases when resolving title models", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": { ...model("claude-haiku-4-5-20251001", true, 1), status: "deprecated" },
+              "claude-3-5-haiku-latest": model("claude-3-5-haiku-latest", false, 0.1),
+              "cheap-chat": model("cheap-chat", false, 0.25),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "cheap-chat" });
     expect(models).not.toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
-    expect(models.some((m) => m?.modelID.startsWith("claude-haiku-4-5"))).toBe(true);
+  });
+
+  test("hybrid: uses rolling latest aliases as a last resort", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-3-5-haiku-latest": model("claude-3-5-haiku-latest", false, 0.1),
+              "claude-sonnet-latest": model("claude-sonnet-latest", true, 1),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-3-5-haiku-latest" });
+    expect(models).not.toContain(undefined);
   });
 
   test("hybrid: falls back to a cheap reasoning model when the provider is reasoning-only", async () => {
@@ -768,6 +887,39 @@ describe("title orchestration", () => {
 
     expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5-nano" });
     expect(models).not.toContain(undefined);
+  });
+
+  test("hybrid: falls back to Anthropic provider metadata when only reasoning models are available", async () => {
+    writeTwoStepConfig();
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      stepProviderID: "anthropic",
+      stepModelID: "claude-opus-4-8",
+      providerList: {
+        all: [
+          {
+            id: "anthropic",
+            models: {
+              "claude-haiku-4-5-20251001": model("claude-haiku-4-5-20251001", true, 0.5),
+              "claude-sonnet-4-5-20250929": model("claude-sonnet-4-5-20250929", true, 2),
+              "claude-opus-4-8": model("claude-opus-4-8", true, 15),
+            },
+          },
+        ],
+      },
+    });
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
+
+    expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5-20251001" });
   });
 
   test("model error response deletes the title session and applies no title", async () => {
@@ -822,7 +974,7 @@ describe("title orchestration", () => {
     expect(result).toBe("complete");
     expect(prompts.length).toBeGreaterThan(0);
     expect(prompts[0]).toContain("[branch: us-057-guide-frontmatter-schema]");
-    expect(state.steps[0]?.title).toBe("US-057 guide frontmatter schema");
+    expect(state.steps[0]?.title).toBe("US-057 Guide Frontmatter Schema");
   });
 
   test("trivial branch names (main/master/etc) are NOT injected", async () => {
@@ -855,7 +1007,7 @@ describe("title orchestration", () => {
     expect(prompts[0]).not.toContain("[branch:");
   });
 
-  test("title: branch fires title gen when branch changes mid-step", async () => {
+  test("title: branch applies a deterministic branch title when branch changes mid-step", async () => {
     writeFileSync(
       join(configDir, "looper.yaml"),
       [
@@ -896,7 +1048,6 @@ describe("title orchestration", () => {
       capturedTitlePrompts: prompts,
       streamPostHook: async () => {
         state.branch = "us-001-feature";
-        // Wait long enough for the 500ms branch poll + the title prompt round-trip + applyTitle.
         await Bun.sleep(800);
         midStepBuildTitle = state.steps[0]?.title;
         midStepCapturedCount = captured.length;
@@ -912,20 +1063,20 @@ describe("title orchestration", () => {
     });
 
     expect(result).toBe("complete");
-    expect(prompts.length).toBeGreaterThan(0);
-    expect(prompts.some((text) => text.includes("[branch: us-001-feature]"))).toBe(true);
+    expect(prompts).toEqual([]);
+    expect(deletes).not.toContain("ses_title");
 
     // Mid-step assertions: title applied to TUI state AND opencode BEFORE step end.
-    expect(midStepBuildTitle).toBe("US-001 feature");
+    expect(midStepBuildTitle).toBe("US-001 Feature");
     expect(midStepCapturedCount).toBeGreaterThan(0);
     expect(captured.slice(0, midStepCapturedCount)).toContainEqual({
       sessionID: "ses_build",
-      title: "Build: US-001 feature",
+      title: "Build: US-001 Feature",
     });
 
     // End-of-iteration: Review inherited the description.
-    expect(state.steps[1]?.title).toBe("US-001 feature");
-    expect(captured).toContainEqual({ sessionID: "ses_review", title: "Review: US-001 feature" });
+    expect(state.steps[1]?.title).toBe("US-001 Feature");
+    expect(captured).toContainEqual({ sessionID: "ses_review", title: "Review: US-001 Feature" });
   });
 
   test("inherited title renames opencode session ~5s after first response, not at step end", async () => {
@@ -967,7 +1118,7 @@ describe("title orchestration", () => {
       expect(result).toBe("complete");
       expect(reviewMidStreamCaptured).toContainEqual({
         sessionID: "ses_review",
-        title: "Review: Widget X export",
+        title: "Review: Widget X Export",
       });
       expect(captured.filter((c) => c.sessionID === "ses_review")).toHaveLength(1);
     } finally {

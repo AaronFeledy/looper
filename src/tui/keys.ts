@@ -31,9 +31,22 @@ function normalizeKeyName(event: KeyEvent): string {
   return (event.name ?? "").toLowerCase().replaceAll("_", "").replaceAll(" ", "");
 }
 
-function isInterruptKey(event: KeyEvent): boolean {
+export function isInterruptKey(event: KeyEvent): boolean {
   const keyName = normalizeKeyName(event);
   return (event.ctrl && (keyName === "c" || keyName === "ctrlc")) || event.sequence === "\u0003" || event.raw === "\u0003";
+}
+
+export function installBootInterruptHandler(renderer: CliRenderer, onInterrupt: () => void): () => void {
+  const handleKeyPress = (event: KeyEvent): void => {
+    if (!isInterruptKey(event)) return;
+    onInterrupt();
+    if (typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  };
+
+  renderer.keyInput.on("keypress", handleKeyPress);
+  return () => renderer.keyInput.off("keypress", handleKeyPress);
 }
 
 function selectedStepIndex(state: LoopState): number | null {

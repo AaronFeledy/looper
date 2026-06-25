@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 export const TITLE_AGENT_NAME = "looper-title";
+export const DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS = 10_000;
 
 const TITLE_AGENT_MARKER = "managed by looper (looper-title)";
 const TITLE_AGENT_MARKER_LINE = `<!-- ${TITLE_AGENT_MARKER}: auto-generated; edits will be overwritten. -->`;
@@ -68,6 +69,52 @@ function formatError(error: unknown): string {
   } catch {
     return String(error);
   }
+}
+
+function configuredAttachValidationTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs !== undefined) return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
+  const raw = process.env["LOOPER_ATTACH_VALIDATION_TIMEOUT_MS"];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
+}
+
+function formatDuration(ms: number): string {
+  return ms % 1_000 === 0 ? `${ms / 1_000}s` : `${ms}ms`;
+}
+
+function timeoutMessage({ serverUrl, repoDir, timeoutMs }: { serverUrl: string; repoDir: string; timeoutMs: number }): string {
+  return [
+    `error: attached opencode server at ${serverUrl} did not respond while validating required agents for ${repoDir} (timed out after ${formatDuration(timeoutMs)}).`,
+    "",
+    "Please restart the opencode server, then launch looper again.",
+  ].join("\n");
+}
+
+function timeoutSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; dispose: () => void; timedOut: () => boolean } {
+  const controller = new AbortController();
+  let didTimeOut = false;
+  let disposed = false;
+  const timer = setTimeout(() => {
+    didTimeOut = true;
+    controller.abort(new Error(`timed out after ${formatDuration(timeoutMs)}`));
+  }, timeoutMs);
+  timer.unref?.();
+
+  const abortFromParent = () => controller.abort(parent?.reason ?? new Error("operation aborted"));
+  if (parent?.aborted) abortFromParent();
+  else parent?.addEventListener("abort", abortFromParent, { once: true });
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", abortFromParent);
+    },
+    timedOut: () => didTimeOut,
+  };
 }
 
 function resultError(result: object): unknown {
@@ -174,6 +221,7 @@ export function assertManagedOpencodeResourcesLoaded({
   resources = LOOPER_MANAGED_RESOURCES,
   requiredNames,
   signal,
+  timeoutMs,
 }: {
   client: OpencodeClient;
   repoDir: string;
@@ -181,8 +229,9 @@ export function assertManagedOpencodeResourcesLoaded({
   resources?: readonly ManagedOpencodeResource[];
   requiredNames?: readonly string[];
   signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<void> {
-  return assertLoadedResources({ client, repoDir, serverUrl, resources, requiredNames, signal });
+  return assertLoadedResources({ client, repoDir, serverUrl, resources, requiredNames, signal, timeoutMs });
 }
 
 export async function checkManagedOpencodeResourcesLoaded({
@@ -222,6 +271,7 @@ async function assertLoadedResources({
   resources,
   requiredNames,
   signal,
+  timeoutMs,
 }: {
   client: OpencodeClient;
   repoDir: string;
@@ -229,16 +279,24 @@ async function assertLoadedResources({
   resources: readonly ManagedOpencodeResource[];
   requiredNames?: readonly string[];
   signal?: AbortSignal;
+  timeoutMs?: number;
 }): Promise<void> {
   const filteredResources = requiredNames === undefined ? resources : resources.filter((resource) => requiredNames.includes(resource.name));
+  const validationTimeoutMs = configuredAttachValidationTimeoutMs(timeoutMs);
+  const validationSignal = timeoutSignal(signal, validationTimeoutMs);
 
   let result: ManagedOpencodeResourceCheckResult;
   try {
-    result = await checkManagedOpencodeResourcesLoaded({ client, repoDir, resources: filteredResources, signal });
+    result = await checkManagedOpencodeResourcesLoaded({ client, repoDir, resources: filteredResources, signal: validationSignal.signal });
   } catch (error) {
+    if (validationSignal.timedOut()) {
+      throw new ManagedOpencodeResourceError(timeoutMessage({ serverUrl, repoDir, timeoutMs: validationTimeoutMs }));
+    }
     throw new ManagedOpencodeResourceError(
       `error: failed to check agents on attached opencode server at ${serverUrl}: ${formatError(error)}\n\nPlease restart the opencode server, then launch looper again.`,
     );
+  } finally {
+    validationSignal.dispose();
   }
 
   const missingAgents = result.missing.filter((resource) => resource.kind === "agent").map((resource) => resource.name);

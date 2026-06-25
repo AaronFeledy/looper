@@ -34,13 +34,17 @@ function modelTotalCost(model: { cost?: { input?: number; output?: number } }): 
   return (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
 }
 
+function isRollingLatestModel(modelID: string): boolean {
+  return modelID.endsWith("-latest");
+}
+
 /**
  * Pick a cheap title model the way opencode resolves its hidden title agent
- * when `small_model` is unset: scope to the provider that ran the step, prefer
- * opencode's curated cheap-model names, then fall back to the cheapest
- * non-reasoning model that provider offers. opencode's `getSmallModel`
- * heuristic isn't reachable via the public API, so this reproduces it from the
- * provider/model list (which exposes per-model `reasoning` + `cost`).
+ * when `small_model` is unset: scope to the provider that ran the step, match
+ * opencode's curated cheap-model names directly against that provider's model
+ * list, then fall back to the cheapest model that provider offers. opencode's
+ * `getSmallModel` heuristic isn't reachable via the public API, so this
+ * reproduces it from the provider/model list.
  *
  * Returns undefined (caller falls through to opencode's heavyweight default)
  * when the provider can't be determined, the list can't be read, or no
@@ -67,17 +71,9 @@ async function resolveHeuristicTitleModel({
     }
     const provider = result.data.all.find((p) => p.id === providerID);
     if (!provider) return undefined;
-    const available = Object.values(provider.models).filter((m) => m.status !== "deprecated");
-    if (available.length === 0) return undefined;
-    // Drop rolling "-latest" aliases when any concrete snapshot id remains.
-    // models.dev keeps a provider's "<model>-latest" entry un-deprecated even
-    // after its underlying snapshot retires, so the API 404s on it (live case:
-    // anthropic claude-3-5-haiku-latest, while the dated claude-3-5-haiku
-    // snapshot is already flagged deprecated). Since non-reasoning models are
-    // preferred below, that dead alias was chosen over the live, variant-safe
-    // claude-haiku-4-5. Keep a -latest alias only as a last resort.
-    const concrete = available.filter((m) => !/-latest$/i.test(m.id));
-    const models = concrete.length > 0 ? concrete : available;
+    const models = Object.values(provider.models).filter((m) => m.status !== "deprecated");
+    if (models.length === 0) return undefined;
+    const stableModels = models.filter((m) => !isRollingLatestModel(m.id));
     const pickCheap = (pool: typeof models): ResolvedModel | undefined => {
       if (pool.length === 0) return undefined;
       for (const fragment of PRIORITY_SMALL_MODELS) {
@@ -87,13 +83,12 @@ async function resolveHeuristicTitleModel({
       const cheapest = pool.reduce((a, b) => (modelTotalCost(a) <= modelTotalCost(b) ? a : b));
       return { providerID: provider.id, modelID: cheapest.id };
     };
-    // Prefer non-reasoning models (reasoning ones can reject opencode's
-    // adaptive-thinking variant with a 400), but fall back to a cheap reasoning
-    // model rather than returning undefined: a reasoning-only provider (openai
-    // gpt-5.x) would otherwise fall through to opencode's heavyweight default,
-    // which is what ran the title agent on opus.
-    const nonReasoning = models.filter((m) => m.capabilities.reasoning === false);
-    return pickCheap(nonReasoning) ?? pickCheap(models);
+    // Match opencode's getSmallModel priority behavior: walk the curated
+    // fragments against all provider models in insertion order, without a
+    // reasoning pre-filter. Keep Looper's deliberate fallback to the cheapest
+    // model so title generation does not inherit opencode's heavyweight default
+    // when no priority fragment matches.
+    return pickCheap(stableModels) ?? pickCheap(models);
   } catch (error) {
     if (isAbort(error)) return undefined;
     log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
@@ -166,6 +161,54 @@ const TITLE_MAX_CHARS = 100;
 
 const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
 
+const TITLE_SMALL_WORDS = new Set(["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "the", "to", "vs", "via", "with"]);
+
+function shouldPreserveTitleToken(token: string): boolean {
+  return /[A-Z0-9./]/.test(token);
+}
+
+function capitalizeToken(token: string): string {
+  const lower = token.toLowerCase();
+  return lower.replace(/[A-Za-z]/, (letter) => letter.toUpperCase());
+}
+
+export function toBookTitleCase(text: string): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  return words
+    .map((word, index) => {
+      if (shouldPreserveTitleToken(word)) return word;
+      const lower = word.toLowerCase();
+      if (index > 0 && index < words.length - 1 && TITLE_SMALL_WORDS.has(lower)) return lower;
+      return capitalizeToken(word);
+    })
+    .join(" ");
+}
+
+export function humanizeBranchName(branch: string): string {
+  const parts = branch.trim().split(/[-_/]+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  const titleParts: string[] = [];
+  const first = parts[0]!;
+  const second = parts[1];
+  if (/^[A-Za-z]{1,6}$/.test(first) && second !== undefined && /^\d+$/.test(second)) {
+    titleParts.push(`${first.toUpperCase()}-${second}`);
+    titleParts.push(...parts.slice(2));
+  } else {
+    titleParts.push(...parts);
+  }
+  return toBookTitleCase(titleParts.join(" "));
+}
+
+export function isBoilerplateTitle(title: string): boolean {
+  const trimmed = title.trim();
+  if (trimmed.length === 0) return false;
+  if (/\bultra(?:work(?:er)?|think)\b/i.test(trimmed)) return true;
+  if (/^(?:plan|tl;dr)\b:?/i.test(trimmed)) return true;
+  if (/\bmode(?: enabled)?!?$/i.test(trimmed)) return true;
+  if (/^(?:i['’]?ll|i['’]?m|i am|i need|i will|let me|now i|continuing|starting|beginning)\b/i.test(trimmed)) return true;
+  return false;
+}
+
 function titleGenTimeoutMs(): number {
   const raw = Number(process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"]);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
@@ -193,11 +236,13 @@ Use the <examples> so you know what a good title looks like.
 Your output must be:
 - A single line
 - ≤50 characters
+- Book Title Case / headline case
 - No explanations
 </task>
 
 <rules>
 - Title must be grammatically correct and read naturally - no word salad.
+- Return the title in Book Title Case (headline case): capitalize major words, keep short connector words lowercase when they are not first or last, and preserve exact casing for story IDs, filenames, versions, HTTP codes, and established technical names.
 - Focus on the concrete subject of the work: the feature, bug, file, story ID, system, or refactor being executed.
 - IGNORE mode banners, role declarations, agent identity statements, status preambles, and meta narration. Examples that must NEVER become titles: "ULTRAWORKER MODE", "ULTRAWORK MODE", "ULTRATHINK", "Starting work", "I'll handle this", "Plan:", "TL;DR:", "Continuing where I left off", any single-line ALL-CAPS banner, any sentence whose only content is the agent's mode, identity, or current state.
 - If the log opens with such a banner, skip past it and title from the actual work that follows.
@@ -215,16 +260,16 @@ Your output must be:
 </rules>
 
 <examples>
-"ULTRAWORKER MODE\n\nReading spec/beta/prd.json to pick the next story. Selected US-057, checking out us-057-guide-frontmatter-schema..." → US-057 guide frontmatter schema
-"ULTRAWORK MODE\n\nFixed the 500 error in /api/users — the JWT middleware was throwing on null session cookies. Added a guard and a test." → 500 error fix in JWT middleware
-"Plan: refactor the user service to extract billing logic into its own module." → User service billing extraction
-"TL;DR: bumped @opencode-ai/sdk to v2.3.1 and adjusted the new prompt() signature across runner.ts and title.ts." → opencode-ai/sdk v2.3.1 bump
-"I'll handle the dark mode toggle. Added a theme context provider to App.tsx and wired the toggle into the header." → Dark mode toggle in App
-"Continuing where I left off. The migration script needs IF NOT EXISTS guards on every CREATE TABLE." → Migration IF NOT EXISTS guards
-"Investigating why pg connection times out. Pool config was missing max=10, fixed." → Postgres pool max fix
-"ULTRATHINK\n\nRan bun typecheck and bun test — both green. Committed feat: US-001 provider-lando Linux setup." → US-001 provider-lando Linux setup
-"[branch: us-057-guide-frontmatter-schema]\n\nULTRAWORKER MODE\n\nReading spec/beta/prd.json to decide which story to pick up." → US-057 guide frontmatter schema
-"[branch: fix-pg-pool-timeout]\n\nPlan: bump max=10 and add a backoff." → Fix pg pool timeout
+"ULTRAWORKER MODE\n\nReading spec/beta/prd.json to pick the next story. Selected US-057, checking out us-057-guide-frontmatter-schema..." → US-057 Guide Frontmatter Schema
+"ULTRAWORK MODE\n\nFixed the 500 error in /api/users — the JWT middleware was throwing on null session cookies. Added a guard and a test." → 500 Error Fix in JWT Middleware
+"Plan: refactor the user service to extract billing logic into its own module." → User Service Billing Extraction
+"TL;DR: bumped @opencode-ai/sdk to v2.3.1 and adjusted the new prompt() signature across runner.ts and title.ts." → @opencode-ai/sdk v2.3.1 Bump
+"I'll handle the dark mode toggle. Added a theme context provider to App.tsx and wired the toggle into the header." → Dark Mode Toggle in App
+"Continuing where I left off. The migration script needs IF NOT EXISTS guards on every CREATE TABLE." → Migration IF NOT EXISTS Guards
+"Investigating why pg connection times out. Pool config was missing max=10, fixed." → Postgres Pool Max Fix
+"ULTRATHINK\n\nRan bun typecheck and bun test — both green. Committed feat: US-001 provider-lando Linux setup." → US-001 Provider Lando Linux Setup
+"[branch: us-057-guide-frontmatter-schema]\n\nULTRAWORKER MODE\n\nReading spec/beta/prd.json to decide which story to pick up." → US-057 Guide Frontmatter Schema
+"[branch: fix-pg-pool-timeout]\n\nPlan: bump max=10 and add a backoff." → Fix Pg Pool Timeout
 </examples>`
 
 /**
@@ -417,7 +462,12 @@ export async function generateWorkDescription({
       log?.("[looper] title gen: title empty after postprocessing");
       return undefined;
     }
-    return cleaned;
+    if (isBoilerplateTitle(cleaned)) {
+      const fallback = branchHint !== undefined ? humanizeBranchName(branchHint) : "";
+      log?.(`[looper] title gen: rejected boilerplate title: ${cleaned}`);
+      return fallback.length > 0 ? fallback : undefined;
+    }
+    return toBookTitleCase(cleaned);
   } catch (error) {
     if (isAbort(error) && timedOut) {
       log?.(`[looper] title gen: exceeded ${timeoutMs}ms; aborting title session ${titleSessionID ?? "(uncreated)"}`);

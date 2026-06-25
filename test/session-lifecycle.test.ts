@@ -6,7 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { runIteration } from "../src/lib/orchestrator.ts";
-import { sessionPendingState, stopServerSession } from "../src/lib/runner.ts";
+import { sessionPendingState, stopServerSession, waitForSessionHealth } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
 
@@ -99,6 +99,52 @@ describe("sessionPendingState tri-state", () => {
       session: { status: async () => ({ data: { other: { type: "idle" } } }) },
     } as unknown as OpencodeClient;
     expect(await sessionPendingState(absent, "/x", "sid")).toBe("idle");
+  });
+});
+
+describe("waitForSessionHealth", () => {
+  const originalMaxWait = process.env.LOOPER_SERVER_RECOVERY_MAX_WAIT_MS;
+  const originalProbe = process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+  const originalBase = process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS;
+  const originalCap = process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS;
+
+  afterEach(() => {
+    if (originalMaxWait === undefined) delete process.env.LOOPER_SERVER_RECOVERY_MAX_WAIT_MS;
+    else process.env.LOOPER_SERVER_RECOVERY_MAX_WAIT_MS = originalMaxWait;
+    if (originalProbe === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
+    else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbe;
+    if (originalBase === undefined) delete process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS;
+    else process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS = originalBase;
+    if (originalCap === undefined) delete process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS;
+    else process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS = originalCap;
+  });
+
+  test("bounds hung status probes with the recovery deadline", async () => {
+    process.env.LOOPER_SERVER_RECOVERY_MAX_WAIT_MS = "20";
+    process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
+    process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS = "1";
+    process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS = "1";
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = await waitForSessionHealth({ client, repoDir: "/x", sessionID: "sid" });
+
+    expect(state).toBe("unknown");
+  });
+
+  test("reports user stop separately from unrecovered server", async () => {
+    const client = {
+      session: {
+        status: async () => await new Promise<never>(() => {}),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = await waitForSessionHealth({ client, repoDir: "/x", sessionID: "sid", shouldStop: () => true });
+
+    expect(state).toBe("stopped");
   });
 });
 

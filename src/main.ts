@@ -17,9 +17,11 @@ import { runIteration, StepFailureError, type ResumeSession } from "./lib/orches
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
+  DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
   LOOPER_MANAGED_RESOURCES,
 } from "./lib/opencode-managed-resources.ts";
-import type { Step } from "./lib/runner.ts";
+import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
+import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import { cancelPendingNotify, createLoopState, createStepRow, dismissEscConfirm, type EscConfirmMode, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
@@ -45,7 +47,7 @@ import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
 import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
 import { createHeader } from "./tui/header.ts";
-import { bindKeys } from "./tui/keys.ts";
+import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 
@@ -251,6 +253,35 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle } =
     computeResumePlan(steps);
 
+  const applyResumePlan = (plan: ResumePlan): void => {
+    startIteration = plan.startIteration;
+    firstIterationStartStepIndex = plan.firstIterationStartStepIndex;
+    firstIterationResume = plan.firstIterationResume;
+    firstIterationResumed = plan.resumed;
+    firstIterationTitle = plan.firstIterationTitle;
+  };
+
+  const autoStartIfSavedSessionRunning = async (client: ReturnType<typeof createOpencodeClient>): Promise<void> => {
+    if (!shouldAutoStartSavedSession({
+      started: state.started,
+      fresh: options.fresh,
+      stopFilePresent: stopFileExists(),
+      stopAfterIterationFilePresent: stopAfterIterationFileExists(),
+    })) return;
+    const plan = computeResumePlan(loadSteps(configDir));
+    const sessionID = plan.firstIterationResume?.sessionID;
+    const messageID = plan.firstIterationResume?.messageID;
+    if (sessionID === undefined || messageID === undefined) return;
+    const workState = await resumeSessionWorkState({ client, repoDir, sessionID, statusTimeoutMs: DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS, signal: bootAbort.signal });
+    if (workState !== "running") return;
+    applyResumePlan(plan);
+    firstIterationWasResumed = plan.resumed;
+    firstIterationResumePoint = plan.firstIterationStartStepIndex;
+    state.resumable = false;
+    clearStopFilesForNewRun();
+    state.started = true;
+  };
+
   // Snapshot the original resume point and "was resumed" flag computed from
   // on-disk state. These are used below to decide whether a manual Up/Down
   // selection that lands back on the checkpoint step should still pass
@@ -284,6 +315,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let booting = true;
   const bootAbort = new AbortController();
   let server: ServerHandle | undefined;
+  let cleanupBootInterrupt: (() => void) | undefined;
   let cleanupKeys: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let historyStreamer: { stop: () => void } | undefined;
@@ -316,15 +348,21 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   // Restore the terminal (raw mode / alt screen / mouse) before a hard exit so
   // the shell is left usable, then exit with the SIGINT convention code.
   let forceKilling = false;
+  const ignoreForceKillCleanupError = (_error: unknown): void => {};
   const forceKill = (): never => {
     if (!forceKilling) {
       forceKilling = true;
       try {
+        cleanupBootInterrupt?.();
         cleanupKeys?.();
-      } catch {}
+      } catch (error) {
+        ignoreForceKillCleanupError(error);
+      }
       try {
         renderer?.destroy();
-      } catch {}
+      } catch (error) {
+        ignoreForceKillCleanupError(error);
+      }
       void server?.close();
     }
     process.exit(130);
@@ -377,6 +415,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       targetFps: 30,
       maxFps: 30,
     });
+    cleanupBootInterrupt = installBootInterruptHandler(renderer, handleSigint);
     throwIfBootAborted();
 
     // Paint a status panel before the slow startup awaits below so the screen is
@@ -426,6 +465,10 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       });
       throwIfBootAborted();
     }
+
+    bootScreen.begin("Checking saved session");
+    await autoStartIfSavedSessionRunning(client);
+    throwIfBootAborted();
 
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
     historyStreamer = startHistoryStreamer({ state, client, repoDir });
@@ -574,6 +617,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       notify();
     };
 
+    cleanupBootInterrupt?.();
+    cleanupBootInterrupt = undefined;
+
     cleanupKeys = bindKeys(renderer, state, {
       onEscape: () => {
         handleEscape();
@@ -683,21 +729,22 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           return finish(1, exitReason ?? error.message);
         }
         recoveryNudgeNext = choice === "nudge";
+        const recoveryRunState = readRunState();
+        const recoveryResume = recoveryResumeForChoice({ choice, failedSessionID: error.sessionID, failedStepName: error.stepName, runState: recoveryRunState });
         // Retry the failed step in the SAME iteration. `continue` still runs the
         // loop's `iteration += 1`, so we pin `startIteration` to this iteration
         // and pre-decrement to cancel that increment; otherwise a single-iteration
         // run exits ("max iterations reached") and a multi-iteration run jumps to
-        // the next iteration from step 0. Both restart and nudge re-prompt a fresh
-        // session (the failed step's session is finished), so resume stays unset.
+        // the next iteration from step 0.
         const failedStepIndex = resumeStepIndex(loadSteps(configDir));
         startIteration = iteration;
         firstIterationStartStepIndex = failedStepIndex;
         firstIterationResumed = failedStepIndex > 0;
-        firstIterationResume = undefined;
+        firstIterationResume = recoveryResume;
         // Preserve any title generated earlier in this iteration so the
         // recovered step keeps applying it (the failed step's run-state write
         // carries it for inherited-title steps).
-        firstIterationTitle = readRunState()?.title;
+        firstIterationTitle = recoveryRunState?.title;
         disarmEscConfirm();
         clearStopFilesForNewRun();
         state.resumable = false;
@@ -727,6 +774,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     if (bootAbort.signal.aborted) return finish(130, exitReason ?? "looper startup interrupted");
     throw error;
   } finally {
+    cleanupBootInterrupt?.();
     cleanupKeys?.();
     backgroundAgentStreamer?.stop();
     historyStreamer?.stop();
