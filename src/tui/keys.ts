@@ -14,6 +14,7 @@ import {
   syncSelectionToActiveStep,
   toggleFocusedPane,
 } from "../lib/state.ts";
+import { tryOpenCurrentPr } from "./github-status.ts";
 
 export type KeyHooks = {
   onEscape: () => void;
@@ -153,9 +154,11 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     const action =
       keyName === "q"
         ? hooks.onQuit
-        : keyName === "g" || keyName === "return" || keyName === "enter"
-          ? hooks.onStart
-          : keyName === "e"
+        : (keyName === "return" || keyName === "enter") && state.focusedPane === "github"
+          ? () => tryOpenCurrentPr(state)
+          : keyName === "g" || keyName === "return" || keyName === "enter"
+            ? hooks.onStart
+            : keyName === "e"
             ? hooks.onStopAfterIteration
             : keyName === "p"
               ? hooks.onTogglePause

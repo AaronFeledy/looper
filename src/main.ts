@@ -498,8 +498,6 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       height: "100%",
       flexDirection: "column",
     });
-    leftColumn.add(stepList);
-
     bootScreen.begin("Detecting GitHub repository");
     const githubEnabled = await detectGithubRepo(repoDir);
     throwIfBootAborted();
@@ -511,6 +509,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         onUpdate: (status) => setGithubStatus(state, status),
       });
     }
+    leftColumn.add(stepList);
     bootScreen.done();
 
     root.add(createHeader(renderer, state));
