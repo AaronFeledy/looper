@@ -11,7 +11,7 @@ export type TerminalStepStatus = "done" | "failed" | "skipped";
  */
 export type FinalizeStepStatus = TerminalStepStatus | "restart";
 
-export type LoopPane = "steps" | "output";
+export type LoopPane = "steps" | "output" | "github";
 
 export type StepRestartReason = "manual" | "timeout";
 
@@ -317,6 +317,9 @@ export function createLoopState({
 export function setGithubStatus(state: LoopState, status: GithubStatus): void {
   if (JSON.stringify(state.github) === JSON.stringify(status)) return;
   state.github = status;
+  if (state.focusedPane === "github" && status.kind !== "pr") {
+    state.focusedPane = "steps";
+  }
   notifyStateChange();
 }
 
@@ -339,8 +342,15 @@ export function setFocusedPane(state: LoopState, focusedPane: LoopPane): void {
   notifyStateChange();
 }
 
+export function githubPrPanelVisible(state: LoopState): boolean {
+  return state.github.kind === "pr";
+}
+
 export function toggleFocusedPane(state: LoopState): LoopPane {
-  state.focusedPane = state.focusedPane === "steps" ? "output" : "steps";
+  const order: LoopPane[] = githubPrPanelVisible(state) ? ["steps", "github", "output"] : ["steps", "output"];
+  const index = order.indexOf(state.focusedPane);
+  const next = order[(index + 1) % order.length] ?? "steps";
+  state.focusedPane = next;
   notifyStateChange();
   return state.focusedPane;
 }

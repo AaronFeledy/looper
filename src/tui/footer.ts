@@ -22,7 +22,12 @@ function footerContent(state: LoopState): string {
     return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step`;
   }
 
-  const focusHint = state.focusedPane === "steps" ? "Tab: output  Up/Down: select" : "Tab: steps  Up/Down/PageUp/PageDown/Home/End: scroll";
+  const focusHint =
+    state.focusedPane === "steps"
+      ? "Tab: next pane  Up/Down: select"
+      : state.focusedPane === "github"
+        ? "Tab: next pane  Enter: open PR"
+        : "Tab: next pane  Up/Down/PageUp/PageDown/Home/End: scroll";
 
   const pause = state.paused ? "[p]aused — press p to resume" : "[p]ause";
   const end = state.stopAfterIteration ? "ending after iteration" : "[e]nd after iteration";

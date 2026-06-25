@@ -1,13 +1,15 @@
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
 
+import { openUrl } from "../lib/open-url.ts";
 import type { GithubStatus, LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
 import { formatRow, LIST_WIDTH } from "./step-list.ts";
+import { displayWidth, wrapDisplayLines } from "./text-layout.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PANEL_BORDER = 2;
 const PANEL_PADDING_X = 1;
-const TEXT_WIDTH = LIST_WIDTH - PANEL_BORDER - PANEL_PADDING_X * 2;
+export const GITHUB_PANEL_TEXT_WIDTH = LIST_WIDTH - PANEL_BORDER - PANEL_PADDING_X * 2;
 
 const COLOR_MUTED = "#6c7086";
 const COLOR_TITLE = "#a6adc8";
@@ -23,12 +25,12 @@ const COLOR_BUGBOT_ISSUES = "#fab387";
 
 type Line = { content: string; fg: string; attrs: number };
 
-function prStateLabel(status: Extract<GithubStatus, { kind: "pr" }>): string {
+export function prStateLabel(status: Extract<GithubStatus, { kind: "pr" }>): string {
   if (status.pr.isDraft && status.pr.state === "OPEN") return "draft";
   return status.pr.state.toLowerCase() || "open";
 }
 
-function prStateColor(status: Extract<GithubStatus, { kind: "pr" }>): string {
+export function prStateColor(status: Extract<GithubStatus, { kind: "pr" }>): string {
   if (status.pr.isDraft && status.pr.state === "OPEN") return COLOR_DRAFT;
   if (status.pr.state === "MERGED") return COLOR_MERGED;
   if (status.pr.state === "CLOSED") return COLOR_CLOSED;
@@ -39,16 +41,16 @@ function ciLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): L
   const { ciOverall, ciPassing, ciFailing, ciNeutral, ciTotal } = status.pr;
   if (ciOverall === "none") return { content: "no checks", fg: COLOR_MUTED, attrs: TextAttributes.NONE };
   if (ciOverall === "failing") {
-    return { content: formatRow("✗ failing", `${ciFailing}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
+    return { content: formatRow("✗ failing", `${ciFailing}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
   }
   if (ciOverall === "pending") {
     const done = ciPassing + ciFailing + ciNeutral;
-    return { content: formatRow(`${frame} running`, `${done}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
+    return { content: formatRow(`${frame} running`, `${done}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
   }
   if (ciOverall === "neutral") {
-    return { content: formatRow("~ neutral", `${ciNeutral}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
+    return { content: formatRow("~ neutral", `${ciNeutral}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
   }
-  return { content: formatRow("✓ passing", `${ciPassing}/${ciTotal}`, TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
+  return { content: formatRow("✓ passing", `${ciPassing}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
 }
 
 /**
@@ -60,7 +62,7 @@ function ciLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): L
 function neutralLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null {
   const { ciOverall, ciNeutral } = status.pr;
   if (ciNeutral <= 0 || ciOverall === "neutral") return null;
-  return { content: formatRow("~ neutral", `${ciNeutral}`, TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
+  return { content: formatRow("~ neutral", `${ciNeutral}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
 }
 
 /**
@@ -69,7 +71,7 @@ function neutralLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null
  */
 function mergeLine(status: Extract<GithubStatus, { kind: "pr" }>): Line | null {
   if (status.pr.mergeable !== "conflicting") return null;
-  return { content: formatRow("✗ merge", "conflicts", TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
+  return { content: formatRow("✗ merge", "conflicts", GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
 }
 
 /** Dedicated Bugbot line; null when no Bugbot check is attached to the PR. */
@@ -77,24 +79,42 @@ function bugbotLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string
   const bugbot = status.pr.bugbot;
   if (bugbot === undefined) return null;
   if (bugbot.state === "pending") {
-    return { content: formatRow(`${frame} bugbot`, "running", TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
+    return { content: formatRow(`${frame} bugbot`, "running", GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
   }
   if (bugbot.state === "error") {
-    return { content: formatRow("✗ bugbot", "error", TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
+    return { content: formatRow("✗ bugbot", "error", GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
   }
   if (bugbot.state === "issues") {
     const detail = bugbot.unresolved === undefined ? "issues" : `${bugbot.unresolved} unresolved`;
-    return { content: formatRow("● bugbot", detail, TEXT_WIDTH), fg: COLOR_BUGBOT_ISSUES, attrs: TextAttributes.NONE };
+    return { content: formatRow("● bugbot", detail, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_BUGBOT_ISSUES, attrs: TextAttributes.NONE };
   }
-  return { content: formatRow("✓ bugbot", "clean", TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
+  return { content: formatRow("✓ bugbot", "clean", GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PASS, attrs: TextAttributes.NONE };
 }
 
-function buildLines(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line[] {
-  const lines: Line[] = [
-    { content: formatRow(`#${status.pr.number}`, prStateLabel(status), TEXT_WIDTH), fg: prStateColor(status), attrs: TextAttributes.BOLD },
-    { content: status.pr.title, fg: COLOR_TITLE, attrs: TextAttributes.NONE },
-    ciLine(status, frame),
-  ];
+export function buildPrTitleLines(
+  status: Extract<GithubStatus, { kind: "pr" }>,
+  maxWidth: number = GITHUB_PANEL_TEXT_WIDTH,
+  maxLines: number = 2,
+): string[] {
+  const prefix = `[${prStateLabel(status)}] `;
+  const titleWidth = Math.max(1, maxWidth - displayWidth(prefix));
+  const wrapped = wrapDisplayLines(status.pr.title, titleWidth, maxLines);
+  return wrapped.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
+}
+
+export function tryOpenCurrentPr(state: LoopState): void {
+  if (state.github.kind !== "pr") return;
+  void openUrl(state.github.pr.url).catch(() => {});
+}
+
+export function buildGithubPrPanelLines(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line[] {
+  const titleLines = buildPrTitleLines(status);
+  const lines: Line[] = titleLines.map((content, index) => ({
+    content,
+    fg: index === 0 ? prStateColor(status) : COLOR_TITLE,
+    attrs: index === 0 ? TextAttributes.BOLD : TextAttributes.NONE,
+  }));
+  lines.push(ciLine(status, frame));
   const neutral = neutralLine(status);
   if (neutral !== null) lines.push(neutral);
   const merge = mergeLine(status);
@@ -116,10 +136,16 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
     border: true,
     borderStyle: "rounded",
     borderColor: "#45475a",
+    focusedBorderColor: "#89b4fa",
     title: "PR",
     titleAlignment: "left",
     paddingX: PANEL_PADDING_X,
     flexDirection: "column",
+    focusable: true,
+    onMouseUp(event) {
+      if (event.type !== "up" || event.button !== 0) return;
+      tryOpenCurrentPr(state);
+    },
   });
 
   let nextRowId = 0;
@@ -159,7 +185,10 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
     }
     if (!panel.visible) panel.visible = true;
     const frame = SPINNER[frameIndex % SPINNER.length]!;
-    const lines = buildLines(status, frame);
+    panel.title = `PR #${status.pr.number}`;
+    const isFocused = state.focusedPane === "github";
+    panel.borderColor = isFocused ? "#89b4fa" : "#45475a";
+    const lines = buildGithubPrPanelLines(status, frame);
     ensureRowCount(lines.length);
     lines.forEach((line, index) => {
       const row = rows[index];
