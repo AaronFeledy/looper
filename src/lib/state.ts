@@ -346,10 +346,23 @@ export function githubPrPanelVisible(state: LoopState): boolean {
   return state.github.kind === "pr";
 }
 
-export function toggleFocusedPane(state: LoopState): LoopPane {
-  const order: LoopPane[] = githubPrPanelVisible(state) ? ["steps", "github", "output"] : ["steps", "output"];
+function focusPaneCycle(state: LoopState): LoopPane[] {
+  return githubPrPanelVisible(state) ? ["steps", "github", "output"] : ["steps", "output"];
+}
+
+export function nextFocusedPane(state: LoopState): LoopPane {
+  const order = focusPaneCycle(state);
   const index = order.indexOf(state.focusedPane);
-  const next = order[(index + 1) % order.length] ?? "steps";
+  return order[(index + 1) % order.length] ?? "steps";
+}
+
+export function focusPaneTabLabel(pane: LoopPane): string {
+  if (pane === "github") return "PR";
+  return pane;
+}
+
+export function toggleFocusedPane(state: LoopState): LoopPane {
+  const next = nextFocusedPane(state);
   state.focusedPane = next;
   notifyStateChange();
   return state.focusedPane;

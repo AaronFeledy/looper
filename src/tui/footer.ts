@@ -1,7 +1,7 @@
 import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
-import { subscribe } from "../lib/state.ts";
+import { focusPaneTabLabel, nextFocusedPane, subscribe } from "../lib/state.ts";
 
 function footerContent(state: LoopState): string {
   if (state.escConfirm === "reset") {
@@ -14,20 +14,27 @@ function footerContent(state: LoopState): string {
     return `step failed — [r]estart  [n]udge  [q]uit`;
   }
   if (state.historyView !== null) {
-    const navHint = state.focusedPane === "steps" ? "Up/Down: step" : "Up/Down/PageUp/PageDown/Home/End: scroll";
-    return `[h] exit history  Left/Right: iteration  Tab: ${state.focusedPane === "steps" ? "output" : "steps"}  ${navHint}  [q]uit`;
+    const navHint =
+      state.focusedPane === "steps"
+        ? "Up/Down: step"
+        : state.focusedPane === "github"
+          ? "Enter: open PR"
+          : "Up/Down/PageUp/PageDown/Home/End: scroll";
+    const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
+    return `[h] exit history  Left/Right: iteration  Tab: ${tabTarget}  ${navHint}  [q]uit`;
   }
   if (!state.started) {
     const reset = state.resumable ? "  [esc] reset" : "";
     return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step`;
   }
 
+  const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
   const focusHint =
     state.focusedPane === "steps"
-      ? "Tab: next pane  Up/Down: select"
+      ? `Tab: ${tabTarget}  Up/Down: select`
       : state.focusedPane === "github"
-        ? "Tab: next pane  Enter: open PR"
-        : "Tab: next pane  Up/Down/PageUp/PageDown/Home/End: scroll";
+        ? `Tab: ${tabTarget}  Enter: open PR`
+        : `Tab: ${tabTarget}  Up/Down/PageUp/PageDown/Home/End: scroll`;
 
   const pause = state.paused ? "[p]aused — press p to resume" : "[p]ause";
   const end = state.stopAfterIteration ? "ending after iteration" : "[e]nd after iteration";
