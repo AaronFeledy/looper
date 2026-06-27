@@ -1047,9 +1047,11 @@ async function classifyAssistantForMessage(
       continue;
     }
     if (info.time.completed !== undefined) {
-      tracked = assistantHasMeaningfulActivity(entry)
-        ? { kind: "done" }
-        : { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(info.id) ?? parentMessageID) };
+      if (assistantHasMeaningfulActivity(entry)) {
+        tracked = { kind: "done" };
+      } else if (tracked?.kind !== "done") {
+        tracked = { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(info.id) ?? parentMessageID) };
+      }
     } else {
       tracked = { kind: "in-progress" };
     }

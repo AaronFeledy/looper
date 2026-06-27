@@ -252,6 +252,49 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(result.status).toBe("done");
   });
 
+  test("ignores trailing empty assistant placeholders after meaningful completions", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-meaningful-then-empty-assistant-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let promptMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantDone(promptMessageID), assistantEmpty(promptMessageID)] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    expect(result.status).toBe("done");
+  });
+
   test("reattach fails closed when the completed assistant message is empty", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-empty-assistant-"));
 
