@@ -1,4 +1,4 @@
-import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
+import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, bold, fg, t, type CliRenderer, type StyledText } from "@opentui/core";
 
 import { openUrl } from "../lib/open-url.ts";
 import type { GithubStatus, LoopState } from "../lib/state.ts";
@@ -23,7 +23,7 @@ const COLOR_PENDING = "#f9e2af";
 const COLOR_NEUTRAL = "#89b4fa";
 const COLOR_BUGBOT_ISSUES = "#fab387";
 
-type Line = { content: string; fg: string; attrs: number };
+type Line = { content: string; fg: string; attrs: number; styledContent?: StyledText };
 
 export function prStateLabel(status: Extract<GithubStatus, { kind: "pr" }>): string {
   if (status.pr.isDraft && status.pr.state === "OPEN") return "draft";
@@ -102,6 +102,13 @@ export function buildPrTitleLines(
   return wrapped.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
 }
 
+function buildStyledPrTitleLine(status: Extract<GithubStatus, { kind: "pr" }>, content: string, index: number): StyledText {
+  if (index !== 0) return t`${content}`;
+  const label = `[${prStateLabel(status)}]`;
+  const title = content.slice(label.length + 1);
+  return t`${bold(fg(prStateColor(status))(label))} ${bold(title)}`;
+}
+
 export function tryOpenCurrentPr(state: LoopState): void {
   if (state.github.kind !== "pr") return;
   void openUrl(state.github.pr.url).catch(() => {});
@@ -111,8 +118,9 @@ export function buildGithubPrPanelLines(status: Extract<GithubStatus, { kind: "p
   const titleLines = buildPrTitleLines(status);
   const lines: Line[] = titleLines.map((content, index) => ({
     content,
-    fg: index === 0 ? prStateColor(status) : COLOR_TITLE,
-    attrs: index === 0 ? TextAttributes.BOLD : TextAttributes.NONE,
+    fg: COLOR_TITLE,
+    attrs: TextAttributes.NONE,
+    styledContent: buildStyledPrTitleLine(status, content, index),
   }));
   lines.push(ciLine(status, frame));
   const neutral = neutralLine(status);
@@ -193,7 +201,7 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
     lines.forEach((line, index) => {
       const row = rows[index];
       if (!row) return;
-      row.content = line.content;
+      row.content = line.styledContent ?? line.content;
       row.fg = line.fg;
       row.attributes = line.attrs;
     });

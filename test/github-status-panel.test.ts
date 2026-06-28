@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { TextAttributes } from "@opentui/core";
 import type { GithubStatus } from "../src/lib/state.ts";
 import { buildGithubPrPanelLines, buildPrTitleLines } from "../src/tui/github-status.ts";
 import { displayWidth } from "../src/tui/text-layout.ts";
@@ -56,5 +57,15 @@ describe("buildGithubPrPanelLines", () => {
     expect(lines[0]!.content).toBe("[open] My pull request");
     expect(lines.some((line) => line.content.startsWith("#443"))).toBe(false);
     expect(lines.some((line) => line.content.includes("passing"))).toBe(true);
+  });
+
+  test("colors only the PR state segment in the title row", () => {
+    const first = buildGithubPrPanelLines(samplePr, "⠋")[0]!;
+
+    expect(first.fg).toBe("#a6adc8");
+    expect(first.attrs).toBe(TextAttributes.NONE);
+    expect(first.styledContent?.chunks.map((chunk) => chunk.text)).toEqual(["[open]", " ", "My pull request"]);
+    expect(first.styledContent?.chunks[0]?.fg).toBeDefined();
+    expect(first.styledContent?.chunks[2]?.fg).toBeUndefined();
   });
 });
