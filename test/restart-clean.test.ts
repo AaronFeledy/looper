@@ -97,6 +97,31 @@ function makeRestartClient({
   };
 }
 
+function makeMetadataClient({ repoDir }: { repoDir: string }): {
+  client: OpencodeClient;
+  createParams: Array<Record<string, unknown> | undefined>;
+} {
+  const createParams: Array<Record<string, unknown> | undefined> = [];
+  const client = {
+    session: {
+      create: async (params?: Record<string, unknown>) => {
+        createParams.push(params);
+        writeIdleContinuationRecord(repoDir, "ses_meta");
+        return { data: { id: "ses_meta" } };
+      },
+      prompt: async () => ({ data: {} }),
+      status: async () => ({ data: { ses_meta: { type: "idle" } } }),
+      messages: async () => ({ data: [] }),
+      children: async () => ({ data: [] }),
+      abort: async () => ({ data: {} }),
+    },
+    event: {
+      subscribe: async () => ({ stream: (async function* (): AsyncGenerator<never> {})() }),
+    },
+  } as unknown as OpencodeClient;
+  return { client, createParams };
+}
+
 function makeFailureRetryClient({ repoDir }: { repoDir: string }): {
   client: OpencodeClient;
   createdSessionIDs: string[];
@@ -188,6 +213,26 @@ describe("clean manual and timeout restarts", () => {
     expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
   });
 
+  test("created step sessions include structured looper metadata", async () => {
+    const { repoDir, configDir, state } = setup("1h");
+    const stub = makeMetadataClient({ repoDir });
+
+    const result = await runIteration({ state, iteration: 3, client: stub.client, repoDir, configDir, looperRunID: "run_meta" });
+
+    expect(result).toBe("complete");
+    expect(stub.createParams).toHaveLength(1);
+    expect(stub.createParams[0]?.metadata).toEqual({
+      looper: true,
+      looperRunID: "run_meta",
+      iteration: 3,
+      stepIndex: 0,
+      stepName: "Build",
+      configDir,
+      repoDir,
+      purpose: "step",
+    });
+  });
+
   test("timeout restart starts a new session instead of resuming the previous session", async () => {
     const { repoDir, configDir, state } = setup("1s");
     const stub = makeRestartClient({ repoDir, state, mode: "timeout" });
@@ -223,6 +268,17 @@ describe("clean manual and timeout restarts", () => {
     expect(stub.promptTexts[1]).toContain("ses_failed");
     expect(stub.promptTexts[1]).toContain("tail");
     expect(stub.promptTexts[1]).toContain("build from scratch\n");
+  }, 15000);
+
+  test("recovery snapshots option logs a safe retry boundary without reverting files", async () => {
+    const { repoDir, configDir, state } = setup("1h");
+    const stub = makeFailureRetryClient({ repoDir });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, recoverySnapshots: "before-retry" });
+
+    expect(result).toBe("complete");
+    expect(state.agentLines.some((line) => line.includes("recovery snapshot boundary") && line.includes("session=ses_failed"))).toBe(true);
+    expect(state.agentLines.every((line) => !line.includes("session.revert"))).toBe(true);
   }, 15000);
 
   test("prompt socket loss waits for server recovery and reattaches missed completed session", async () => {
