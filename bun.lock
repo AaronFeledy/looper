@@ -5,7 +5,7 @@
     "": {
       "name": "looper",
       "dependencies": {
-        "@opencode-ai/sdk": "1.15.4",
+        "@opencode-ai/sdk": "1.17.11",
         "@opentui/core": "0.2.13",
         "yaml": "2.9.0",
       },
@@ -18,7 +18,7 @@
     },
   },
   "packages": {
-    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.15.4", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-55SBChNouj2XY9C4thO0w7SGJS3jD2DRBxzcrDpc5szgmJJ2t2Wu38uZh+TQMBLHA8YrTPDqgfnc7o5tx2qRPw=="],
+    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.17.11", "", { "dependencies": { "cross-spawn": "7.0.6" } }, "sha512-UdSwnNM4/cD5rHnI8O7VaHuiwYnsEOglpRPVeeYE2S5Nm1K34ijCyZGDvBecb0ShdBQgn49XvyQWJH6cREsIPw=="],
 
     "@opentui/core": ["@opentui/core@0.2.13", "", { "dependencies": { "bun-ffi-structs": "0.2.2", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2", "yoga-layout": "3.2.1" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.2.13", "@opentui/core-darwin-x64": "0.2.13", "@opentui/core-linux-arm64": "0.2.13", "@opentui/core-linux-x64": "0.2.13", "@opentui/core-win32-arm64": "0.2.13", "@opentui/core-win32-x64": "0.2.13" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-CFnke/uhuekinVIkcyeVF62VC35I4OTrw5MXUlKU18mMsjb9U1pzB0oBJp3us1oCHKd/KuaeCnsRz4zhEPThKA=="],
 
