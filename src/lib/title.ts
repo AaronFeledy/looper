@@ -2,6 +2,7 @@ import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { TitleGenConfig } from "./config.ts";
 import { createOpencodeID } from "./runner.ts";
+import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "./session-metadata.ts";
 import { TITLE_AGENT_NAME } from "./title-agent.ts";
 
 function parseTitleModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
@@ -29,6 +30,13 @@ const PRIORITY_SMALL_MODELS = [
 ] as const;
 
 type ResolvedModel = { providerID: string; modelID: string };
+
+type ProviderLike = {
+  id: string;
+  integrationID?: string;
+  key?: string;
+  models?: Record<string, { id?: string; status?: string }>;
+};
 
 function modelTotalCost(model: { cost?: { input?: number; output?: number } }): number {
   return (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
@@ -135,6 +143,56 @@ async function resolveDefaultTitleModel({
   }
   if (providerID === undefined || providerID.length === 0) return undefined;
   return resolveHeuristicTitleModel({ client, repoDir, providerID, signal, log });
+}
+
+function providerDiagnostic(provider: ProviderLike | undefined): string {
+  if (provider === undefined) return "";
+  const integration = provider.integrationID;
+  return typeof integration === "string" && integration.length > 0 ? ` integration=${integration}` : "";
+}
+
+async function resolveConfiguredTitleModel({
+  client,
+  repoDir,
+  model,
+  signal,
+  log,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  model: string | undefined;
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+}): Promise<ResolvedModel | undefined | null> {
+  const parsed = parseTitleModel(model);
+  if (model !== undefined && parsed === undefined) {
+    log?.(`[looper] title gen: opencode.title.model ${model} must use provider/model format`);
+    return null;
+  }
+  if (parsed === undefined) return undefined;
+  try {
+    const result = await client.provider.list({ directory: repoDir }, { signal });
+    if (result.error || !result.data) {
+      log?.(`[looper] title gen: provider.list failed: ${formatError(result.error)}`);
+      return parsed;
+    }
+    const providers = (result.data as { all?: ProviderLike[] }).all ?? [];
+    const provider = providers.find((p) => p.id === parsed.providerID);
+    if (provider === undefined) {
+      log?.(`[looper] title gen: opencode.title.model ${model} provider is not available`);
+      return null;
+    }
+    const entry = provider.models?.[parsed.modelID];
+    if (entry === undefined || entry.status === "deprecated") {
+      log?.(`[looper] title gen: opencode.title.model ${model} is not available${providerDiagnostic(provider)}`);
+      return null;
+    }
+    return parsed;
+  } catch (error) {
+    if (isAbort(error)) return null;
+    log?.(`[looper] title gen: provider.list threw: ${formatError(error)}`);
+    return parsed;
+  }
 }
 
 /**
@@ -359,6 +417,7 @@ export async function generateWorkDescription({
   branchHint,
   config,
   sessionProviderID,
+  sessionMetadata,
   signal,
   log,
 }: {
@@ -384,6 +443,7 @@ export async function generateWorkDescription({
    * explicit title model is configured.
    */
   sessionProviderID?: string;
+  sessionMetadata?: LooperSessionMetadataInput;
   signal?: AbortSignal;
   log?: (line: string) => void;
 }): Promise<string | undefined> {
@@ -394,8 +454,10 @@ export async function generateWorkDescription({
   const userMessage = `${branchLine}${trimmed}`;
   const titleAgent = config?.agent ?? TITLE_AGENT_NAME;
   const titleVariant = config?.variant;
+  const configuredTitleModel = await resolveConfiguredTitleModel({ client, repoDir, model: config?.model, signal, log });
+  if (configuredTitleModel === null) return undefined;
   const titleModel =
-    parseTitleModel(config?.model) ??
+    configuredTitleModel ??
     (await resolveDefaultTitleModel({
       client,
       repoDir,
@@ -418,7 +480,12 @@ export async function generateWorkDescription({
   const genSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
   try {
     const created = await client.session.create(
-      { directory: repoDir, ...(titleAgent ? { agent: titleAgent } : {}) },
+      {
+        directory: repoDir,
+        ...(titleAgent ? { agent: titleAgent } : {}),
+        ...(sessionMetadata?.parentSessionID !== undefined ? { parentID: sessionMetadata.parentSessionID } : {}),
+        ...(sessionMetadata !== undefined ? { metadata: buildLooperSessionMetadata(sessionMetadata) } : {}),
+      },
       { signal: genSignal },
     );
     if (created.error || !created.data?.id) {
