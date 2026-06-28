@@ -55,28 +55,27 @@ function directoryFromResult(result: unknown): string | undefined {
   return typeof directory === "string" && directory.length > 0 ? directory : undefined;
 }
 
+async function readDirectoryFromEndpoint(getDirectory: (() => Promise<unknown>) | undefined): Promise<string | undefined> {
+  if (getDirectory === undefined) return undefined;
+  try {
+    return directoryFromResult(await getDirectory());
+  } catch {
+    return undefined;
+  }
+}
+
 async function readAttachedDirectory(client: OpencodeClient): Promise<string | undefined> {
   const maybeClient = client as unknown as {
     v2?: { location?: { get?: (parameters?: unknown) => Promise<unknown> } };
     path?: { get?: (parameters?: unknown) => Promise<unknown> };
   };
-  try {
-    const v2Get = maybeClient.v2?.location?.get;
-    if (v2Get !== undefined) {
-      const result = await v2Get();
-      const directory = directoryFromResult(result);
-      if (directory !== undefined) return directory;
-    }
-  } catch {
-    return undefined;
-  }
-  try {
-    const pathGet = maybeClient.path?.get;
-    if (pathGet === undefined) return undefined;
-    return directoryFromResult(await pathGet());
-  } catch {
-    return undefined;
-  }
+  const v2Location = maybeClient.v2?.location;
+  const v2Get = v2Location?.get;
+  const v2Directory = await readDirectoryFromEndpoint(v2Get === undefined ? undefined : () => v2Get());
+  if (v2Directory !== undefined) return v2Directory;
+  const path = maybeClient.path;
+  const pathGet = path?.get;
+  return await readDirectoryFromEndpoint(pathGet === undefined ? undefined : () => pathGet());
 }
 
 export async function assertAttachedServerLocation({

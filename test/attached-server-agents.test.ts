@@ -69,4 +69,29 @@ describe("attached server agent validation", () => {
     expect(message).toContain("/other");
     expect(message).toContain("/repo");
   });
+
+  test("falls back to legacy path location when v2 location throws", async () => {
+    const client = {
+      v2: {
+        location: {
+          get: async () => {
+            throw new Error("v2 location unavailable");
+          },
+        },
+      },
+      path: {
+        get: async () => ({ data: { directory: "/other" } }),
+      },
+    } as unknown as OpencodeClient;
+
+    let message = "";
+    try {
+      await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("attached opencode server is using a different directory");
+    expect(message).toContain("/other");
+  });
 });
