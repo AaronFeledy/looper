@@ -767,6 +767,39 @@ describe("title orchestration", () => {
     expect(logs.join("\n")).toContain("integration=int_openai");
   });
 
+  test("explicit title model preflight accepts catalog entries keyed separately from model ids", async () => {
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      providerList: {
+        all: [
+          {
+            id: "openai",
+            models: {
+              catalog_alias: { id: "gpt-5.5-nano", status: "active" },
+            },
+          },
+        ],
+      },
+    });
+
+    const title = await generateWorkDescription({
+      client,
+      repoDir: scratch,
+      contextText: "did some work",
+      config: { model: "openai/gpt-5.5-nano" },
+    });
+
+    expect(title).toBe("Widget X Export");
+    expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5.5-nano" });
+  });
+
   test("title preflight never logs provider keys", async () => {
     const logs: string[] = [];
     const client = {

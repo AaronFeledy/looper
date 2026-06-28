@@ -31,11 +31,13 @@ const PRIORITY_SMALL_MODELS = [
 
 type ResolvedModel = { providerID: string; modelID: string };
 
+type ProviderModelLike = { id?: string; status?: string };
+
 type ProviderLike = {
   id: string;
   integrationID?: string;
   key?: string;
-  models?: Record<string, { id?: string; status?: string }>;
+  models?: Record<string, ProviderModelLike>;
 };
 
 function modelTotalCost(model: { cost?: { input?: number; output?: number } }): number {
@@ -151,6 +153,12 @@ function providerDiagnostic(provider: ProviderLike | undefined): string {
   return typeof integration === "string" && integration.length > 0 ? ` integration=${integration}` : "";
 }
 
+function providerModelEntry(provider: ProviderLike, modelID: string): ProviderModelLike | undefined {
+  const models = provider.models;
+  if (models === undefined) return undefined;
+  return models[modelID] ?? Object.values(models).find((entry) => entry.id === modelID);
+}
+
 async function resolveConfiguredTitleModel({
   client,
   repoDir,
@@ -182,7 +190,7 @@ async function resolveConfiguredTitleModel({
       log?.(`[looper] title gen: opencode.title.model ${model} provider is not available`);
       return null;
     }
-    const entry = provider.models?.[parsed.modelID];
+    const entry = providerModelEntry(provider, parsed.modelID);
     if (entry === undefined || entry.status === "deprecated") {
       log?.(`[looper] title gen: opencode.title.model ${model} is not available${providerDiagnostic(provider)}`);
       return null;
