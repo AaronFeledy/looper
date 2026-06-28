@@ -50,6 +50,17 @@ function formatInput(input: Record<string, unknown>): string {
   return json.length <= 200 ? json : `${json.slice(0, 200)}…`;
 }
 
+function retainedOutputPath(state: { metadata?: Record<string, unknown> }, part: { metadata?: Record<string, unknown> }): string | undefined {
+  const metadata = state.metadata ?? part.metadata;
+  const candidates = [
+    metadata?.outputPath,
+    metadata?.retainedOutputPath,
+    metadata?.retainedPath,
+    metadata?.fullOutputPath,
+  ];
+  return candidates.find((value): value is string => typeof value === "string" && value.length > 0);
+}
+
 function color(code: string, text: string): string {
   if (process.env.NO_COLOR || (!process.stdout.isTTY && !process.stderr.isTTY)) return text;
   return `\u001b[${code}m${text}\u001b[0m`;
@@ -194,7 +205,7 @@ function handlePartUpdate(
     case "tool": {
       const prev = parts.get(part.id);
       const status = part.state.status;
-      const state = part.state as { input?: Record<string, unknown>; output?: string; error?: string };
+      const state = part.state as { input?: Record<string, unknown>; output?: string; error?: string; metadata?: Record<string, unknown> };
       const hasInput = state.input !== undefined && Object.keys(state.input).length > 0;
 
       if (prev && prev.kind === "tool" && prev.status === status) {
@@ -220,6 +231,8 @@ function handlePartUpdate(
           .filter((line) => line.length > 0);
         if (lines.length === 0) outputLines.push(groupLine(ui.dim("(no output)")));
         for (const line of lines) outputLines.push(groupLine(line));
+        const retainedPath = retainedOutputPath(state, part as { metadata?: Record<string, unknown> });
+        if (retainedPath !== undefined) outputLines.push(groupLine(`${ui.dim("retained full output:")} ${retainedPath}`));
         pushLines(outputLines);
       } else if (status === "error") {
         printCall();

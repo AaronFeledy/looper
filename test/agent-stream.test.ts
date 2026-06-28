@@ -41,6 +41,20 @@ describe("parseOutputBlocks — step markers and tool merge", () => {
     expect(tools[0]!.outputLines.join("\n")).toContain("clean");
   });
 
+  test("retained full-output path remains visible in the tool block", () => {
+    const lines = [
+      '◌ tool bash {"command":"big"}',
+      "╭─ Tool output · bash                 1:05 pm",
+      "│ truncated",
+      "│ retained full output: /tmp/full-output.txt",
+    ];
+    const blocks = parseOutputBlocks(lines, times(lines));
+    const tool = blocks.find((b): b is Extract<OutputBlock, { kind: "tool" }> => b.kind === "tool");
+
+    expect(tool).toBeDefined();
+    expect(tool!.outputLines).toContain("retained full output: /tmp/full-output.txt");
+  });
+
   test("a full step (start, tool, finish) yields start → tool → finish with the tool un-nested", () => {
     const lines = [
       "╭─ OpenCode step                      1:05 pm",
