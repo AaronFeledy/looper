@@ -75,6 +75,8 @@ opencode:
     model: openai/gpt-5.5-nano
     variant: low
 # attachUrl: http://127.0.0.1:4096  # top-level alias for opencode.serverUrl; used only if opencode.serverUrl is unset
+recovery:
+  snapshots: false                  # false | before-retry | before-retry-and-skip; logs safe recovery boundaries only
 
 steps:
   build:
@@ -115,6 +117,10 @@ The description is reused for every subsequent step in the same iteration (e.g. 
 Set `opencode.title.{agent,model,variant}` in `looper.yaml` to control the title-generation session; any subset may be set. When `model` is unset, looper auto-picks a cheap model (opencode's `small_model`, else the cheapest non-reasoning model for the step's provider). Looper logs the model that ran each call (`[looper] title gen used agent=… model=…/… cost=…`).
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the YAML value; `--attach` without a URL uses the YAML value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
+
+When attached to an existing server, looper checks the server's active location when the SDK exposes it and stops early if it points at a different project directory. If the server cannot provide location data, attach proceeds with the existing managed-agent validation.
+
+Set `recovery.snapshots` to log safe session/message boundaries before retry/restart (`before-retry`) or before retry/restart/skip (`before-retry-and-skip`). This is diagnostic only: looper does not call opencode revert APIs or roll back user file changes automatically.
 
 Steps run in declaration order. After each iteration the loop reloads `looper.yaml`, so you can edit it mid-run.
 
