@@ -1,10 +1,11 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
-import { loadSteps, type TitleGenConfig } from "./config.ts";
+import { loadSteps, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
 import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "./opencode-managed-resources.ts";
+import { assertAttachedServerLocation } from "./attached-server-agents.ts";
 import { createLoopState, notify, subscribe, type LoopState } from "./state.ts";
 import {
   clearResumeStepFile,
@@ -20,6 +21,7 @@ import {
 } from "./state-files.ts";
 import type { ResumeSession } from "./orchestrator.ts";
 import type { Step } from "./runner.ts";
+import { createLooperRunID } from "./session-metadata.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -28,6 +30,7 @@ export type FallbackOptions = {
   opencodeBin: string;
   attachUrl?: string;
   titleGenConfig?: TitleGenConfig;
+  recoverySnapshots?: RecoverySnapshotsConfig;
   currentBranch: () => Promise<string>;
 };
 
@@ -91,22 +94,22 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
-function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number): void {
+function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number, looperRunID?: string): void {
   const step = steps[stepIndex];
   if (step === undefined) return;
-  writeRunState({ iteration, stepIndex, stepName: step.name });
+  writeRunState({ iteration, stepIndex, stepName: step.name, ...(looperRunID !== undefined ? { looperRunID } : {}) });
 }
 
-function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number): void {
+function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number, looperRunID?: string): void {
   if (steps.length === 0) {
     clearRunStateFile();
     return;
   }
   if (nextIndex >= steps.length) {
-    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name });
+    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name, ...(looperRunID !== undefined ? { looperRunID } : {}) });
     return;
   }
-  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name });
+  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name, ...(looperRunID !== undefined ? { looperRunID } : {}) });
 }
 
 export async function waitWithCountdown(
@@ -135,6 +138,7 @@ export async function runNonTty({
   opencodeBin,
   attachUrl,
   titleGenConfig,
+  recoverySnapshots = false,
   currentBranch,
 }: FallbackOptions): Promise<void> {
   clearStopFile();
@@ -156,6 +160,7 @@ export async function runNonTty({
 
   try {
     if (attachUrl !== undefined) {
+      await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
       await assertManagedOpencodeResourcesLoaded({
         client,
         repoDir,
@@ -169,6 +174,7 @@ export async function runNonTty({
       configDir,
       client,
       ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
+      recoverySnapshots,
       currentBranch,
     });
   } finally {
@@ -182,6 +188,7 @@ async function runNonTtyIterations({
   configDir,
   client,
   titleGenConfig,
+  recoverySnapshots,
   currentBranch,
 }: {
   options: Options;
@@ -189,11 +196,13 @@ async function runNonTtyIterations({
   configDir: string;
   client: ReturnType<typeof createOpencodeClient>;
   titleGenConfig?: TitleGenConfig;
+  recoverySnapshots: RecoverySnapshotsConfig;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
   let startIteration = 1;
   let firstStartStepIndex = 0;
   let firstIterationResume: ResumeSession | undefined;
+  let looperRunID = readRunState()?.looperRunID ?? createLooperRunID();
   if (!options.fresh) {
     const runState = readRunState();
     if (runState !== null) {
@@ -218,6 +227,7 @@ async function runNonTtyIterations({
     firstIterationResume = undefined;
     clearResumeStepFile();
     clearRunStateFile();
+    looperRunID = createLooperRunID();
   }
 
   for (let iteration = startIteration; iteration <= options.maxIterations; iteration += 1) {
@@ -259,10 +269,12 @@ async function runNonTtyIterations({
       startStepIndex,
       ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
       ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
+      looperRunID,
+      recoverySnapshots,
       hooks: {
         onStepBegin: ({ step, index, totalSteps, iteration: stepIteration }) => {
           saveResumeStep(loadSteps(configDir), index);
-          saveRunStatePosition(stepIteration, loadSteps(configDir), index);
+          saveRunStatePosition(stepIteration, loadSteps(configDir), index, looperRunID);
           process.stdout.write(`\n${divider(`Step ${index + 1}/${totalSteps} · ${step.name}`, ui.green)}`);
           process.stdout.write(`${label("Agent", step.agent || "default")}\n`);
           process.stdout.write(`${label("Model", step.model || "default")}\n`);
@@ -270,12 +282,12 @@ async function runNonTtyIterations({
           process.stdout.write(`${label("Prompt", step.prompt)}\n`);
         },
         onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID }) => {
-          writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID });
+          writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID, looperRunID });
         },
         onStepFinish: ({ nextIndex, status, iteration: stepIteration }) => {
           if (status === "done") {
             saveNextResumeStep(loadSteps(configDir), nextIndex);
-            saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex);
+            saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex, looperRunID);
           }
         },
       },

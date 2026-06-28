@@ -27,8 +27,11 @@ type RawConfig = {
   opencode?: unknown;
   attachUrl?: unknown;
   timeout?: unknown;
+  recovery?: unknown;
   steps?: unknown;
 };
+
+export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
 
 /**
  * Optional overrides for the throwaway session that generates step titles.
@@ -48,6 +51,9 @@ export type TitleGenConfig = {
 export type RuntimeConfig = {
   opencodeServerUrl?: string;
   title?: TitleGenConfig;
+  recovery: {
+    snapshots: RecoverySnapshotsConfig;
+  };
 };
 
 function titleFromKey(key: string): string {
@@ -221,6 +227,22 @@ function parseTitleConfig(value: unknown): TitleGenConfig | undefined {
   };
 }
 
+function parseRecoverySnapshots(value: unknown): RecoverySnapshotsConfig {
+  if (value === undefined || value === null) return false;
+  if (value === false) return false;
+  if (value === "before-retry" || value === "before-retry-and-skip") return value;
+  throw new Error(`${CONFIG_FILE_NAME}.recovery.snapshots must be false, "before-retry", or "before-retry-and-skip"`);
+}
+
+function parseRecoveryConfig(value: unknown): RuntimeConfig["recovery"] {
+  if (value === undefined || value === null) return { snapshots: false };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${CONFIG_FILE_NAME}.recovery must be a mapping`);
+  }
+  const raw = value as { snapshots?: unknown };
+  return { snapshots: parseRecoverySnapshots(raw.snapshots) };
+}
+
 export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
@@ -234,9 +256,11 @@ export function loadRuntimeConfig(configDir: string): RuntimeConfig {
     title = parseTitleConfig(opencode.title);
   }
   opencodeServerUrl ??= optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl");
+  const recovery = parseRecoveryConfig(rawConfig.recovery);
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
+    recovery,
   };
 }
 

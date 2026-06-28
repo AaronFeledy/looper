@@ -172,6 +172,24 @@ describe("tool call line is emitted once per part", () => {
     expect(lines.some((line) => line.includes("Tool output · bash"))).toBe(true);
   });
 
+  test("completed tool output includes retained full-output path metadata", async () => {
+    const lines: string[] = [];
+    await consumeSessionEvents(
+      makeStream([
+        assistantMessageUpdated(),
+        toolPartUpdated("completed", {
+          input: { command: "big" },
+          output: "truncated",
+          metadata: { outputPath: "/tmp/full-output.txt", outputTruncated: true },
+        }),
+      ]),
+      SID,
+      { pushLine: (line) => lines.push(line) },
+    );
+
+    expect(lines.some((line) => line.includes("retained full output") && line.includes("/tmp/full-output.txt"))).toBe(true);
+  });
+
   test("pending(empty) then pending(with input) then completed still prints exactly one call line", async () => {
     const lines: string[] = [];
     await consumeSessionEvents(

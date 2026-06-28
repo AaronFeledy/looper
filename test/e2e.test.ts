@@ -288,6 +288,42 @@ test("rejects non-string opencode.title.model", () => {
   expect(() => loadRuntimeConfig(configDir)).toThrow(/opencode\.title\.model must be a string/);
 });
 
+test("parses recovery snapshot policy", () => {
+  const configDir = join(SCRATCH, "config-recovery-snapshots");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "recovery:",
+      "  snapshots: before-retry-and-skip",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(loadRuntimeConfig(configDir).recovery.snapshots).toBe("before-retry-and-skip");
+});
+
+test("rejects invalid recovery snapshot policy", () => {
+  const configDir = join(SCRATCH, "config-recovery-snapshots-bad");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, "looper.yaml"),
+    [
+      "recovery:",
+      "  snapshots: always",
+      "steps:",
+      "  noop:",
+      "    prompt: noop.md",
+      "",
+    ].join("\n"),
+  );
+
+  expect(() => loadRuntimeConfig(configDir)).toThrow(/recovery\.snapshots must be false, "before-retry", or "before-retry-and-skip"/);
+});
+
 test("resolves attach URLs with CLI taking precedence over looper.yaml", () => {
   expect(resolveAttachUrl(parseArgs([]), "http://127.0.0.1:4096", "http://default.local")).toBe("http://127.0.0.1:4096");
   expect(resolveAttachUrl(parseArgs(["--attach=http://127.0.0.1:5000"]), "http://127.0.0.1:4096", "http://default.local")).toBe(

@@ -55,6 +55,11 @@ describe("run-state file", () => {
     expect(readRunState()!.title).toBe("Widget X export");
   });
 
+  test("round-trips the looper run id used for session metadata", () => {
+    writeRunState({ iteration: 2, stepIndex: 1, stepName: "review", looperRunID: "looper-run-test" });
+    expect(readRunState()!.looperRunID).toBe("looper-run-test");
+  });
+
   test("omits the title field entirely when no title is set", () => {
     writeRunState({ iteration: 1, stepIndex: 0, stepName: "build" });
     expect(readRunState()!.title).toBeUndefined();

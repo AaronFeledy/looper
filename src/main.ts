@@ -6,7 +6,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
-import { AttachedServerAgentError } from "./lib/attached-server-agents.ts";
+import { assertAttachedServerLocation, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
 import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
@@ -22,6 +22,7 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
 import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
+import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import { cancelPendingNotify, createLoopState, createStepRow, dismissEscConfirm, type EscConfirmMode, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
@@ -154,23 +155,23 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
-function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number, title?: string): void {
+function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number, title?: string, looperRunID?: string): void {
   const step = steps[stepIndex];
   if (step === undefined) return;
-  writeRunState({ iteration, stepIndex, stepName: step.name, ...(title !== undefined ? { title } : {}) });
+  writeRunState({ iteration, stepIndex, stepName: step.name, ...(title !== undefined ? { title } : {}), ...(looperRunID !== undefined ? { looperRunID } : {}) });
 }
 
-function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number, title?: string): void {
+function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number, title?: string, looperRunID?: string): void {
   if (steps.length === 0) {
     clearRunStateFile();
     return;
   }
   if (nextIndex >= steps.length) {
     // Crossing into a new iteration: the prior iteration's title does not carry.
-    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name });
+    writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name, ...(looperRunID !== undefined ? { looperRunID } : {}) });
     return;
   }
-  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name, ...(title !== undefined ? { title } : {}) });
+  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name, ...(title !== undefined ? { title } : {}), ...(looperRunID !== undefined ? { looperRunID } : {}) });
 }
 
 function clearRunArtifactsForNewRun(): void {
@@ -193,6 +194,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const steps = loadSteps(configDir);
   if (options.start) clearStopFilesForNewRun();
   if (options.fresh) clearRunArtifactsForNewRun();
+  let looperRunID = readRunState()?.looperRunID ?? createLooperRunID();
 
   const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name) });
   state.branch = await currentBranch();
@@ -221,6 +223,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         const named = planSteps.findIndex((step) => step.name === runState.stepName);
         planStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(planSteps.length - 1, runState.stepIndex));
         planTitle = runState.title;
+        looperRunID = runState.looperRunID ?? looperRunID;
         if (runState.sessionID !== undefined) {
           planResume = {
             sessionID: runState.sessionID,
@@ -240,6 +243,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       planResumed = false;
       planTitle = undefined;
       clearRunArtifactsForNewRun();
+      looperRunID = createLooperRunID();
     }
     return {
       startIteration: planStartIteration,
@@ -455,6 +459,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     bootScreen.begin("Connecting client");
     const client = createOpencodeClient({ baseUrl: server.url });
     if (attachUrl !== undefined) {
+      bootScreen.begin("Validating server location");
+      await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
+      throwIfBootAborted();
       bootScreen.begin("Validating managed resources");
       await assertManagedOpencodeResourcesLoaded({
         client,
@@ -686,10 +693,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
           ...(recoveryNudgeForThisIteration ? { recoveryNudge: true } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
+          looperRunID,
+          recoverySnapshots: runtimeConfig.recovery.snapshots,
           hooks: {
             onStepBegin: ({ index, iteration: stepIteration, title }) => {
               saveResumeStep(loadSteps(configDir), index);
-              saveRunStatePosition(stepIteration, loadSteps(configDir), index, title);
+              saveRunStatePosition(stepIteration, loadSteps(configDir), index, title, looperRunID);
               // Step boundaries are common branch-change moments (the previous
               // step may have run `git checkout`); re-read HEAD immediately so
               // the header doesn't lag up to 5s behind reality.
@@ -697,12 +706,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
               githubWatcher?.refresh();
             },
             onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID, title }) => {
-              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID, ...(title !== undefined ? { title } : {}) });
+              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID, ...(title !== undefined ? { title } : {}), looperRunID });
             },
             onStepFinish: ({ nextIndex, status, iteration: stepIteration, title }) => {
               if (status === "done") {
                 saveNextResumeStep(loadSteps(configDir), nextIndex);
-                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex, title);
+                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex, title, looperRunID);
               }
               branchWatcher?.refresh();
               githubWatcher?.refresh();
@@ -744,6 +753,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         // recovered step keeps applying it (the failed step's run-state write
         // carries it for inherited-title steps).
         firstIterationTitle = recoveryRunState?.title;
+        looperRunID = recoveryRunState?.looperRunID ?? looperRunID;
         disarmEscConfirm();
         clearStopFilesForNewRun();
         state.resumable = false;
@@ -823,6 +833,7 @@ async function main(): Promise<number> {
       opencodeBin,
       attachUrl: resolveAttachUrl(options, runtimeConfig),
       ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
+      recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });
     return Number(process.exitCode ?? 0);
@@ -834,7 +845,7 @@ async function main(): Promise<number> {
 try {
   process.exitCode = Number(await main());
 } catch (error) {
-  if (error instanceof AttachedServerAgentError) {
+  if (error instanceof AttachedServerAgentError || error instanceof AttachedServerLocationError) {
     process.stderr.write(`${error.message}\n`);
   } else {
     process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);

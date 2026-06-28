@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
   assertAttachedServerAgentsLoaded,
+  assertAttachedServerLocation,
   formatAttachedServerAgentRestartPrompt,
 } from "../src/lib/attached-server-agents.ts";
 import { TITLE_AGENT_NAME } from "../src/lib/title-agent.ts";
@@ -46,5 +50,72 @@ describe("attached server agent validation", () => {
         missingAgents: [TITLE_AGENT_NAME],
       }),
     ).toContain(`required looper agent: ${TITLE_AGENT_NAME}`);
+  });
+
+  test("rejects attached server location mismatches when location data is available", async () => {
+    const client = {
+      v2: {
+        location: {
+          get: async () => ({ data: { directory: "/other", project: { id: "project", directory: "/other" } } }),
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    let message = "";
+    try {
+      await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("attached opencode server is using a different directory");
+    expect(message).toContain("/other");
+    expect(message).toContain("/repo");
+  });
+
+  test("falls back to legacy path location when v2 location throws", async () => {
+    const client = {
+      v2: {
+        location: {
+          get: async () => {
+            throw new Error("v2 location unavailable");
+          },
+        },
+      },
+      path: {
+        get: async () => ({ data: { directory: "/other" } }),
+      },
+    } as unknown as OpencodeClient;
+
+    let message = "";
+    try {
+      await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("attached opencode server is using a different directory");
+    expect(message).toContain("/other");
+  });
+
+  test("accepts matching attached server locations through symlinks", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "looper-attach-location-"));
+    try {
+      const repoDir = join(scratch, "repo");
+      const linkedRepoDir = join(scratch, "repo-link");
+      mkdirSync(repoDir);
+      symlinkSync(repoDir, linkedRepoDir, "dir");
+      const client = {
+        v2: {
+          location: {
+            get: async () => ({ data: { directory: linkedRepoDir } }),
+          },
+        },
+      } as unknown as OpencodeClient;
+
+      await assertAttachedServerLocation({ client, repoDir, serverUrl: "http://127.0.0.1:4096" });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

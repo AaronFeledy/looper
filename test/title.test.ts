@@ -186,6 +186,52 @@ describe("generateWorkDescription agent selection", () => {
     expect(captured.promptAgents).toEqual(["my-custom-title-agent"]);
   });
 
+  test("title sessions include looper metadata and a parent step session", async () => {
+    const createParams: Array<Record<string, unknown> | undefined> = [];
+    const client = {
+      config: { get: async () => ({ data: {} }) },
+      provider: { list: async () => ({ data: { all: [] } }) },
+      session: {
+        create: async (params?: Record<string, unknown>) => {
+          createParams.push(params);
+          return { data: { id: "ses_title" } };
+        },
+        prompt: async () => ({ data: { info: { role: "assistant" }, parts: [{ type: "text", text: "A Title" }] } }),
+        abort: async () => ({}),
+        delete: async () => ({}),
+      },
+    } as unknown as OpencodeClient;
+
+    await generateWorkDescription({
+      client,
+      repoDir: "/repo",
+      contextText: "did some work",
+      sessionMetadata: {
+        looperRunID: "run_title",
+        iteration: 4,
+        stepIndex: 2,
+        stepName: "Review",
+        configDir: "/cfg",
+        repoDir: "/repo",
+        purpose: "title",
+        parentSessionID: "ses_step",
+      },
+    });
+
+    expect(createParams[0]?.parentID).toBe("ses_step");
+    expect(createParams[0]?.metadata).toEqual({
+      looper: true,
+      looperRunID: "run_title",
+      iteration: 4,
+      stepIndex: 2,
+      stepName: "Review",
+      configDir: "/cfg",
+      repoDir: "/repo",
+      purpose: "title",
+      parentSessionID: "ses_step",
+    });
+  });
+
   test("returns accepted model titles in book title case", async () => {
     const captured = { createAgents: [] as Array<string | undefined>, promptAgents: [] as Array<string | undefined> };
     const title = await generateWorkDescription({
@@ -688,6 +734,132 @@ describe("title orchestration", () => {
     await runIteration({ state, iteration: 1, client, repoDir: scratch, configDir });
 
     expect(models).toContainEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+  });
+
+  test("explicit missing title model fails before creating a title session", async () => {
+    const logs: string[] = [];
+    const client = {
+      config: { get: async () => ({ data: {} }) },
+      provider: {
+        list: async () => ({
+          data: {
+            all: [{ id: "openai", integrationID: "int_openai", models: { "gpt-5.5": { id: "gpt-5.5", status: "active" } } }],
+          },
+        }),
+      },
+      session: {
+        create: async () => {
+          throw new Error("title session should not be created");
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const title = await generateWorkDescription({
+      client,
+      repoDir: "/repo",
+      contextText: "did some work",
+      config: { model: "openai/not-real" },
+      log: (line) => logs.push(line),
+    });
+
+    expect(title).toBeUndefined();
+    expect(logs.join("\n")).toContain("opencode.title.model openai/not-real is not available");
+    expect(logs.join("\n")).toContain("integration=int_openai");
+  });
+
+  test("explicit title model preflight accepts catalog entries keyed separately from model ids", async () => {
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      providerList: {
+        all: [
+          {
+            id: "openai",
+            models: {
+              catalog_alias: { id: "gpt-5.5-nano", status: "active" },
+            },
+          },
+        ],
+      },
+    });
+
+    const title = await generateWorkDescription({
+      client,
+      repoDir: scratch,
+      contextText: "did some work",
+      config: { model: "openai/gpt-5.5-nano" },
+    });
+
+    expect(title).toBe("Widget X Export");
+    expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5.5-nano" });
+  });
+
+  test("title preflight never logs provider keys", async () => {
+    const logs: string[] = [];
+    const client = {
+      config: { get: async () => ({ data: {} }) },
+      provider: {
+        list: async () => ({
+          data: {
+            all: [{ id: "openai", key: "sk-secret", models: {} }],
+          },
+        }),
+      },
+      session: {
+        create: async () => {
+          throw new Error("title session should not be created");
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const title = await generateWorkDescription({
+      client,
+      repoDir: "/repo",
+      contextText: "did some work",
+      config: { model: "openai/not-real" },
+      log: (line) => logs.push(line),
+    });
+
+    expect(title).toBeUndefined();
+    expect(logs.join("\n")).toContain("opencode.title.model openai/not-real is not available");
+    expect(logs.join("\n")).not.toContain("sk-secret");
+  });
+
+  test("provider-list failure keeps explicit title model fallback behavior", async () => {
+    const models: Array<{ providerID: string; modelID: string } | undefined> = [];
+    const logs: string[] = [];
+    const client = makeStubClient({
+      buildSessionID: "ses_build",
+      reviewSessionID: "ses_review",
+      titleSessionID: "ses_title",
+      titleText: "Widget X export",
+      capturedUpdates: [],
+      capturedDeletes: [],
+      capturedTitleModels: models,
+      providerList: undefined,
+    });
+    const failingProviderClient = {
+      ...client,
+      provider: { list: async () => ({ error: { message: "provider unavailable" } }) },
+    } as unknown as OpencodeClient;
+
+    const title = await generateWorkDescription({
+      client: failingProviderClient,
+      repoDir: scratch,
+      contextText: "did some work",
+      config: { model: "openai/gpt-5.5-nano" },
+      log: (line) => logs.push(line),
+    });
+
+    expect(title).toBe("Widget X Export");
+    expect(models).toContainEqual({ providerID: "openai", modelID: "gpt-5.5-nano" });
+    expect(logs.join("\n")).toContain("provider.list failed");
   });
 
   test("hybrid: falls back to cheapest model when no curated match", async () => {

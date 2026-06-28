@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { loadSteps, type TitleGenConfig } from "./config.ts";
+import { loadSteps, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
@@ -21,6 +21,7 @@ import {
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "./title.ts";
+import type { LooperSessionMetadataInput } from "./session-metadata.ts";
 
 function textEndsWithNewline(text: string): boolean {
   return text.endsWith("\n");
@@ -126,6 +127,8 @@ export type RunIterationOptions = {
    * instead of letting opencode auto-title from the prompt.
    */
   initialWorkDescription?: string;
+  looperRunID?: string;
+  recoverySnapshots?: RecoverySnapshotsConfig;
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -272,6 +275,7 @@ class TitleCoordinator {
     private readonly applyTitle: (desc: string, targetSessionID?: string) => Promise<void>,
     private readonly log: (line: string) => void,
     private readonly titleGenConfig: TitleGenConfig | undefined,
+    private readonly sessionMetadata: Omit<LooperSessionMetadataInput, "purpose" | "parentSessionID"> | undefined,
   ) {
     this.initialBranch = mode.kind === "branch" ? getBranch() : undefined;
     if (mode.kind === "branch") {
@@ -408,6 +412,9 @@ class TitleCoordinator {
         ...(branchHint !== undefined ? { branchHint } : {}),
         ...(this.titleGenConfig !== undefined ? { config: this.titleGenConfig } : {}),
         ...(stepModel !== undefined ? { sessionProviderID: stepModel.providerID } : {}),
+        ...(this.sessionMetadata !== undefined
+          ? { sessionMetadata: { ...this.sessionMetadata, purpose: "title", parentSessionID: sessionID } }
+          : {}),
         signal: this.controller.signal,
         log: this.log,
       });
@@ -444,6 +451,8 @@ export async function runIteration({
   titleGenConfig,
   resumedPriorSteps = false,
   initialWorkDescription,
+  looperRunID,
+  recoverySnapshots = false,
 }: RunIterationOptions): Promise<"complete" | "stopped"> {
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
@@ -462,6 +471,15 @@ export async function runIteration({
     pushAgentLine(state, line);
     pushStepOutputLine(state, stepIdx, line);
     notify();
+  };
+
+  const logRecoveryBoundary = (stepIdx: number, action: "retry" | "restart" | "skip", sessionID: string | undefined, messageID: string | undefined): void => {
+    if (recoverySnapshots === false) return;
+    if (action === "skip" && recoverySnapshots !== "before-retry-and-skip") return;
+    if (sessionID === undefined && messageID === undefined) return;
+    const session = sessionID === undefined ? "session=unavailable" : `session=${sessionID}`;
+    const message = messageID === undefined ? "message=unavailable" : `message=${messageID}`;
+    logStepLine(stepIdx, `[looper] recovery snapshot boundary before ${action}: ${session} ${message} (no file changes reverted)`);
   };
 
   const stopPriorSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
@@ -503,6 +521,17 @@ export async function runIteration({
     hooks?.onStepBegin?.({ step: steps[index]!, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 
     const step = steps[index]!;
+    const stepSessionMetadata = looperRunID === undefined
+      ? undefined
+      : {
+          looperRunID,
+          iteration,
+          stepIndex: index,
+          stepName: step.name,
+          configDir,
+          repoDir,
+          purpose: "step" as const,
+        };
 
     const titleConfig = step.title;
     let stepIndexForTitle = currentStepIndex;
@@ -550,6 +579,7 @@ export async function runIteration({
             applyTitle,
             titleLog,
             titleGenConfig,
+            stepSessionMetadata,
           );
 
     // Step has no own title config but the iteration already has a description
@@ -762,6 +792,7 @@ export async function runIteration({
           step,
           sessionID: resumeSessionID,
           timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+          ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
           onSessionBound: ({ sessionID, messageID }) =>
             hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, ...(workDescription !== undefined ? { title: workDescription } : {}) }),
           ...(titleCoordinator
@@ -883,6 +914,7 @@ export async function runIteration({
       if (result.status === "restart" && !state.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
         const priorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
+        logRecoveryBoundary(currentStepIndex, "restart", priorSessionID, lastPromptMessageID);
         // Confirm the prior session is actually aborted before creating the
         // fresh restart session, so the old run can't keep generating in
         // parallel with the new one.
@@ -907,6 +939,7 @@ export async function runIteration({
         else if (stopRequested) skipReason = "stop requested";
 
         if (skipReason !== undefined) {
+          logRecoveryBoundary(currentStepIndex, "skip", state.steps[currentStepIndex]?.sessionID, lastPromptMessageID);
           const line = `[looper] ${step.name} failed: ${errReason} \u2014 not retrying: ${skipReason}`;
           pushAgentLine(state, line);
           pushStepOutputLine(state, currentStepIndex, line);
@@ -973,6 +1006,7 @@ export async function runIteration({
         }
 
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
+        logRecoveryBoundary(currentStepIndex, "retry", priorSessionID, lastPromptMessageID);
 
         if (priorSessionID !== undefined) {
           let pending: SessionHealthState = await sessionPendingState(client, repoDir, priorSessionID);

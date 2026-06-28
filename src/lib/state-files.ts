@@ -192,6 +192,7 @@ export function resumeStepIndex(steps: NamedStep[]): number {
  * the pointer (across step advances within an iteration) so a resumed run can
  * re-apply the title to steps that only inherit it, and is dropped when the
  * pointer crosses into a new iteration.
+ * `looperRunID` identifies the process/logical run for SDK session metadata.
  */
 export type RunState = {
   iteration: number;
@@ -200,6 +201,7 @@ export type RunState = {
   sessionID?: string;
   messageID?: string;
   title?: string;
+  looperRunID?: string;
   updatedAt: string;
 };
 
@@ -210,6 +212,7 @@ export type RunStateInput = {
   sessionID?: string;
   messageID?: string;
   title?: string;
+  looperRunID?: string;
 };
 
 function parseRunState(value: unknown): RunState | null {
@@ -225,6 +228,7 @@ function parseRunState(value: unknown): RunState | null {
   const sessionID = typeof value.sessionID === "string" && value.sessionID.length > 0 ? value.sessionID : undefined;
   const messageID = typeof value.messageID === "string" && value.messageID.length > 0 ? value.messageID : undefined;
   const title = typeof value.title === "string" && value.title.length > 0 ? value.title : undefined;
+  const looperRunID = typeof value.looperRunID === "string" && value.looperRunID.length > 0 ? value.looperRunID : undefined;
   return {
     iteration,
     stepIndex,
@@ -232,6 +236,7 @@ function parseRunState(value: unknown): RunState | null {
     ...(sessionID !== undefined ? { sessionID } : {}),
     ...(messageID !== undefined ? { messageID } : {}),
     ...(title !== undefined ? { title } : {}),
+    ...(looperRunID !== undefined ? { looperRunID } : {}),
     updatedAt,
   };
 }
@@ -255,6 +260,7 @@ export function writeRunState(input: RunStateInput): void {
     ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}),
     ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
+    ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileAtomically(runStateFilePath(), `${JSON.stringify(record, null, 2)}\n`);

@@ -1,4 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import {
   assertManagedOpencodeResourcesLoaded,
@@ -10,6 +12,13 @@ import {
 export const REQUIRED_ATTACHED_SERVER_AGENTS = [TITLE_AGENT_NAME] as const;
 
 export { ManagedOpencodeResourceError as AttachedServerAgentError };
+
+export class AttachedServerLocationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttachedServerLocationError";
+  }
+}
 
 export function formatAttachedServerAgentRestartPrompt({
   serverUrl,
@@ -33,4 +42,65 @@ export async function assertAttachedServerAgentsLoaded({
   requiredAgents?: readonly string[];
 }): Promise<void> {
   await assertManagedOpencodeResourcesLoaded({ client, repoDir, serverUrl, requiredNames: requiredAgents });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function directoryFromResult(result: unknown): string | undefined {
+  if (!isRecord(result)) return undefined;
+  const data = result.data;
+  if (!isRecord(data)) return undefined;
+  const directory = data.directory;
+  return typeof directory === "string" && directory.length > 0 ? directory : undefined;
+}
+
+async function readDirectoryFromEndpoint(getDirectory: (() => Promise<unknown>) | undefined): Promise<string | undefined> {
+  if (getDirectory === undefined) return undefined;
+  try {
+    return directoryFromResult(await getDirectory());
+  } catch {
+    return undefined;
+  }
+}
+
+async function readAttachedDirectory(client: OpencodeClient): Promise<string | undefined> {
+  const maybeClient = client as unknown as {
+    v2?: { location?: { get?: (parameters?: unknown) => Promise<unknown> } };
+    path?: { get?: (parameters?: unknown) => Promise<unknown> };
+  };
+  const v2Location = maybeClient.v2?.location;
+  const v2Get = v2Location?.get;
+  const v2Directory = await readDirectoryFromEndpoint(v2Get === undefined ? undefined : () => v2Get());
+  if (v2Directory !== undefined) return v2Directory;
+  const path = maybeClient.path;
+  const pathGet = path?.get;
+  return await readDirectoryFromEndpoint(pathGet === undefined ? undefined : () => pathGet());
+}
+
+async function canonicalDirectory(directory: string): Promise<string> {
+  try {
+    return await realpath(directory);
+  } catch {
+    return resolve(directory);
+  }
+}
+
+export async function assertAttachedServerLocation({
+  client,
+  repoDir,
+  serverUrl,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  serverUrl: string;
+}): Promise<void> {
+  const attachedDirectory = await readAttachedDirectory(client);
+  if (attachedDirectory === undefined) return;
+  const [attachedCanonical, repoCanonical] = await Promise.all([canonicalDirectory(attachedDirectory), canonicalDirectory(repoDir)]);
+  if (attachedCanonical === repoCanonical) return;
+  throw new AttachedServerLocationError(
+    `attached opencode server is using a different directory (${attachedDirectory}) than this Looper repo (${repoDir}); restart or attach to the server for this workspace: ${serverUrl}`,
+  );
 }
