@@ -5,6 +5,7 @@ import { join, resolve, sep } from "node:path";
 import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "./event-consumer.ts";
+import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "./session-metadata.ts";
 import {
   beginStepRun,
   finalizeStepRow,
@@ -161,6 +162,7 @@ export type RunOpenCodeStepOptions = {
   onFirstAssistantContent?: () => void;
   onSessionBound?: (info: { sessionID: string; messageID: string }) => void;
   timeoutMsOverride?: number;
+  sessionMetadata?: LooperSessionMetadataInput;
 };
 
 function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
@@ -1316,6 +1318,7 @@ export async function runOpenCodeStep({
   onFirstAssistantContent,
   onSessionBound,
   timeoutMsOverride,
+  sessionMetadata,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -1414,7 +1417,11 @@ export async function runOpenCodeStep({
     if (sid === undefined) {
       pushLine(`[looper] creating session for ${step.name}`);
       const created = await client.session.create(
-        { directory: repoDir, ...(step.agent ? { agent: step.agent } : {}) },
+        {
+          directory: repoDir,
+          ...(step.agent ? { agent: step.agent } : {}),
+          ...(sessionMetadata !== undefined ? { metadata: buildLooperSessionMetadata(sessionMetadata) } : {}),
+        },
         { signal: ctrl.signal },
       );
       if (created.error) throw new Error(`session.create: ${formatRequestError(created.error)}`);
