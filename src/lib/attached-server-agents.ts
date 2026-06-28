@@ -1,4 +1,5 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
@@ -78,6 +79,14 @@ async function readAttachedDirectory(client: OpencodeClient): Promise<string | u
   return await readDirectoryFromEndpoint(pathGet === undefined ? undefined : () => pathGet());
 }
 
+async function canonicalDirectory(directory: string): Promise<string> {
+  try {
+    return await realpath(directory);
+  } catch {
+    return resolve(directory);
+  }
+}
+
 export async function assertAttachedServerLocation({
   client,
   repoDir,
@@ -89,7 +98,8 @@ export async function assertAttachedServerLocation({
 }): Promise<void> {
   const attachedDirectory = await readAttachedDirectory(client);
   if (attachedDirectory === undefined) return;
-  if (resolve(attachedDirectory) === resolve(repoDir)) return;
+  const [attachedCanonical, repoCanonical] = await Promise.all([canonicalDirectory(attachedDirectory), canonicalDirectory(repoDir)]);
+  if (attachedCanonical === repoCanonical) return;
   throw new AttachedServerLocationError(
     `attached opencode server is using a different directory (${attachedDirectory}) than this Looper repo (${repoDir}); restart or attach to the server for this workspace: ${serverUrl}`,
   );

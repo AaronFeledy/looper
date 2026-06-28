@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
@@ -93,5 +96,26 @@ describe("attached server agent validation", () => {
 
     expect(message).toContain("attached opencode server is using a different directory");
     expect(message).toContain("/other");
+  });
+
+  test("accepts matching attached server locations through symlinks", async () => {
+    const scratch = mkdtempSync(join(tmpdir(), "looper-attach-location-"));
+    try {
+      const repoDir = join(scratch, "repo");
+      const linkedRepoDir = join(scratch, "repo-link");
+      mkdirSync(repoDir);
+      symlinkSync(repoDir, linkedRepoDir, "dir");
+      const client = {
+        v2: {
+          location: {
+            get: async () => ({ data: { directory: linkedRepoDir } }),
+          },
+        },
+      } as unknown as OpencodeClient;
+
+      await assertAttachedServerLocation({ client, repoDir, serverUrl: "http://127.0.0.1:4096" });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });
