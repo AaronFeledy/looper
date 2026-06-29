@@ -6,8 +6,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "../src/lib/event-consumer.ts";
+import { runIteration } from "../src/lib/orchestrator.ts";
 import { reattachOpenCodeStep, runOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { createLoopState } from "../src/lib/state.ts";
+import { initStatePaths } from "../src/lib/state-files.ts";
 
 const SID = "ses_reconnect";
 const MID = "msg_a";
@@ -57,8 +59,41 @@ function textPartUpdated(text: string): Event {
   } as unknown as Event;
 }
 
+function permissionAsked(requestID: string, permission: string, sessionID = SID): Event {
+  return {
+    type: "permission.asked",
+    properties: { id: requestID, sessionID, permission, patterns: ["file.txt"], metadata: { filepath: "file.txt" } },
+  } as unknown as Event;
+}
+
+function questionAsked(requestID: string, sessionID = SID): Event {
+  return {
+    type: "question.asked",
+    properties: { id: requestID, sessionID, questions: [{ question: "Pick one", options: [{ label: "A" }] }] },
+  } as unknown as Event;
+}
+
+function todoUpdated(sessionID = SID): Event {
+  return {
+    type: "todo.updated",
+    properties: { sessionID, todos: [{ content: "wire callbacks", status: "in_progress", priority: "high" }] },
+  } as unknown as Event;
+}
+
+function sessionIdle(sessionID = SID): Event {
+  return { type: "session.idle", properties: { sessionID } } as unknown as Event;
+}
+
 async function* fromArray(events: Event[]): AsyncGenerator<Event> {
   for (const event of events) yield event;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 describe("createSessionEventConsumer reconnect", () => {
@@ -87,6 +122,230 @@ describe("createSessionEventConsumer reconnect", () => {
 
     expect(lines.filter((line) => line.includes("hello")).length).toBe(1);
     expect(lines.filter((line) => line.includes("world")).length).toBe(1);
+  });
+});
+
+describe("runOpenCodeStep headless policy events", () => {
+  let repoDir: string | undefined;
+
+  afterEach(() => {
+    if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+    repoDir = undefined;
+  });
+
+  function makeClient(events: Event[]) {
+    let promptMessageID = "";
+    const replyCalls: Array<{ requestID: string; reply?: "once" | "always" | "reject"; directory?: string }> = [];
+    const questionRejectCalls: Array<{ requestID: string; directory?: string }> = [];
+    const questionReplyCalls: Array<{ requestID: string; directory?: string; answers?: unknown[] }> = [];
+    const firstReply = deferred();
+    const firstQuestionReject = deferred();
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({ data: [assistantDone(promptMessageID)] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray(events) }),
+      },
+      permission: {
+        reply: async (params: { requestID: string; reply?: "once" | "always" | "reject"; directory?: string }) => {
+          replyCalls.push(params);
+          firstReply.resolve();
+          return { data: {} };
+        },
+      },
+      question: {
+        reject: async (params: { requestID: string; directory?: string }) => {
+          questionRejectCalls.push(params);
+          firstQuestionReject.resolve();
+          return { data: {} };
+        },
+        reply: async (params: { requestID: string; directory?: string; answers?: unknown[] }) => {
+          questionReplyCalls.push(params);
+          return { data: {} };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    return { client, replyCalls, questionRejectCalls, questionReplyCalls, firstReply, firstQuestionReject };
+  }
+
+  async function runPolicyStep(params: {
+    events: Event[];
+    permissionPolicy?: Record<string, "always" | "once" | "reject" | "ask">;
+    questionPolicy?: "ask" | "reject";
+  }) {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-policy-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    const harness = makeClient(params.events);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client: harness.client,
+      repoDir,
+      step,
+      ...(params.permissionPolicy !== undefined ? { permissionPolicy: params.permissionPolicy } : {}),
+      ...(params.questionPolicy !== undefined ? { questionPolicy: params.questionPolicy } : {}),
+    });
+
+    await Promise.race([harness.firstReply.promise, harness.firstQuestionReject.promise, Bun.sleep(10)]);
+    return { ...harness, state, result, repoDir };
+  }
+
+  test("replies with the configured permission action", async () => {
+    const run = await runPolicyStep({ events: [permissionAsked("per_allow", "edit")], permissionPolicy: { edit: "always" } });
+
+    expect(run.result.status).toBe("done");
+    expect(run.replyCalls).toEqual([{ requestID: "per_allow", reply: "always", directory: run.repoDir }]);
+  });
+
+  test("replies with exact once and reject permission actions", async () => {
+    const run = await runPolicyStep({
+      events: [permissionAsked("per_once", "edit"), permissionAsked("per_reject", "bash")],
+      permissionPolicy: { edit: "once", bash: "reject" },
+    });
+
+    expect(run.replyCalls).toEqual([
+      { requestID: "per_once", reply: "once", directory: run.repoDir },
+      { requestID: "per_reject", reply: "reject", directory: run.repoDir },
+    ]);
+  });
+
+  test("leaves permissions pending when policy is configured but the kind is uncovered", async () => {
+    const run = await runPolicyStep({ events: [permissionAsked("per_uncovered", "edit")], permissionPolicy: { bash: "once" } });
+
+    expect(run.replyCalls).toEqual([]);
+    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
+  });
+
+  test("leaves explicitly ask permissions pending without replying", async () => {
+    const run = await runPolicyStep({ events: [permissionAsked("per_ask", "edit")], permissionPolicy: { edit: "ask" } });
+
+    expect(run.replyCalls).toEqual([]);
+    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
+  });
+
+  test("ignores permission requests when no permission policy is configured", async () => {
+    const run = await runPolicyStep({ events: [permissionAsked("per_ignore", "edit")] });
+
+    expect(run.result.status).toBe("done");
+    expect(run.replyCalls).toEqual([]);
+  });
+
+  test("deduplicates repeated permission request ids", async () => {
+    const run = await runPolicyStep({
+      events: [permissionAsked("per_dupe", "edit"), permissionAsked("per_dupe", "edit")],
+      permissionPolicy: { edit: "always" },
+    });
+
+    expect(run.replyCalls).toEqual([{ requestID: "per_dupe", reply: "always", directory: run.repoDir }]);
+  });
+
+  test("rejects questions without inventing answers", async () => {
+    const run = await runPolicyStep({ events: [questionAsked("que_reject")], questionPolicy: "reject" });
+
+    expect(run.questionRejectCalls).toEqual([{ requestID: "que_reject", directory: run.repoDir }]);
+    expect(run.questionReplyCalls).toEqual([]);
+  });
+
+  test("leaves ask-policy questions pending without rejecting", async () => {
+    const run = await runPolicyStep({ events: [questionAsked("que_ask")], questionPolicy: "ask" });
+
+    expect(run.questionRejectCalls).toEqual([]);
+    expect(run.questionReplyCalls).toEqual([]);
+    expect(run.state.pendingQuestion).toBeNull();
+  });
+
+  test("updates active session todos in state", async () => {
+    const run = await runPolicyStep({ events: [todoUpdated()] });
+
+    expect(run.state.todos).toEqual([{ content: "wire callbacks", status: "in_progress", priority: "high" }]);
+  });
+});
+
+describe("runIteration reattach policy propagation", () => {
+  let repoDir: string | undefined;
+  let configDir: string | undefined;
+
+  afterEach(() => {
+    if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+    if (configDir && configDir !== repoDir) rmSync(configDir, { recursive: true, force: true });
+    repoDir = undefined;
+    configDir = undefined;
+  });
+
+  test("passes permissionPolicy into resume reattach so permissions are auto-approved", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-config-"));
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "continue safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n`);
+    initStatePaths({ configDir });
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+
+    const replyCalls: Array<{ requestID: string; reply?: "once" | "always" | "reject"; directory?: string }> = [];
+    let statusCalls = 0;
+    const client = {
+      session: {
+        status: async () => {
+          statusCalls += 1;
+          return { data: { [SID]: { type: statusCalls <= 2 ? "busy" : "idle" } } };
+        },
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([permissionAsked("per_resume_edit", "edit")]) }),
+      },
+      permission: {
+        reply: async (params: { requestID: string; reply?: "once" | "always" | "reject"; directory?: string }) => {
+          replyCalls.push(params);
+          return { data: {} };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir,
+      configDir,
+      resume: { sessionID: SID, messageID: MID },
+      permissionPolicy: { edit: "always" },
+    });
+
+    expect(result).toBe("complete");
+    expect(replyCalls).toEqual([{ requestID: "per_resume_edit", reply: "always", directory: repoDir }]);
   });
 });
 
@@ -476,4 +735,106 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(result.errorMessage).toContain("thinking blocks cannot be modified");
     expect(state.steps[0]?.outputLines.some((line) => line.includes("thinking blocks cannot be modified"))).toBe(true);
   }, 25000);
+});
+
+describe("reattachOpenCodeStep session.idle hints", () => {
+  let repoDir: string | undefined;
+
+  afterEach(() => {
+    if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+    repoDir = undefined;
+  });
+
+  async function runReattachWithIdle(params: { events: Event[]; useSessionIdle?: boolean }) {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-idle-"));
+    initStatePaths({ configDir: repoDir });
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let statusCalls = 0;
+    const startedAt = Date.now();
+    let streamAborted = false;
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => {
+          statusCalls += 1;
+          return { data: { [SID]: { type: Date.now() - startedAt >= 40 ? "idle" : "busy" } } };
+        },
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            await Bun.sleep(50);
+            for (const event of params.events) yield event;
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener(
+                "abort",
+                () => {
+                  streamAborted = true;
+                  resolve();
+                },
+                { once: true },
+              );
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+      ...(params.useSessionIdle !== undefined ? { useSessionIdle: params.useSessionIdle } : {}),
+    });
+
+    return { elapsedMs: Date.now() - startedAt, result, state, statusCalls, streamAborted };
+  }
+
+  test("uses active session.idle plus status confirmation to finish reattach promptly", async () => {
+    const run = await runReattachWithIdle({ events: [sessionIdle(SID)], useSessionIdle: true });
+
+    expect(run.result.status).toBe("done");
+    expect(run.statusCalls).toBeGreaterThanOrEqual(2);
+    expect(run.elapsedMs).toBeLessThan(500);
+  });
+
+  test("ignores session.idle for a different session during reattach", async () => {
+    const run = await runReattachWithIdle({ events: [sessionIdle("ses_other")], useSessionIdle: true });
+
+    expect(run.result.status).toBe("done");
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(1_900);
+  }, 5000);
+
+  test("ignores session.idle when useSessionIdle is off", async () => {
+    const run = await runReattachWithIdle({ events: [sessionIdle(SID)], useSessionIdle: false });
+
+    expect(run.result.status).toBe("done");
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(1_900);
+  }, 5000);
+
+  test("falls back to polling when no session.idle event arrives", async () => {
+    const run = await runReattachWithIdle({ events: [], useSessionIdle: true });
+
+    expect(run.result.status).toBe("done");
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(1_900);
+  }, 5000);
 });

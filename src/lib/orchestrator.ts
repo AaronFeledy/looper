@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { loadSteps, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { loadSteps, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
@@ -18,7 +18,7 @@ import {
   type StepRunResult,
   type SessionHealthState,
 } from "./runner.ts";
-import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, type LoopState, type LoopStep, type StepRestartReason } from "./state.ts";
+import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepVcsSummary, type LoopState, type LoopStep, type StepRestartReason, type VcsChange } from "./state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "./state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "./title.ts";
 import type { LooperSessionMetadataInput } from "./session-metadata.ts";
@@ -29,6 +29,20 @@ function textEndsWithNewline(text: string): boolean {
 
 function fileReadMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
+}
+
+function formatError(error: unknown): string {
+  if (error === undefined || error === null) return "unknown error";
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && "message" in error) {
+    const message = error.message;
+    if (typeof message === "string") return message;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 export function promptText(step: Step): string {
@@ -129,6 +143,10 @@ export type RunIterationOptions = {
   initialWorkDescription?: string;
   looperRunID?: string;
   recoverySnapshots?: RecoverySnapshotsConfig;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle?: boolean;
+  vcsSummary?: boolean;
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -438,22 +456,27 @@ class TitleCoordinator {
   }
 }
 
-export async function runIteration({
-  state,
-  iteration,
-  client,
-  repoDir,
-  configDir,
-  startStepIndex = 0,
-  resume,
-  recoveryNudge = false,
-  hooks,
-  titleGenConfig,
-  resumedPriorSteps = false,
-  initialWorkDescription,
-  looperRunID,
-  recoverySnapshots = false,
-}: RunIterationOptions): Promise<"complete" | "stopped"> {
+export async function runIteration(options: RunIterationOptions): Promise<"complete" | "stopped"> {
+  const {
+    state,
+    iteration,
+    client,
+    repoDir,
+    configDir,
+    startStepIndex = 0,
+    resume,
+    recoveryNudge = false,
+    hooks,
+    titleGenConfig,
+    resumedPriorSteps = false,
+    initialWorkDescription,
+    looperRunID,
+    recoverySnapshots = false,
+    permissionPolicy,
+    questionPolicy,
+    useSessionIdle,
+    vcsSummary,
+  } = options;
   const completed: LoopStep[] = [];
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
@@ -491,6 +514,26 @@ export async function runIteration({
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       log: (line) => logStepLine(stepIdx, line),
     });
+  };
+
+  const captureStepVcsSummary = async (stepIdx: number): Promise<void> => {
+    if (vcsSummary !== true) return;
+    try {
+      const status = await client.vcs.status({ directory: repoDir });
+      if (status.error) {
+        logStepLine(stepIdx, `[looper] vcs.status failed: ${formatError(status.error)}`);
+        return;
+      }
+      const changes: VcsChange[] = (status.data ?? []).map((change) => ({
+        file: change.file,
+        additions: change.additions,
+        deletions: change.deletions,
+        status: change.status,
+      }));
+      setStepVcsSummary(state, stepIdx, changes);
+    } catch (error) {
+      logStepLine(stepIdx, `[looper] vcs.status threw: ${formatError(error)}`);
+    }
   };
 
   while (true) {
@@ -754,6 +797,9 @@ export async function runIteration({
             step,
             sessionID: resumeSession,
             messageID: resumeInfo.messageID,
+            ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+            ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+            ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           });
         } else if (pendingResult === undefined && stepMatches && workState === "idle") {
           if (recoveryNudgeActive && resumeInfo.messageID !== undefined) {
@@ -792,6 +838,9 @@ export async function runIteration({
           step,
           sessionID: resumeSessionID,
           timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+          ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+          ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+          ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
           onSessionBound: ({ sessionID, messageID }) =>
             hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, ...(workDescription !== undefined ? { title: workDescription } : {}) }),
@@ -997,6 +1046,9 @@ export async function runIteration({
               step,
               sessionID: priorSessionForCheck,
               messageID: lastPromptMessageID,
+              ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+              ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+              ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
             });
             continue;
           }
@@ -1109,6 +1161,8 @@ export async function runIteration({
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
     }
+
+    if (result.status === "done") await captureStepVcsSummary(currentStepIndex);
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 

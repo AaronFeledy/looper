@@ -1,6 +1,7 @@
-import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
+
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
   assertManagedOpencodeResourcesLoaded,
@@ -42,6 +43,140 @@ export async function assertAttachedServerAgentsLoaded({
   requiredAgents?: readonly string[];
 }): Promise<void> {
   await assertManagedOpencodeResourcesLoaded({ client, repoDir, serverUrl, requiredNames: requiredAgents });
+}
+
+export type ConfiguredResourceKind = "agent" | "command" | "skill" | "tool";
+
+type MissingConfiguredResource = {
+  kind: ConfiguredResourceKind;
+  name: string;
+};
+
+function resultError(result: object): unknown {
+  return "error" in result ? result.error : undefined;
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function missingConfiguredResourcesMessage({ repoDir, missing }: { repoDir: string; missing: readonly MissingConfiguredResource[] }): string {
+  return [
+    `error: attached opencode server is missing configured resources for ${repoDir}:`,
+    "",
+    ...missing.map((resource) => `- configured ${resource.kind}: ${resource.name}`),
+  ].join("\n");
+}
+
+async function readCommandNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+  let result: Awaited<ReturnType<OpencodeClient["command"]["list"]>>;
+  try {
+    result = await client.command.list({ directory: repoDir });
+  } catch (error) {
+    throw new ManagedOpencodeResourceError(`failed to check commands: ${formatError(error)}`);
+  }
+
+  const error = resultError(result);
+  if (error || !result.data) {
+    throw new ManagedOpencodeResourceError(`failed to check commands: ${formatError(error)}`);
+  }
+
+  return new Set(result.data.map((command) => command.name));
+}
+
+async function readSkillNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+  let result: Awaited<ReturnType<OpencodeClient["app"]["skills"]>>;
+  try {
+    result = await client.app.skills({ directory: repoDir });
+  } catch (error) {
+    throw new ManagedOpencodeResourceError(`failed to check skills: ${formatError(error)}`);
+  }
+
+  const error = resultError(result);
+  if (error || !result.data) {
+    throw new ManagedOpencodeResourceError(`failed to check skills: ${formatError(error)}`);
+  }
+
+  return new Set(result.data.map((skill) => skill.name));
+}
+
+async function readAgentNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+  let result: Awaited<ReturnType<OpencodeClient["app"]["agents"]>>;
+  try {
+    result = await client.app.agents({ directory: repoDir });
+  } catch (error) {
+    throw new ManagedOpencodeResourceError(`failed to check agents: ${formatError(error)}`);
+  }
+
+  const error = resultError(result);
+  if (error || !result.data) {
+    throw new ManagedOpencodeResourceError(`failed to check agents: ${formatError(error)}`);
+  }
+
+  return new Set(result.data.map((agent) => agent.name));
+}
+
+async function readToolIds(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+  let result: Awaited<ReturnType<OpencodeClient["tool"]["ids"]>>;
+  try {
+    result = await client.tool.ids({ directory: repoDir });
+  } catch (error) {
+    throw new ManagedOpencodeResourceError(`failed to check tools: ${formatError(error)}`);
+  }
+
+  const error = resultError(result);
+  if (error || !result.data) {
+    throw new ManagedOpencodeResourceError(`failed to check tools: ${formatError(error)}`);
+  }
+
+  return new Set(result.data);
+}
+
+export async function assertConfiguredResourcesExist({
+  client,
+  repoDir,
+  agents = [],
+  commands = [],
+  skills = [],
+  tools = [],
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  agents?: readonly string[];
+  commands?: readonly string[];
+  skills?: readonly string[];
+  tools?: readonly string[];
+}): Promise<void> {
+  const missing: MissingConfiguredResource[] = [];
+
+  if (agents.length > 0) {
+    const loadedAgents = await readAgentNames(client, repoDir);
+    missing.push(...agents.filter((name) => !loadedAgents.has(name)).map((name) => ({ kind: "agent" as const, name })));
+  }
+
+  if (commands.length > 0) {
+    const loadedCommands = await readCommandNames(client, repoDir);
+    missing.push(...commands.filter((name) => !loadedCommands.has(name)).map((name) => ({ kind: "command" as const, name })));
+  }
+
+  if (skills.length > 0) {
+    const loadedSkills = await readSkillNames(client, repoDir);
+    missing.push(...skills.filter((name) => !loadedSkills.has(name)).map((name) => ({ kind: "skill" as const, name })));
+  }
+
+  if (tools.length > 0) {
+    const loadedTools = await readToolIds(client, repoDir);
+    missing.push(...tools.filter((name) => !loadedTools.has(name)).map((name) => ({ kind: "tool" as const, name })));
+  }
+
+  if (missing.length === 0) return;
+  throw new ManagedOpencodeResourceError(missingConfiguredResourcesMessage({ repoDir, missing }));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

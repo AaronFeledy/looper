@@ -4,7 +4,8 @@ import { join, resolve, sep } from "node:path";
 
 import type { Event, OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { createSessionEventConsumer } from "./event-consumer.ts";
+import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy } from "./config.ts";
+import { createSessionEventConsumer, type EventConsumerCallbacks, type PermissionAskedPayload, type QuestionAskedPayload } from "./event-consumer.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "./session-metadata.ts";
 import {
   beginStepRun,
@@ -14,7 +15,10 @@ import {
   pushAgentLine,
   pushStepOutputLine,
   pushStepOutputLines,
+  setPendingPermission,
+  setPendingQuestion,
   setStepSessionID,
+  setTodos,
   syncStepBackgroundAgents,
   type FinalizeStepStatus,
   type LoopState,
@@ -34,6 +38,8 @@ export type Step = {
   timeoutMs?: number;
   /** `true` = generate title at step end. `number` = N seconds after first assistant response, concurrently. `"branch"` = fire when the branch watcher detects a switch to a non-trivial branch; fallback to ~5min after first response or step end. See README. */
   title?: boolean | number | "branch";
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
 };
 
 export const DEFAULT_STEP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -163,7 +169,119 @@ export type RunOpenCodeStepOptions = {
   onSessionBound?: (info: { sessionID: string; messageID: string }) => void;
   timeoutMsOverride?: number;
   sessionMetadata?: LooperSessionMetadataInput;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle?: boolean;
 };
+
+type RunnerEventControllerOptions = {
+  state: LoopState;
+  client: OpencodeClient;
+  repoDir: string;
+  step: Step;
+  activeSessionID: string;
+  pushLine: (line: string) => void;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+};
+
+function createRunnerEventController({
+  state,
+  client,
+  repoDir,
+  step,
+  activeSessionID,
+  pushLine,
+  permissionPolicy,
+  questionPolicy,
+}: RunnerEventControllerOptions): Pick<
+  EventConsumerCallbacks,
+  "onPermissionAsked" | "onPermissionReplied" | "onQuestionAsked" | "onQuestionReplied" | "onQuestionRejected" | "onTodoUpdated"
+> {
+  const handledRequestIDs = new Set<string>();
+  const inFlightReplies = new Map<string, Promise<void>>();
+  const hasPermissionPolicy = permissionPolicy !== undefined || step.permissionPolicy !== undefined;
+  const effectiveQuestionPolicy = step.questionPolicy ?? questionPolicy;
+
+  const trackReply = (requestID: string, reply: Promise<void>): void => {
+    inFlightReplies.set(requestID, reply);
+    reply
+      .then(() => {
+        handledRequestIDs.add(requestID);
+      })
+      .catch((error) => {
+        pushLine(`[looper] request ${requestID} reply failed: ${toError(error).message}`);
+      })
+      .finally(() => {
+        inFlightReplies.delete(requestID);
+      });
+  };
+
+  const alreadyHandling = (requestID: string): boolean => handledRequestIDs.has(requestID) || inFlightReplies.has(requestID);
+
+  const onPermissionAsked = (payload: PermissionAskedPayload): void => {
+    if (!hasPermissionPolicy) return;
+    if (payload.sessionID !== activeSessionID) return;
+    if (alreadyHandling(payload.requestID)) return;
+
+    const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
+    if (action === "ask") {
+      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
+      return;
+    }
+
+    setPendingPermission(state, {
+      requestID: payload.requestID,
+      sessionID: payload.sessionID,
+      permission: payload.permission,
+      patterns: payload.patterns,
+      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+    });
+
+    const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir }).then((result) => {
+      if (result.error) throw new Error(formatRequestError(result.error));
+      pushLine(`[looper] permission '${payload.permission}' -> ${action}`);
+      setPendingPermission(state, null);
+    });
+    trackReply(payload.requestID, request);
+  };
+
+  const onQuestionAsked = (payload: QuestionAskedPayload): void => {
+    if (effectiveQuestionPolicy !== "reject") return;
+    if (payload.sessionID !== activeSessionID) return;
+    if (alreadyHandling(payload.requestID)) return;
+
+    setPendingQuestion(state, {
+      requestID: payload.requestID,
+      sessionID: payload.sessionID,
+      questions: payload.questions,
+    });
+
+    const request = client.question.reject({ requestID: payload.requestID, directory: repoDir }).then((result) => {
+      if (result.error) throw new Error(formatRequestError(result.error));
+      pushLine(`[looper] question rejected (questionPolicy=${effectiveQuestionPolicy})`);
+      setPendingQuestion(state, null);
+    });
+    trackReply(payload.requestID, request);
+  };
+
+  return {
+    onPermissionAsked,
+    onPermissionReplied: (payload) => {
+      if (payload.sessionID === activeSessionID) setPendingPermission(state, null);
+    },
+    onQuestionAsked,
+    onQuestionReplied: (payload) => {
+      if (payload.sessionID === activeSessionID) setPendingQuestion(state, null);
+    },
+    onQuestionRejected: (payload) => {
+      if (payload.sessionID === activeSessionID) setPendingQuestion(state, null);
+    },
+    onTodoUpdated: (payload) => {
+      if (payload.sessionID === activeSessionID) setTodos(state, payload.todos);
+    },
+  };
+}
 
 function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
@@ -1101,6 +1219,9 @@ export type ReattachStepOptions = {
   step: Step;
   sessionID: string;
   messageID: string;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle?: boolean;
 };
 
 export async function reattachOpenCodeStep({
@@ -1111,6 +1232,9 @@ export async function reattachOpenCodeStep({
   step,
   sessionID,
   messageID,
+  permissionPolicy,
+  questionPolicy,
+  useSessionIdle,
 }: ReattachStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -1169,12 +1293,50 @@ export async function reattachOpenCodeStep({
   let sessionEventError: Error | undefined;
   let timedOut = false;
   let consecutiveStatusErrors = 0;
+  let idleHintConfirmed = false;
+  let idleHintProbeInFlight = false;
+  let wakeStatusPoll: (() => void) | undefined;
+  const wakeReattachStatusPoll = (): void => {
+    wakeStatusPoll?.();
+    wakeStatusPoll = undefined;
+  };
+  const probeIdleHint = (): void => {
+    if (idleHintConfirmed || idleHintProbeInFlight) return;
+    idleHintProbeInFlight = true;
+    void client.session.status({ directory: repoDir })
+      .then((statusResult) => {
+        if (!statusResult.error && !isPendingSessionStatus(statusResult.data?.[sessionID])) idleHintConfirmed = true;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        idleHintProbeInFlight = false;
+        wakeReattachStatusPoll();
+      });
+  };
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
+    ...createRunnerEventController({
+      state,
+      client,
+      repoDir,
+      step,
+      activeSessionID: sessionID,
+      pushLine,
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    }),
     onSessionError: (message) => {
       sessionEventError ??= new Error(`session.error: ${message}`);
     },
+    ...(useSessionIdle
+      ? {
+          onSessionIdle: (payload) => {
+            if (payload.sessionID !== sessionID) return;
+            probeIdleHint();
+          },
+        }
+      : {}),
   });
 
   try {
@@ -1192,6 +1354,7 @@ export async function reattachOpenCodeStep({
 
   try {
     while (cancellationAction === null) {
+      if (idleHintConfirmed) break;
       if (Date.now() - startedAt > REATTACH_MAX_WAIT_MS) {
         timedOut = true;
         break;
@@ -1220,7 +1383,18 @@ export async function reattachOpenCodeStep({
           break;
         }
       }
-      await Bun.sleep(REATTACH_STATUS_POLL_MS);
+      if (idleHintConfirmed) break;
+      let woke = false;
+      await Promise.race([
+        Bun.sleep(REATTACH_STATUS_POLL_MS),
+        new Promise<void>((resolve) => {
+          wakeStatusPoll = () => {
+            woke = true;
+            resolve();
+          };
+        }),
+      ]);
+      if (!woke) wakeStatusPoll = undefined;
     }
   } finally {
     clearInterval(watcher);
@@ -1319,6 +1493,8 @@ export async function runOpenCodeStep({
   onSessionBound,
   timeoutMsOverride,
   sessionMetadata,
+  permissionPolicy,
+  questionPolicy,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -1436,6 +1612,16 @@ export async function runOpenCodeStep({
     const consumer = createSessionEventConsumer(boundSessionID, {
       pushLine,
       pushLines,
+      ...createRunnerEventController({
+        state,
+        client,
+        repoDir,
+        step,
+        activeSessionID: boundSessionID,
+        pushLine,
+        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+        ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+      }),
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },

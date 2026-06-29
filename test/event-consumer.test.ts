@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { Event } from "@opencode-ai/sdk/v2";
 
-import { consumeSessionEvents } from "../src/lib/event-consumer.ts";
+import { consumeSessionEvents, createSessionEventConsumer } from "../src/lib/event-consumer.ts";
+import type {
+  PermissionAskedPayload,
+  PermissionRepliedPayload,
+  QuestionAskedPayload,
+  QuestionRejectedPayload,
+  QuestionRepliedPayload,
+  SessionIdlePayload,
+  TodoUpdatedPayload,
+} from "../src/lib/event-consumer.ts";
 
 const SID = "ses_test";
 const MID = "msg_a";
@@ -54,6 +63,204 @@ function textPartUpdated(text: string): Event {
     properties: { part: { id: PID, sessionID: SID, messageID: MID, type: "text", text } },
   } as unknown as Event;
 }
+
+function permissionAsked(id: string, sessionID = SID): Event {
+  return {
+    type: "permission.asked",
+    properties: {
+      id,
+      sessionID,
+      permission: "edit",
+      patterns: ["src/**/*.ts"],
+      metadata: { filepath: "src/lib/event-consumer.ts" },
+      always: ["src/**/*.ts"],
+      tool: { messageID: MID, callID: "call_1" },
+    },
+  } as unknown as Event;
+}
+
+function permissionReplied(requestID: string, reply: "once" | "always" | "reject", sessionID = SID): Event {
+  return {
+    type: "permission.replied",
+    properties: { sessionID, requestID, reply },
+  } as unknown as Event;
+}
+
+function questionAsked(id: string, sessionID = SID): Event {
+  return {
+    type: "question.asked",
+    properties: {
+      id,
+      sessionID,
+      questions: [
+        {
+          question: "Continue?",
+          header: "Continue",
+          options: [
+            { label: "yes", description: "Proceed" },
+            { label: "no", description: "Stop" },
+          ],
+        },
+      ],
+      tool: { messageID: MID, callID: "call_2" },
+    },
+  } as unknown as Event;
+}
+
+function questionReplied(requestID: string, sessionID = SID): Event {
+  return {
+    type: "question.replied",
+    properties: { sessionID, requestID, answers: [["yes"]] },
+  } as unknown as Event;
+}
+
+function questionRejected(requestID: string, sessionID = SID): Event {
+  return {
+    type: "question.rejected",
+    properties: { sessionID, requestID },
+  } as unknown as Event;
+}
+
+function sessionIdle(sessionID = SID): Event {
+  return {
+    type: "session.idle",
+    properties: { sessionID },
+  } as unknown as Event;
+}
+
+function todoUpdated(sessionID = SID): Event {
+  return {
+    type: "todo.updated",
+    properties: { sessionID, todos: [{ content: "Wire callbacks", status: "pending", priority: "high" }] },
+  } as unknown as Event;
+}
+
+describe("request lifecycle callbacks", () => {
+  test("surfaces permission, question, idle, and todo events without printing", async () => {
+    const lines: string[] = [];
+    const permissionsAsked: PermissionAskedPayload[] = [];
+    const permissionsReplied: PermissionRepliedPayload[] = [];
+    const questionsAsked: QuestionAskedPayload[] = [];
+    const questionsReplied: QuestionRepliedPayload[] = [];
+    const questionsRejected: QuestionRejectedPayload[] = [];
+    const idleSessions: SessionIdlePayload[] = [];
+    const todoUpdates: TodoUpdatedPayload[] = [];
+
+    await consumeSessionEvents(
+      makeStream([
+        permissionAsked("per_1"),
+        permissionReplied("per_1", "once"),
+        questionAsked("que_1"),
+        questionReplied("que_1"),
+        questionRejected("que_2"),
+        sessionIdle(),
+        todoUpdated(),
+      ]),
+      SID,
+      {
+        pushLine: (line) => lines.push(line),
+        onPermissionAsked: (payload) => permissionsAsked.push(payload),
+        onPermissionReplied: (payload) => permissionsReplied.push(payload),
+        onQuestionAsked: (payload) => questionsAsked.push(payload),
+        onQuestionReplied: (payload) => questionsReplied.push(payload),
+        onQuestionRejected: (payload) => questionsRejected.push(payload),
+        onSessionIdle: (payload) => idleSessions.push(payload),
+        onTodoUpdated: (payload) => todoUpdates.push(payload),
+      },
+    );
+
+    expect(permissionsAsked).toEqual([
+      {
+        requestID: "per_1",
+        sessionID: SID,
+        permission: "edit",
+        patterns: ["src/**/*.ts"],
+        metadata: { filepath: "src/lib/event-consumer.ts" },
+      },
+    ]);
+    expect(permissionsReplied).toEqual([{ sessionID: SID, requestID: "per_1", reply: "once" }]);
+    expect(questionsAsked).toEqual([
+      {
+        requestID: "que_1",
+        sessionID: SID,
+        questions: [
+          {
+            question: "Continue?",
+            header: "Continue",
+            options: [
+              { label: "yes", description: "Proceed" },
+              { label: "no", description: "Stop" },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(questionsReplied).toEqual([{ sessionID: SID, requestID: "que_1", answers: [["yes"]] }]);
+    expect(questionsRejected).toEqual([{ sessionID: SID, requestID: "que_2" }]);
+    expect(idleSessions).toEqual([{ sessionID: SID }]);
+    expect(todoUpdates).toEqual([{ sessionID: SID, todos: [{ content: "Wire callbacks", status: "pending", priority: "high" }] }]);
+    expect(lines).toEqual([]);
+  });
+
+  test("dedupes asked events by request id across reconnects only", async () => {
+    const permissionsAsked: PermissionAskedPayload[] = [];
+    const permissionsReplied: PermissionRepliedPayload[] = [];
+    const questionsAsked: QuestionAskedPayload[] = [];
+    const questionsReplied: QuestionRepliedPayload[] = [];
+    const consumer = createSessionEventConsumer(SID, {
+      pushLine: () => {},
+      onPermissionAsked: (payload) => permissionsAsked.push(payload),
+      onPermissionReplied: (payload) => permissionsReplied.push(payload),
+      onQuestionAsked: (payload) => questionsAsked.push(payload),
+      onQuestionReplied: (payload) => questionsReplied.push(payload),
+    });
+
+    await consumer.consume(makeStream([permissionAsked("per_dupe"), questionAsked("que_dupe")]));
+    await consumer.consume(
+      makeStream([
+        permissionAsked("per_dupe"),
+        permissionReplied("per_dupe", "once"),
+        permissionReplied("per_dupe", "once"),
+        questionAsked("que_dupe"),
+        questionReplied("que_dupe"),
+        questionReplied("que_dupe"),
+      ]),
+    );
+
+    expect(permissionsAsked.map((payload) => payload.requestID)).toEqual(["per_dupe"]);
+    expect(questionsAsked.map((payload) => payload.requestID)).toEqual(["que_dupe"]);
+    expect(permissionsReplied.map((payload) => payload.requestID)).toEqual(["per_dupe", "per_dupe"]);
+    expect(questionsReplied.map((payload) => payload.requestID)).toEqual(["que_dupe", "que_dupe"]);
+  });
+
+  test("applies the existing session filter to callback-only events", async () => {
+    let fired = 0;
+    await consumeSessionEvents(
+      makeStream([
+        permissionAsked("per_foreign", "ses_other"),
+        permissionReplied("per_foreign", "reject", "ses_other"),
+        questionAsked("que_foreign", "ses_other"),
+        questionReplied("que_foreign", "ses_other"),
+        questionRejected("que_foreign", "ses_other"),
+        sessionIdle("ses_other"),
+        todoUpdated("ses_other"),
+      ]),
+      SID,
+      {
+        pushLine: () => {},
+        onPermissionAsked: () => { fired += 1; },
+        onPermissionReplied: () => { fired += 1; },
+        onQuestionAsked: () => { fired += 1; },
+        onQuestionReplied: () => { fired += 1; },
+        onQuestionRejected: () => { fired += 1; },
+        onSessionIdle: () => { fired += 1; },
+        onTodoUpdated: () => { fired += 1; },
+      },
+    );
+
+    expect(fired).toBe(0);
+  });
+});
 
 describe("onFirstAssistantContent", () => {
   test('fires on text part.updated', async () => {

@@ -1,11 +1,11 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
-import { loadSteps, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { loadSteps, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
 import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "./opencode-managed-resources.ts";
-import { assertAttachedServerLocation } from "./attached-server-agents.ts";
+import { assertAttachedServerLocation, assertConfiguredResourcesExist } from "./attached-server-agents.ts";
 import { createLoopState, notify, subscribe, type LoopState } from "./state.ts";
 import {
   clearResumeStepFile,
@@ -29,8 +29,13 @@ export type FallbackOptions = {
   configDir: string;
   opencodeBin: string;
   attachUrl?: string;
+  validateResources?: boolean;
   titleGenConfig?: TitleGenConfig;
   recoverySnapshots?: RecoverySnapshotsConfig;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle?: boolean;
+  vcsSummary?: boolean;
   currentBranch: () => Promise<string>;
 };
 
@@ -75,6 +80,14 @@ function divider(title: string, colorize: (text: string) => string = ui.cyan): s
   const timestamp = sectionTimestamp();
   const dashes = "─".repeat(Math.max(1, terminalWidth() - prefix.length - timestamp.length - 1));
   return `${colorize(prefix)}${ui.dim(dashes)} ${ui.dim(timestamp)}\n`;
+}
+
+function configuredStepAgents(steps: readonly Step[]): string[] {
+  const agents = new Set<string>();
+  for (const step of steps) {
+    if (step.agent !== undefined && step.agent.length > 0) agents.add(step.agent);
+  }
+  return [...agents];
 }
 
 function saveResumeStep(steps: Step[], stepIndex: number): void {
@@ -137,8 +150,13 @@ export async function runNonTty({
   configDir,
   opencodeBin,
   attachUrl,
+  validateResources = false,
   titleGenConfig,
   recoverySnapshots = false,
+  permissionPolicy,
+  questionPolicy,
+  useSessionIdle,
+  vcsSummary,
   currentBranch,
 }: FallbackOptions): Promise<void> {
   clearStopFile();
@@ -168,6 +186,9 @@ export async function runNonTty({
         requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
       });
     }
+    if (validateResources) {
+      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)) });
+    }
     await runNonTtyIterations({
       options,
       repoDir,
@@ -175,6 +196,10 @@ export async function runNonTty({
       client,
       ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
       recoverySnapshots,
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+      ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+      ...(vcsSummary !== undefined ? { vcsSummary } : {}),
       currentBranch,
     });
   } finally {
@@ -189,6 +214,10 @@ async function runNonTtyIterations({
   client,
   titleGenConfig,
   recoverySnapshots,
+  permissionPolicy,
+  questionPolicy,
+  useSessionIdle,
+  vcsSummary,
   currentBranch,
 }: {
   options: Options;
@@ -197,6 +226,10 @@ async function runNonTtyIterations({
   client: ReturnType<typeof createOpencodeClient>;
   titleGenConfig?: TitleGenConfig;
   recoverySnapshots: RecoverySnapshotsConfig;
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle?: boolean;
+  vcsSummary?: boolean;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
   let startIteration = 1;
@@ -269,6 +302,10 @@ async function runNonTtyIterations({
       startStepIndex,
       ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
       ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+      ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+      ...(vcsSummary !== undefined ? { vcsSummary } : {}),
       looperRunID,
       recoverySnapshots,
       hooks: {

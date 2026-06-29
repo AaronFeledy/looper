@@ -6,7 +6,7 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
-import { assertAttachedServerLocation, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
+import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
 import { type BranchWatcher, watchBranch } from "./lib/branch-watcher.ts";
 import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
@@ -51,6 +51,8 @@ import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
+import { createTodoPanel } from "./tui/todo-panel.ts";
+import { createVcsSummaryPanel } from "./tui/vcs-summary.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
@@ -188,6 +190,14 @@ function resolveAttachUrl(
   runtimeConfig: ReturnType<typeof loadRuntimeConfig>,
 ): string | undefined {
   return resolveConfiguredAttachUrl(options, runtimeConfig.opencodeServerUrl, opencodeAttachUrl);
+}
+
+function configuredStepAgents(steps: readonly Step[]): string[] {
+  const agents = new Set<string>();
+  for (const step of steps) {
+    if (step.agent !== undefined && step.agent.length > 0) agents.add(step.agent);
+  }
+  return [...agents];
 }
 
 async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
@@ -473,6 +483,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       throwIfBootAborted();
     }
 
+    if (runtimeConfig.validateResources) {
+      bootScreen.begin("Validating configured resources");
+      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(steps) });
+      throwIfBootAborted();
+    }
+
     bootScreen.begin("Checking saved session");
     await autoStartIfSavedSessionRunning(client);
     throwIfBootAborted();
@@ -517,6 +533,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         onUpdate: (status) => setGithubStatus(state, status),
       });
     }
+    leftColumn.add(createTodoPanel(renderer, state));
+    leftColumn.add(createVcsSummaryPanel(renderer, state));
     bootScreen.done();
 
     root.add(createHeader(renderer, state));
@@ -693,6 +711,10 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
           ...(recoveryNudgeForThisIteration ? { recoveryNudge: true } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
+          ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
+          ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
+          useSessionIdle: runtimeConfig.useSessionIdle,
+          vcsSummary: runtimeConfig.vcsSummary,
           looperRunID,
           recoverySnapshots: runtimeConfig.recovery.snapshots,
           hooks: {
@@ -832,7 +854,12 @@ async function main(): Promise<number> {
       configDir,
       opencodeBin,
       attachUrl: resolveAttachUrl(options, runtimeConfig),
+      validateResources: runtimeConfig.validateResources,
       ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
+      ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
+      ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
+      useSessionIdle: runtimeConfig.useSessionIdle,
+      vcsSummary: runtimeConfig.vcsSummary,
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });
