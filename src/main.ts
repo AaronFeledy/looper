@@ -485,7 +485,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     if (runtimeConfig.validateResources) {
       bootScreen.begin("Validating configured resources");
-      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(steps) });
+      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(steps), signal: bootAbort.signal });
       throwIfBootAborted();
     }
 

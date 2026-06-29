@@ -74,10 +74,10 @@ function missingConfiguredResourcesMessage({ repoDir, missing }: { repoDir: stri
   ].join("\n");
 }
 
-async function readCommandNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+async function readCommandNames(client: OpencodeClient, repoDir: string, signal?: AbortSignal): Promise<Set<string>> {
   let result: Awaited<ReturnType<OpencodeClient["command"]["list"]>>;
   try {
-    result = await client.command.list({ directory: repoDir });
+    result = await client.command.list({ directory: repoDir }, signal !== undefined ? { signal } : {});
   } catch (error) {
     throw new ManagedOpencodeResourceError(`failed to check commands: ${formatError(error)}`);
   }
@@ -90,10 +90,10 @@ async function readCommandNames(client: OpencodeClient, repoDir: string): Promis
   return new Set(result.data.map((command) => command.name));
 }
 
-async function readSkillNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+async function readSkillNames(client: OpencodeClient, repoDir: string, signal?: AbortSignal): Promise<Set<string>> {
   let result: Awaited<ReturnType<OpencodeClient["app"]["skills"]>>;
   try {
-    result = await client.app.skills({ directory: repoDir });
+    result = await client.app.skills({ directory: repoDir }, signal !== undefined ? { signal } : {});
   } catch (error) {
     throw new ManagedOpencodeResourceError(`failed to check skills: ${formatError(error)}`);
   }
@@ -106,10 +106,10 @@ async function readSkillNames(client: OpencodeClient, repoDir: string): Promise<
   return new Set(result.data.map((skill) => skill.name));
 }
 
-async function readAgentNames(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+async function readAgentNames(client: OpencodeClient, repoDir: string, signal?: AbortSignal): Promise<Set<string>> {
   let result: Awaited<ReturnType<OpencodeClient["app"]["agents"]>>;
   try {
-    result = await client.app.agents({ directory: repoDir });
+    result = await client.app.agents({ directory: repoDir }, signal !== undefined ? { signal } : {});
   } catch (error) {
     throw new ManagedOpencodeResourceError(`failed to check agents: ${formatError(error)}`);
   }
@@ -122,10 +122,10 @@ async function readAgentNames(client: OpencodeClient, repoDir: string): Promise<
   return new Set(result.data.map((agent) => agent.name));
 }
 
-async function readToolIds(client: OpencodeClient, repoDir: string): Promise<Set<string>> {
+async function readToolIds(client: OpencodeClient, repoDir: string, signal?: AbortSignal): Promise<Set<string>> {
   let result: Awaited<ReturnType<OpencodeClient["tool"]["ids"]>>;
   try {
-    result = await client.tool.ids({ directory: repoDir });
+    result = await client.tool.ids({ directory: repoDir }, signal !== undefined ? { signal } : {});
   } catch (error) {
     throw new ManagedOpencodeResourceError(`failed to check tools: ${formatError(error)}`);
   }
@@ -145,6 +145,7 @@ export async function assertConfiguredResourcesExist({
   commands = [],
   skills = [],
   tools = [],
+  signal,
 }: {
   client: OpencodeClient;
   repoDir: string;
@@ -152,26 +153,27 @@ export async function assertConfiguredResourcesExist({
   commands?: readonly string[];
   skills?: readonly string[];
   tools?: readonly string[];
+  signal?: AbortSignal;
 }): Promise<void> {
   const missing: MissingConfiguredResource[] = [];
 
   if (agents.length > 0) {
-    const loadedAgents = await readAgentNames(client, repoDir);
+    const loadedAgents = await readAgentNames(client, repoDir, signal);
     missing.push(...agents.filter((name) => !loadedAgents.has(name)).map((name) => ({ kind: "agent" as const, name })));
   }
 
   if (commands.length > 0) {
-    const loadedCommands = await readCommandNames(client, repoDir);
+    const loadedCommands = await readCommandNames(client, repoDir, signal);
     missing.push(...commands.filter((name) => !loadedCommands.has(name)).map((name) => ({ kind: "command" as const, name })));
   }
 
   if (skills.length > 0) {
-    const loadedSkills = await readSkillNames(client, repoDir);
+    const loadedSkills = await readSkillNames(client, repoDir, signal);
     missing.push(...skills.filter((name) => !loadedSkills.has(name)).map((name) => ({ kind: "skill" as const, name })));
   }
 
   if (tools.length > 0) {
-    const loadedTools = await readToolIds(client, repoDir);
+    const loadedTools = await readToolIds(client, repoDir, signal);
     missing.push(...tools.filter((name) => !loadedTools.has(name)).map((name) => ({ kind: "tool" as const, name })));
   }
 
