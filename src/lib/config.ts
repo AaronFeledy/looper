@@ -2,7 +2,18 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 
-import { DEFAULT_STEP_TIMEOUT_MS, type Step } from "./runner.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, type Step as RunnerStep } from "./runner.ts";
+
+export type PermissionAction = "always" | "once" | "reject" | "ask";
+
+export type PermissionPolicy = Record<string, PermissionAction>;
+
+export type QuestionPolicy = "ask" | "reject";
+
+export type LoadedStep = RunnerStep & {
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+};
 
 // Config file name candidates, in resolution order. `.yml` is preferred over
 // `.yaml`; dot-prefixed variants are last-resort fallbacks.
@@ -21,6 +32,8 @@ type RawStep = {
   args?: unknown;
   title?: unknown;
   timeout?: unknown;
+  permissionPolicy?: unknown;
+  questionPolicy?: unknown;
 };
 
 type RawConfig = {
@@ -29,6 +42,11 @@ type RawConfig = {
   timeout?: unknown;
   recovery?: unknown;
   steps?: unknown;
+  permissionPolicy?: unknown;
+  questionPolicy?: unknown;
+  useSessionIdle?: unknown;
+  vcsSummary?: unknown;
+  validateResources?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -54,6 +72,11 @@ export type RuntimeConfig = {
   recovery: {
     snapshots: RecoverySnapshotsConfig;
   };
+  permissionPolicy?: PermissionPolicy;
+  questionPolicy?: QuestionPolicy;
+  useSessionIdle: boolean;
+  vcsSummary: boolean;
+  validateResources: boolean;
 };
 
 function titleFromKey(key: string): string {
@@ -107,6 +130,54 @@ function timeoutValue(value: unknown, label: string): number {
   return amount * multiplier;
 }
 
+const PERMISSION_ACTIONS: readonly PermissionAction[] = ["always", "once", "reject", "ask"];
+
+function permissionActionValue(value: unknown, label: string): PermissionAction {
+  if (typeof value !== "string" || !PERMISSION_ACTIONS.includes(value as PermissionAction)) {
+    throw new Error(`${label} must be one of: always, once, reject, ask`);
+  }
+  return value as PermissionAction;
+}
+
+function parsePermissionPolicy(value: unknown, label: string): PermissionPolicy | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a mapping`);
+  }
+  const out: PermissionPolicy = {};
+  for (const [kind, action] of Object.entries(value as Record<string, unknown>)) {
+    out[kind] = permissionActionValue(action, `${label}.${kind}`);
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+function parseQuestionPolicy(value: unknown, label: string): QuestionPolicy | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === "ask" || value === "reject") return value;
+  throw new Error(`${label} must be "ask" or "reject"`);
+}
+
+function booleanFlagValue(value: unknown, label: string, fallback: boolean): boolean {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
+  return value;
+}
+
+// "always"|"once"|"reject" match opencode client.permission.reply; "ask" = no auto-reply.
+export function resolvePermissionAction(
+  kind: string,
+  step: Pick<LoadedStep, "permissionPolicy">,
+  global: Pick<RuntimeConfig, "permissionPolicy">,
+): PermissionAction {
+  const stepAction = step.permissionPolicy?.[kind];
+  if (stepAction !== undefined) return stepAction;
+  const globalKind = global.permissionPolicy?.[kind];
+  if (globalKind !== undefined) return globalKind;
+  const wildcard = global.permissionPolicy?.["*"];
+  if (wildcard !== undefined) return wildcard;
+  return "ask";
+}
+
 function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   const parsed = stringValue(value, label);
@@ -119,7 +190,7 @@ function promptPath(configDir: string, prompt: string, label: string): string {
   return isAbsolute(prompt) ? prompt : resolve(configDir, prompt);
 }
 
-function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
+function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedStep[] {
   if (!rawConfig.steps || typeof rawConfig.steps !== "object" || Array.isArray(rawConfig.steps)) {
     throw new Error(`${CONFIG_FILE_NAME} must define a mapping at steps:`);
   }
@@ -142,6 +213,8 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): Step[] {
       args: argsValue(rawStep.args, `steps.${key}.args`),
       timeoutMs: rawStep.timeout === undefined || rawStep.timeout === null ? rootTimeoutMs : timeoutValue(rawStep.timeout, `steps.${key}.timeout`),
       title: titleValue(rawStep.title, `steps.${key}.title`),
+      permissionPolicy: parsePermissionPolicy(rawStep.permissionPolicy, `steps.${key}.permissionPolicy`),
+      questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `steps.${key}.questionPolicy`),
     };
   });
 }
@@ -257,14 +330,21 @@ export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   }
   opencodeServerUrl ??= optionalNonEmptyStringValue(rawConfig.attachUrl, "attachUrl");
   const recovery = parseRecoveryConfig(rawConfig.recovery);
+  const permissionPolicy = parsePermissionPolicy(rawConfig.permissionPolicy, "permissionPolicy");
+  const questionPolicy = parseQuestionPolicy(rawConfig.questionPolicy, "questionPolicy");
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
     recovery,
+    ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+    ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
+    vcsSummary: booleanFlagValue(rawConfig.vcsSummary, "vcsSummary", false),
+    validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };
 }
 
-export function loadSteps(configDir: string): Step[] {
+export function loadSteps(configDir: string): LoadedStep[] {
   const rawConfig = loadRawConfig(configDir);
   const steps = parseConfiguredSteps(configDir, rawConfig);
   if (steps.length === 0) throw new Error(`${CONFIG_FILE_NAME} must define at least one step`);

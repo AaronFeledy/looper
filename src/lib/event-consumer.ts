@@ -1,10 +1,41 @@
 import type { Event, Message, Part } from "@opencode-ai/sdk/v2";
 
+type PermissionAskedProperties = Extract<Event, { type: "permission.asked" }>["properties"];
+type QuestionAskedProperties = Extract<Event, { type: "question.asked" }>["properties"];
+
+export type PermissionAskedPayload = {
+  requestID: PermissionAskedProperties["id"];
+  sessionID: PermissionAskedProperties["sessionID"];
+  permission: PermissionAskedProperties["permission"];
+  patterns: PermissionAskedProperties["patterns"];
+  metadata: PermissionAskedProperties["metadata"];
+};
+
+export type PermissionRepliedPayload = Extract<Event, { type: "permission.replied" }>["properties"];
+
+export type QuestionAskedPayload = {
+  requestID: QuestionAskedProperties["id"];
+  sessionID: QuestionAskedProperties["sessionID"];
+  questions: QuestionAskedProperties["questions"];
+};
+
+export type QuestionRepliedPayload = Extract<Event, { type: "question.replied" }>["properties"];
+export type QuestionRejectedPayload = Extract<Event, { type: "question.rejected" }>["properties"];
+export type SessionIdlePayload = Extract<Event, { type: "session.idle" }>["properties"];
+export type TodoUpdatedPayload = Extract<Event, { type: "todo.updated" }>["properties"];
+
 export type EventConsumerCallbacks = {
   pushLine: (line: string) => void;
   pushLines?: (lines: string[]) => void;
   onSessionError?: (message: string) => void;
   onFirstAssistantContent?: () => void;
+  onPermissionAsked?: (payload: PermissionAskedPayload) => void;
+  onPermissionReplied?: (payload: PermissionRepliedPayload) => void;
+  onQuestionAsked?: (payload: QuestionAskedPayload) => void;
+  onQuestionReplied?: (payload: QuestionRepliedPayload) => void;
+  onQuestionRejected?: (payload: QuestionRejectedPayload) => void;
+  onSessionIdle?: (payload: SessionIdlePayload) => void;
+  onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
   /** Fires for every event off the stream (before any session filter); a liveness signal for stall detection. */
   onActivity?: () => void;
 };
@@ -277,6 +308,8 @@ export function createSessionEventConsumer(
   const pendingPartUpdates = new Map<string, Part[]>();
   const pendingPartDeltas = new Map<string, PendingPartDelta[]>();
   const printedMessageErrors = new Set<string>();
+  const seenPermissionRequests = new Set<string>();
+  const seenQuestionRequests = new Set<string>();
   const push = callbacks.pushLine;
   const pushLines = callbacks.pushLines ?? ((lines: string[]) => {
     for (const line of lines) push(line);
@@ -388,6 +421,45 @@ export function createSessionEventConsumer(
       }
       case "session.next.retried":
         push(`${ui.yellow(`↻ retry ${event.properties.attempt}`)} ${event.properties.error.message}`);
+        break;
+      case "permission.asked": {
+        const props = event.properties;
+        if (seenPermissionRequests.has(props.id)) break;
+        seenPermissionRequests.add(props.id);
+        callbacks.onPermissionAsked?.({
+          requestID: props.id,
+          sessionID: props.sessionID,
+          permission: props.permission,
+          patterns: props.patterns,
+          metadata: props.metadata,
+        });
+        break;
+      }
+      case "permission.replied":
+        callbacks.onPermissionReplied?.(event.properties);
+        break;
+      case "question.asked": {
+        const props = event.properties;
+        if (seenQuestionRequests.has(props.id)) break;
+        seenQuestionRequests.add(props.id);
+        callbacks.onQuestionAsked?.({
+          requestID: props.id,
+          sessionID: props.sessionID,
+          questions: props.questions,
+        });
+        break;
+      }
+      case "question.replied":
+        callbacks.onQuestionReplied?.(event.properties);
+        break;
+      case "question.rejected":
+        callbacks.onQuestionRejected?.(event.properties);
+        break;
+      case "session.idle":
+        callbacks.onSessionIdle?.(event.properties);
+        break;
+      case "todo.updated":
+        callbacks.onTodoUpdated?.(event.properties);
         break;
       default:
         break;

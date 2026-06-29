@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadSteps } from "../src/lib/config.ts";
+import {
+  loadRuntimeConfig,
+  loadSteps,
+  resolvePermissionAction,
+  type PermissionAction,
+} from "../src/lib/config.ts";
 
 function withConfigDir(contents: string, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "looper-config-"));
@@ -28,6 +33,33 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("applies per-step permissionPolicy and questionPolicy overrides", () => {
+    withConfigDir(
+      [
+        "permissionPolicy:",
+        "  bash: once",
+        "questionPolicy: reject",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    permissionPolicy:",
+        "      edit: always",
+        "    questionPolicy: ask",
+      ].join("\n"),
+      (dir) => {
+        const steps = loadSteps(dir);
+        expect(steps[0]!.permissionPolicy).toEqual({ edit: "always" });
+        expect(steps[0]!.questionPolicy).toBe("ask");
+      },
+    );
+  });
+
+  test("rejects invalid per-step permissionPolicy action", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    permissionPolicy:\n      edit: maybe\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/permissionPolicy/);
+    });
+  });
+
   test("ignores a directory named like a config file and falls back", () => {
     const dir = mkdtempSync(join(tmpdir(), "looper-config-"));
     try {
@@ -39,5 +71,69 @@ describe("loadSteps config parsing", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("loadRuntimeConfig policy and flags", () => {
+  test("defaults preserve legacy behavior when keys are absent", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.permissionPolicy).toBeUndefined();
+      expect(cfg.questionPolicy).toBeUndefined();
+      expect(cfg.useSessionIdle).toBe(false);
+      expect(cfg.vcsSummary).toBe(false);
+      expect(cfg.validateResources).toBe(false);
+    });
+  });
+
+  test("parses global permissionPolicy, questionPolicy, and feature flags", () => {
+    withConfigDir(
+      [
+        "permissionPolicy:",
+        "  '*': reject",
+        "  edit: always",
+        "questionPolicy: reject",
+        "useSessionIdle: true",
+        "vcsSummary: true",
+        "validateResources: true",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+      ].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        expect(cfg.permissionPolicy).toEqual({ "*": "reject", edit: "always" });
+        expect(cfg.questionPolicy).toBe("reject");
+        expect(cfg.useSessionIdle).toBe(true);
+        expect(cfg.vcsSummary).toBe(true);
+        expect(cfg.validateResources).toBe(true);
+      },
+    );
+  });
+
+  test("rejects invalid global permissionPolicy action", () => {
+    withConfigDir(
+      "permissionPolicy:\n  bash: yolo\nsteps:\n  build:\n    prompt: hi\n",
+      (dir) => {
+        expect(() => loadRuntimeConfig(dir)).toThrow(/permissionPolicy/);
+      },
+    );
+  });
+
+  test("rejects invalid questionPolicy", () => {
+    withConfigDir("questionPolicy: always\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/questionPolicy/);
+    });
+  });
+});
+
+describe("resolvePermissionAction", () => {
+  const global = { permissionPolicy: { edit: "once" as PermissionAction, "*": "reject" as PermissionAction } };
+
+  test("prefers step override, then kind, then wildcard, then ask", () => {
+    expect(resolvePermissionAction("edit", { permissionPolicy: { edit: "always" } }, global)).toBe("always");
+    expect(resolvePermissionAction("bash", {}, global)).toBe("reject");
+    expect(resolvePermissionAction("webfetch", { permissionPolicy: { webfetch: "once" } }, {})).toBe("once");
+    expect(resolvePermissionAction("unknown", {}, {})).toBe("ask");
   });
 });

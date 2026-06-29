@@ -117,6 +117,7 @@ export type LoopStep = {
   outputPinnedToBottom: boolean;
   backgroundAgents: BackgroundAgent[];
   restartReason?: StepRestartReason;
+  vcsSummary?: VcsChange[];
 };
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
@@ -164,6 +165,33 @@ export type RecoveryPrompt = {
   sessionID?: string;
 };
 
+export type PendingPermission = {
+  requestID: string;
+  sessionID: string;
+  permission: string;
+  patterns: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type PendingQuestion = {
+  requestID: string;
+  sessionID: string;
+  questions: unknown[];
+};
+
+export type TodoItem = {
+  content: string;
+  status: string;
+  priority: string;
+};
+
+export type VcsChange = {
+  file: string;
+  additions: number;
+  deletions: number;
+  status: string;
+};
+
 export type EscConfirmMode = "reset" | "stop";
 
 export type LoopState = {
@@ -185,6 +213,9 @@ export type LoopState = {
   restartRequested: boolean;
   restartReason?: StepRestartReason;
   recovery: RecoveryPrompt | null;
+  pendingPermission: PendingPermission | null;
+  pendingQuestion: PendingQuestion | null;
+  todos: TodoItem[];
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
   resumable: boolean;
@@ -301,6 +332,9 @@ export function createLoopState({
     restartRequested: false,
     restartReason: undefined,
     recovery: null,
+    pendingPermission: null,
+    pendingQuestion: null,
+    todos: [],
     recoveryChoice: null,
     escConfirm: null,
     resumable: false,
@@ -312,6 +346,28 @@ export function createLoopState({
     history: [],
     historyView: null,
   };
+}
+
+export function setPendingPermission(state: LoopState, pending: PendingPermission | null): void {
+  state.pendingPermission = pending;
+  notifyStateChange();
+}
+
+export function setPendingQuestion(state: LoopState, pending: PendingQuestion | null): void {
+  state.pendingQuestion = pending;
+  notifyStateChange();
+}
+
+export function setTodos(state: LoopState, todos: TodoItem[]): void {
+  state.todos = todos;
+  notifyStateChange();
+}
+
+export function setStepVcsSummary(state: LoopState, stepIndex: number, changes: VcsChange[]): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.vcsSummary = changes;
+  notifyStateChange();
 }
 
 export function setGithubStatus(state: LoopState, status: GithubStatus): void {
@@ -510,6 +566,7 @@ export function beginStepRun(state: LoopState, stepIndex: number, options: { sta
   step.statusMessage = options.statusMessage;
   step.startedAt ??= Date.now();
   step.finishedAt = undefined;
+  state.todos = [];
   notify();
 }
 

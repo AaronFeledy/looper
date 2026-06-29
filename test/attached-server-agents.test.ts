@@ -7,6 +7,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
   assertAttachedServerAgentsLoaded,
   assertAttachedServerLocation,
+  assertConfiguredResourcesExist,
   formatAttachedServerAgentRestartPrompt,
 } from "../src/lib/attached-server-agents.ts";
 import { TITLE_AGENT_NAME } from "../src/lib/title-agent.ts";
@@ -15,6 +16,31 @@ function clientWithAgents(agents: Array<{ name: string }>): OpencodeClient {
   return {
     app: {
       agents: async () => ({ data: agents, error: undefined }),
+    },
+  } as unknown as OpencodeClient;
+}
+
+function clientWithResources({
+  agents = [],
+  commands,
+  skills,
+  tools,
+}: {
+  agents?: Array<{ name: string }>;
+  commands: Array<{ name: string }>;
+  skills: Array<{ name: string; location: string; content: string }>;
+  tools: string[];
+}): OpencodeClient {
+  return {
+    app: {
+      agents: async () => ({ data: agents, error: undefined }),
+      skills: async () => ({ data: skills, error: undefined }),
+    },
+    command: {
+      list: async () => ({ data: commands, error: undefined }),
+    },
+    tool: {
+      ids: async () => ({ data: tools, error: undefined }),
     },
   } as unknown as OpencodeClient;
 }
@@ -117,5 +143,77 @@ describe("attached server agent validation", () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+describe("configured resource validation", () => {
+  test("accepts configured agents that are loaded on the attached server", async () => {
+    await assertConfiguredResourcesExist({
+      client: clientWithResources({
+        agents: [{ name: "build" }, { name: "reviewer" }],
+        commands: [],
+        skills: [],
+        tools: [],
+      }),
+      repoDir: "/repo",
+      agents: ["build", "reviewer"],
+    });
+  });
+
+  test("rejects configured step agents missing from the attached server", async () => {
+    let message = "";
+    try {
+      await assertConfiguredResourcesExist({
+        client: clientWithResources({
+          agents: [{ name: "build" }],
+          commands: [],
+          skills: [],
+          tools: [],
+        }),
+        repoDir: "/repo",
+        agents: ["missing-agent"],
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("configured agent: missing-agent");
+  });
+
+  test("accepts configured commands, skills, and tools that are loaded on the attached server", async () => {
+    await assertConfiguredResourcesExist({
+      client: clientWithResources({
+        commands: [{ name: "ship" }],
+        skills: [{ name: "review-work", location: "builtin", content: "" }],
+        tools: ["bash", "edit"],
+      }),
+      repoDir: "/repo",
+      commands: ["ship"],
+      skills: ["review-work"],
+      tools: ["bash"],
+    });
+  });
+
+  test("rejects configured command, skill, and tool references missing from the attached server", async () => {
+    let message = "";
+    try {
+      await assertConfiguredResourcesExist({
+        client: clientWithResources({
+          commands: [{ name: "ship" }],
+          skills: [{ name: "review-work", location: "builtin", content: "" }],
+          tools: ["bash"],
+        }),
+        repoDir: "/repo",
+        commands: ["missing-command"],
+        skills: ["missing-skill"],
+        tools: ["missing-tool"],
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("configured command: missing-command");
+    expect(message).toContain("configured skill: missing-skill");
+    expect(message).toContain("configured tool: missing-tool");
   });
 });
