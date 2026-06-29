@@ -238,11 +238,17 @@ function createRunnerEventController({
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
 
-    const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir }).then((result) => {
-      if (result.error) throw new Error(formatRequestError(result.error));
-      pushLine(`[looper] permission '${payload.permission}' -> ${action}`);
-      setPendingPermission(state, null);
-    });
+    const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir })
+      .then((result) => {
+        if (result.error) throw new Error(formatRequestError(result.error));
+        pushLine(`[looper] permission '${payload.permission}' -> ${action}`);
+      })
+      .catch((error) => {
+        throw error;
+      })
+      .finally(() => {
+        setPendingPermission(state, null);
+      });
     trackReply(payload.requestID, request);
   };
 
@@ -257,11 +263,17 @@ function createRunnerEventController({
       questions: payload.questions,
     });
 
-    const request = client.question.reject({ requestID: payload.requestID, directory: repoDir }).then((result) => {
-      if (result.error) throw new Error(formatRequestError(result.error));
-      pushLine(`[looper] question rejected (questionPolicy=${effectiveQuestionPolicy})`);
-      setPendingQuestion(state, null);
-    });
+    const request = client.question.reject({ requestID: payload.requestID, directory: repoDir })
+      .then((result) => {
+        if (result.error) throw new Error(formatRequestError(result.error));
+        pushLine(`[looper] question rejected (questionPolicy=${effectiveQuestionPolicy})`);
+      })
+      .catch((error) => {
+        throw error;
+      })
+      .finally(() => {
+        setPendingQuestion(state, null);
+      });
     trackReply(payload.requestID, request);
   };
 

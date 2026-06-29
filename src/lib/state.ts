@@ -566,6 +566,7 @@ export function beginStepRun(state: LoopState, stepIndex: number, options: { sta
   step.statusMessage = options.statusMessage;
   step.startedAt ??= Date.now();
   step.finishedAt = undefined;
+  state.todos = [];
   notify();
 }
 
