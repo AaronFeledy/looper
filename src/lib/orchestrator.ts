@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { loadSteps, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { loadSteps, resolveContextPolicy, type ContextPolicy, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { buildLooperContext, withLooperContext, type ContextInput, type PriorStepInfo, type VcsSnapshot } from "./prompt-context.ts";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
@@ -42,6 +43,59 @@ function formatError(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+}
+
+/**
+ * Bounded timeout for the fresh, per-prompt-send VCS delta fetch used by the
+ * `<looper-context>` block (see prompt-context.ts). Deliberately separate
+ * from `captureStepVcsSummary`'s end-of-step display fetch below. Override
+ * with `LOOPER_PROMPT_VCS_TIMEOUT_MS` (tests use a tiny value so a hang
+ * doesn't slow the suite).
+ */
+function promptVcsTimeoutMs(): number {
+  const raw = Number(process.env["LOOPER_PROMPT_VCS_TIMEOUT_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+}
+
+/**
+ * Fetches the working-tree delta for the `<looper-context>` prompt block,
+ * fresh immediately before each prompt send. Never throws: a timeout, error,
+ * or missing `vcs.status` capability logs one `[looper]` line via `log` and
+ * resolves to `undefined` (section omitted), so a hanging or unsupported
+ * server can never block a step.
+ */
+async function fetchPromptVcsDelta(
+  client: OpencodeClient,
+  repoDir: string,
+  branch: string | undefined,
+  log: (line: string) => void,
+): Promise<VcsSnapshot | undefined> {
+  const timeoutMs = promptVcsTimeoutMs();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const status = await Promise.race([
+      client.vcs.status({ directory: repoDir }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`vcs.status timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+    if (status.error) {
+      log(`[looper] prompt vcs delta fetch failed: ${formatError(status.error)}`);
+      return undefined;
+    }
+    const changes = (status.data ?? []).map((change) => ({
+      file: change.file,
+      additions: change.additions,
+      deletions: change.deletions,
+      status: change.status,
+    }));
+    return { ...(branch !== undefined ? { branch } : {}), changes };
+  } catch (error) {
+    log(`[looper] prompt vcs delta fetch threw: ${formatError(error)}`);
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -147,6 +201,25 @@ export type RunIterationOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   vcsSummary?: boolean;
+  /**
+   * Total configured iteration budget for the "iteration N of M" line in the
+   * `<looper-context>` prompt block (see prompt-context.ts). Falls back to
+   * `state.maxIterations` when omitted, so existing callers that don't pass
+   * it keep working unchanged.
+   */
+  maxIterations?: number;
+  /** Global `context:` policy resolved from RuntimeConfig; per-step `contextPolicy` overrides it. Both default to all-true when omitted (see resolveContextPolicy in config.ts). */
+  contextPolicy?: Partial<ContextPolicy>;
+  /**
+   * Iteration-scoped opencode session ids for logical steps that finished
+   * BEFORE `startStepIndex` in a prior run of this same iteration (persisted
+   * via `.looper-run.json`'s `stepSessions` field). Seeds the
+   * `<looper-context>` prior-steps ledger on a mid-iteration resume; entries
+   * whose `stepIndex` is `>= startStepIndex` (the about-to-run/in-flight
+   * step) are ignored so a crash-mid-step can't leak its own session back to
+   * itself as a "prior step".
+   */
+  resumedStepSessions?: { stepIndex: number; stepName: string; sessionID: string }[];
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -476,8 +549,25 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     questionPolicy,
     useSessionIdle,
     vcsSummary,
+    maxIterations,
+    contextPolicy: globalContextPolicy,
+    resumedStepSessions,
   } = options;
   const completed: LoopStep[] = [];
+  // Logical-step ledger for the `<looper-context>` prior-steps section, keyed
+  // by `stepIndex` (config position; immune to duplicate step names) rather
+  // than row position in `state.steps` or dedupe-by-name like `completed`
+  // above (which is left untouched and keeps driving existing UI rendering).
+  // Exactly one entry is pushed per logical step, only once its retry/restart
+  // loop has fully resolved, so a step's own attempts never show up here as a
+  // distinct prior step.
+  const completedLogicalSteps: { stepIndex: number; name: string; status: StepResult; sessionID?: string }[] = [];
+  if (resumedStepSessions !== undefined) {
+    const seeded = [...resumedStepSessions].filter((entry) => entry.stepIndex < startStepIndex).sort((a, b) => a.stepIndex - b.stepIndex);
+    for (const entry of seeded) {
+      completedLogicalSteps.push({ stepIndex: entry.stepIndex, name: entry.stepName, status: "done", sessionID: entry.sessionID });
+    }
+  }
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
   let recoveryNudgePending = recoveryNudge;
@@ -829,10 +919,32 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = pendingResult;
         pendingResult = undefined;
       } else {
+        const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
+        const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
+          name: entry.name,
+          status: entry.status,
+          ...(entry.sessionID !== undefined ? { sessionID: entry.sessionID } : {}),
+        }));
+        const vcs = stepContextPolicy.vcsDelta
+          ? await fetchPromptVcsDelta(client, repoDir, state.branch || undefined, (line) => logStepLine(currentStepIndex, line))
+          : undefined;
+        const contextInput: ContextInput = {
+          now: new Date(),
+          repoDir,
+          iteration,
+          maxIterations: maxIterations ?? state.maxIterations,
+          stepName: step.name,
+          stepIndex: index,
+          totalSteps: steps.length,
+          priorSteps,
+          timeoutMs: budgetMs,
+          ...(vcs !== undefined ? { vcs } : {}),
+        };
+        const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
         result = await runOpenCodeStep({
           state,
           stepIndex: currentStepIndex,
-          prompt: resumePrompt ?? promptText(step),
+          prompt: withLooperContext(contextBlock, resumePrompt ?? promptText(step)),
           client,
           repoDir,
           step,
@@ -1165,6 +1277,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (result.status === "done") await captureStepVcsSummary(currentStepIndex);
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
+
+    const finishedSessionID = state.steps[currentStepIndex]?.sessionID;
+    completedLogicalSteps.push({
+      stepIndex: index,
+      name: step.name,
+      status: result.status,
+      ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+    });
 
     completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
 
