@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   loadRuntimeConfig,
   loadSteps,
+  resolveContextPolicy,
   resolvePermissionAction,
   type PermissionAction,
 } from "../src/lib/config.ts";
@@ -123,6 +124,137 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects invalid questionPolicy", () => {
     withConfigDir("questionPolicy: always\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/questionPolicy/);
+    });
+  });
+});
+
+describe("context policy config parsing", () => {
+  test("defaults contextPolicy to undefined and resolves all keys true when absent", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.contextPolicy).toBeUndefined();
+      const steps = loadSteps(dir);
+      expect(steps[0]!.contextPolicy).toBeUndefined();
+      expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+        datetime: true,
+        repoDir: true,
+        loopPosition: true,
+        timebox: true,
+        vcsDelta: true,
+        sessionIds: true,
+      });
+    });
+  });
+
+  test("parses a root context: mapping of known keys to booleans", () => {
+    withConfigDir(
+      ["context:", "  vcsDelta: false", "  sessionIds: false", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        expect(cfg.contextPolicy).toEqual({ vcsDelta: false, sessionIds: false });
+        const steps = loadSteps(dir);
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: true,
+          repoDir: true,
+          loopPosition: true,
+          timebox: true,
+          vcsDelta: false,
+          sessionIds: false,
+        });
+      },
+    );
+  });
+
+  test("per-step context override wins over the global override, per key", () => {
+    withConfigDir(
+      [
+        "context:",
+        "  vcsDelta: false",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    context:",
+        "      vcsDelta: true",
+        "      datetime: false",
+      ].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+        expect(steps[0]!.contextPolicy).toEqual({ vcsDelta: true, datetime: false });
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: false,
+          repoDir: true,
+          loopPosition: true,
+          timebox: true,
+          vcsDelta: true,
+          sessionIds: true,
+        });
+      },
+    );
+  });
+
+  test("context: false at root disables all keys", () => {
+    withConfigDir(["context: false", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.contextPolicy).toEqual({
+        datetime: false,
+        repoDir: false,
+        loopPosition: false,
+        timebox: false,
+        vcsDelta: false,
+        sessionIds: false,
+      });
+      const steps = loadSteps(dir);
+      expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+        datetime: false,
+        repoDir: false,
+        loopPosition: false,
+        timebox: false,
+        vcsDelta: false,
+        sessionIds: false,
+      });
+    });
+  });
+
+  test("context: false per-step disables all keys for that step only", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context: false"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: false,
+          repoDir: false,
+          loopPosition: false,
+          timebox: false,
+          vcsDelta: false,
+          sessionIds: false,
+        });
+      },
+    );
+  });
+
+  test("rejects an unknown context key, naming the key and valid keys", () => {
+    withConfigDir(["context:", "  bogus: true", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/bogus/);
+      expect(() => loadRuntimeConfig(dir)).toThrow(
+        /datetime.*repoDir.*loopPosition.*timebox.*vcsDelta.*sessionIds/s,
+      );
+    });
+  });
+
+  test("rejects an unknown per-step context key", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context:", "      bogus: true"].join("\n"),
+      (dir) => {
+        expect(() => loadSteps(dir)).toThrow(/bogus/);
+      },
+    );
+  });
+
+  test("rejects a non-boolean context value", () => {
+    withConfigDir(["context:", "  vcsDelta: yes-please", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/vcsDelta/);
     });
   });
 });
