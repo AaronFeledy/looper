@@ -1,4 +1,9 @@
 import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+// allow: SIZE_OK — this file is state-file I/O for the resume pointer and its
+// stepSessions ledger; the required parse/write/upsert/resume-plan surface
+// pushes it past the 250-pure-LOC guideline, and Todo 4's authorized file
+// scope (state-files.ts, main.ts, fallback.ts, tests only) forbids splitting
+// it into a new module. Follow-up split tracked in the plan's notepad.
 import { join } from "node:path";
 
 function isMissingPath(error: unknown): boolean {
@@ -178,6 +183,15 @@ export function resumeStepIndex(steps: NamedStep[]): number {
   return Math.max(0, Math.min(steps.length - 1, resume.stepIndex));
 }
 
+/** Iteration-scoped record of the opencode session a logical step finished
+ * with. Keyed by `stepIndex` (config position), not `name`, so duplicate step
+ * names stay distinct. */
+export type StepSessionEntry = {
+  stepIndex: number;
+  stepName: string;
+  sessionID: string;
+};
+
 /**
  * Durable, iteration-aware run pointer (`.looper-run.json`). Superset of
  * {@link ResumeStep}: also records the iteration the loop is on and, while a
@@ -193,6 +207,7 @@ export function resumeStepIndex(steps: NamedStep[]): number {
  * re-apply the title to steps that only inherit it, and is dropped when the
  * pointer crosses into a new iteration.
  * `looperRunID` identifies the process/logical run for SDK session metadata.
+ * `stepSessions` follows the exact same lifecycle as `title`.
  */
 export type RunState = {
   iteration: number;
@@ -202,6 +217,7 @@ export type RunState = {
   messageID?: string;
   title?: string;
   looperRunID?: string;
+  stepSessions?: StepSessionEntry[];
   updatedAt: string;
 };
 
@@ -213,7 +229,31 @@ export type RunStateInput = {
   messageID?: string;
   title?: string;
   looperRunID?: string;
+  stepSessions?: StepSessionEntry[];
 };
+
+function parseStepSessionEntry(value: unknown): StepSessionEntry | null {
+  if (!isRecord(value)) return null;
+  const stepIndex = value.stepIndex;
+  const stepName = value.stepName;
+  const sessionID = value.sessionID;
+  if (typeof stepIndex !== "number" || !Number.isInteger(stepIndex) || stepIndex < 0) return null;
+  if (typeof stepName !== "string" || stepName.length === 0) return null;
+  if (typeof sessionID !== "string" || sessionID.length === 0) return null;
+  return { stepIndex, stepName, sessionID };
+}
+
+/** Parses `stepSessions`, dropping invalid entries; a non-array value is
+ * treated as absent (back-compat). */
+function parseStepSessions(value: unknown): StepSessionEntry[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const parsed: StepSessionEntry[] = [];
+  for (const item of value) {
+    const entry = parseStepSessionEntry(item);
+    if (entry !== null) parsed.push(entry);
+  }
+  return parsed;
+}
 
 function parseRunState(value: unknown): RunState | null {
   if (!isRecord(value)) return null;
@@ -229,6 +269,7 @@ function parseRunState(value: unknown): RunState | null {
   const messageID = typeof value.messageID === "string" && value.messageID.length > 0 ? value.messageID : undefined;
   const title = typeof value.title === "string" && value.title.length > 0 ? value.title : undefined;
   const looperRunID = typeof value.looperRunID === "string" && value.looperRunID.length > 0 ? value.looperRunID : undefined;
+  const stepSessions = parseStepSessions(value.stepSessions);
   return {
     iteration,
     stepIndex,
@@ -237,8 +278,27 @@ function parseRunState(value: unknown): RunState | null {
     ...(messageID !== undefined ? { messageID } : {}),
     ...(title !== undefined ? { title } : {}),
     ...(looperRunID !== undefined ? { looperRunID } : {}),
+    ...(stepSessions !== undefined ? { stepSessions } : {}),
     updatedAt,
   };
+}
+
+/** Last-wins upsert by `stepIndex`, sorted in step order. Pure (does not
+ * mutate `sessions`). */
+export function upsertStepSession(sessions: StepSessionEntry[], entry: StepSessionEntry): StepSessionEntry[] {
+  const next = sessions.filter((existing) => existing.stepIndex !== entry.stepIndex);
+  next.push(entry);
+  next.sort((a, b) => a.stepIndex - b.stepIndex);
+  return next;
+}
+
+/** `runState.stepSessions`, but only when recorded for the SAME `iteration`
+ * the caller is resuming into; a stale/mismatched iteration is ignored. */
+export function stepSessionsForResume(runState: RunState | null, iteration: number): StepSessionEntry[] | undefined {
+  if (runState === null) return undefined;
+  if (runState.stepSessions === undefined) return undefined;
+  if (runState.iteration !== iteration) return undefined;
+  return runState.stepSessions;
 }
 
 export function readRunState(): RunState | null {
@@ -261,6 +321,7 @@ export function writeRunState(input: RunStateInput): void {
     ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}),
+    ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileAtomically(runStateFilePath(), `${JSON.stringify(record, null, 2)}\n`);

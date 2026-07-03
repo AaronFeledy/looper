@@ -36,12 +36,15 @@ import {
   readStopAfterIterationFile,
   readStopFile,
   resumeStepIndex,
+  stepSessionsForResume,
   stopAfterIterationFileExists,
   stopFileExists,
+  upsertStepSession,
   writeResumeStep,
   writeRunState,
   writeStopAfterIterationFile,
   writeStopFile,
+  type StepSessionEntry,
 } from "./lib/state-files.ts";
 import { createAgentStream } from "./tui/agent-stream.ts";
 import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
@@ -157,23 +160,57 @@ function saveNextResumeStep(steps: Step[], nextIndex: number): void {
   saveResumeStep(steps, nextIndex);
 }
 
-function saveRunStatePosition(iteration: number, steps: Step[], stepIndex: number, title?: string, looperRunID?: string): void {
-  const step = steps[stepIndex];
+type RunStatePositionInput = {
+  iteration: number;
+  steps: Step[];
+  stepIndex: number;
+  title?: string;
+  looperRunID?: string;
+  stepSessions?: StepSessionEntry[];
+};
+
+function saveRunStatePosition(input: RunStatePositionInput): void {
+  const step = input.steps[input.stepIndex];
   if (step === undefined) return;
-  writeRunState({ iteration, stepIndex, stepName: step.name, ...(title !== undefined ? { title } : {}), ...(looperRunID !== undefined ? { looperRunID } : {}) });
+  writeRunState({
+    iteration: input.iteration,
+    stepIndex: input.stepIndex,
+    stepName: step.name,
+    ...(input.title !== undefined ? { title: input.title } : {}),
+    ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}),
+    ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions } : {}),
+  });
 }
 
-function saveRunStateAdvance(iteration: number, steps: Step[], nextIndex: number, title?: string, looperRunID?: string): void {
+type RunStateAdvanceInput = {
+  iteration: number;
+  steps: Step[];
+  nextIndex: number;
+  title?: string;
+  looperRunID?: string;
+  stepSessions?: StepSessionEntry[];
+};
+
+function saveRunStateAdvance(input: RunStateAdvanceInput): void {
+  const { iteration, steps, nextIndex, title, looperRunID, stepSessions } = input;
   if (steps.length === 0) {
     clearRunStateFile();
     return;
   }
   if (nextIndex >= steps.length) {
-    // Crossing into a new iteration: the prior iteration's title does not carry.
+    // Crossing into a new iteration: neither the prior iteration's title nor
+    // its step sessions carry over.
     writeRunState({ iteration: iteration + 1, stepIndex: 0, stepName: steps[0]!.name, ...(looperRunID !== undefined ? { looperRunID } : {}) });
     return;
   }
-  writeRunState({ iteration, stepIndex: nextIndex, stepName: steps[nextIndex]!.name, ...(title !== undefined ? { title } : {}), ...(looperRunID !== undefined ? { looperRunID } : {}) });
+  writeRunState({
+    iteration,
+    stepIndex: nextIndex,
+    stepName: steps[nextIndex]!.name,
+    ...(title !== undefined ? { title } : {}),
+    ...(looperRunID !== undefined ? { looperRunID } : {}),
+    ...(stepSessions !== undefined ? { stepSessions } : {}),
+  });
 }
 
 function clearRunArtifactsForNewRun(): void {
@@ -218,6 +255,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     firstIterationResume: ResumeSession | undefined;
     resumed: boolean;
     firstIterationTitle: string | undefined;
+    firstIterationStepSessions: StepSessionEntry[] | undefined;
   };
   const computeResumePlan = (planSteps: Step[]): ResumePlan => {
     let planStartIteration = 1;
@@ -225,6 +263,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     let planResume: ResumeSession | undefined;
     let planResumed = false;
     let planTitle: string | undefined;
+    let planStepSessions: StepSessionEntry[] | undefined;
     if (!options.fresh) {
       const runState = readRunState();
       if (runState !== null) {
@@ -233,6 +272,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         const named = planSteps.findIndex((step) => step.name === runState.stepName);
         planStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(planSteps.length - 1, runState.stepIndex));
         planTitle = runState.title;
+        planStepSessions = stepSessionsForResume(runState, planStartIteration);
         looperRunID = runState.looperRunID ?? looperRunID;
         if (runState.sessionID !== undefined) {
           planResume = {
@@ -252,6 +292,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       planResume = undefined;
       planResumed = false;
       planTitle = undefined;
+      planStepSessions = undefined;
       clearRunArtifactsForNewRun();
       looperRunID = createLooperRunID();
     }
@@ -261,11 +302,21 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       firstIterationResume: planResume,
       resumed: planResumed,
       firstIterationTitle: planTitle,
+      firstIterationStepSessions: planStepSessions,
     };
   };
 
-  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle } =
+  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle, firstIterationStepSessions } =
     computeResumePlan(steps);
+
+  // Iteration-scoped, in-memory ledger of the opencode sessionID each logical
+  // step of the CURRENT iteration finished (or is in flight) with. Follows the
+  // exact same lifecycle as `firstIterationTitle`/`firstIterationResumed`:
+  // seeded here from a matching on-disk resume, replaced wholesale by
+  // `applyResumePlan`/manual restart, and reset to `[]` the moment the loop
+  // below crosses into a new iteration. Passed to `runIteration` as
+  // `resumedStepSessions` only for the first iteration processed.
+  let iterationStepSessions: StepSessionEntry[] = firstIterationStepSessions ?? [];
 
   const applyResumePlan = (plan: ResumePlan): void => {
     startIteration = plan.startIteration;
@@ -273,6 +324,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     firstIterationResume = plan.firstIterationResume;
     firstIterationResumed = plan.resumed;
     firstIterationTitle = plan.firstIterationTitle;
+    iterationStepSessions = plan.firstIterationStepSessions ?? [];
   };
 
   const autoStartIfSavedSessionRunning = async (client: ReturnType<typeof createOpencodeClient>): Promise<void> => {
@@ -576,6 +628,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       firstIterationWasResumed = false;
       firstIterationResumePoint = 0;
       firstIterationTitle = undefined;
+      iterationStepSessions = [];
       const freshSteps = loadSteps(configDir);
       state.steps = freshSteps.map((step) => createStepRow(step.name));
       state.stepOutputLines = freshSteps.map(() => []);
@@ -625,14 +678,15 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           // that checkpoint, the prefix steps were done in a prior process → pass
           // resumedPriorSteps so they render "done", not "skipped".
           firstIterationResumed = firstIterationWasResumed && (state.selectedStepIndex >= firstIterationResumePoint);
-          // Clear the title only if selecting before the checkpoint; keep it if
-          // resuming at/after the checkpoint so inherited-title steps still apply it.
+          // Clear the title and prior step sessions only if selecting before
+          // the checkpoint; keep both if resuming at/after the checkpoint so
+          // inherited-title steps and the context block still see them.
           if (!firstIterationResumed) {
             firstIterationTitle = undefined;
+            iterationStepSessions = [];
           }
         } else {
-          ({ startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle } =
-            computeResumePlan(loadSteps(configDir)));
+          applyResumePlan(computeResumePlan(loadSteps(configDir)));
         }
       }
       state.started = true;
@@ -688,8 +742,19 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     await waitForStart(state);
 
+    // Tracks the last `iteration` value processed so `iterationStepSessions`
+    // resets only on a genuine iteration boundary, never on the same-iteration
+    // `iteration -= 1; continue;` retry the StepFailureError recovery path
+    // below uses (which must keep the failed iteration's earlier step
+    // sessions intact for the retry's context block).
+    let stepSessionsIteration: number | undefined;
+
     for (let iteration = startIteration; iteration <= options.maxIterations; iteration += 1) {
       if (stopFileExists() || stopAfterIterationFileExists()) return finish(0, stopReason());
+      if (stepSessionsIteration !== iteration) {
+        if (stepSessionsIteration !== undefined) iterationStepSessions = [];
+        stepSessionsIteration = iteration;
+      }
 
       const iterationSteps = loadSteps(configDir);
       resetIterationState(state, iteration, state.branch || (await currentBranch()), iterationSteps);
@@ -708,19 +773,29 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           startStepIndex: iteration === startIteration ? firstIterationStartStepIndex : 0,
           ...(iteration === startIteration && firstIterationResumed ? { resumedPriorSteps: true } : {}),
           ...(iteration === startIteration && firstIterationTitle !== undefined ? { initialWorkDescription: firstIterationTitle } : {}),
+          ...(iteration === startIteration && iterationStepSessions.length > 0 ? { resumedStepSessions: iterationStepSessions } : {}),
           ...(resumeForThisIteration !== undefined ? { resume: resumeForThisIteration } : {}),
           ...(recoveryNudgeForThisIteration ? { recoveryNudge: true } : {}),
           ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
           ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
           ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
+          ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
           useSessionIdle: runtimeConfig.useSessionIdle,
           vcsSummary: runtimeConfig.vcsSummary,
           looperRunID,
+          maxIterations: options.maxIterations,
           recoverySnapshots: runtimeConfig.recovery.snapshots,
           hooks: {
             onStepBegin: ({ index, iteration: stepIteration, title }) => {
               saveResumeStep(loadSteps(configDir), index);
-              saveRunStatePosition(stepIteration, loadSteps(configDir), index, title, looperRunID);
+              saveRunStatePosition({
+                iteration: stepIteration,
+                steps: loadSteps(configDir),
+                stepIndex: index,
+                title,
+                looperRunID,
+                ...(iterationStepSessions.length > 0 ? { stepSessions: iterationStepSessions } : {}),
+              });
               // Step boundaries are common branch-change moments (the previous
               // step may have run `git checkout`); re-read HEAD immediately so
               // the header doesn't lag up to 5s behind reality.
@@ -728,12 +803,29 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
               githubWatcher?.refresh();
             },
             onStepSession: ({ iteration: stepIteration, index, stepName, sessionID, messageID, title }) => {
-              writeRunState({ iteration: stepIteration, stepIndex: index, stepName, sessionID, messageID, ...(title !== undefined ? { title } : {}), looperRunID });
+              iterationStepSessions = upsertStepSession(iterationStepSessions, { stepIndex: index, stepName, sessionID });
+              writeRunState({
+                iteration: stepIteration,
+                stepIndex: index,
+                stepName,
+                sessionID,
+                messageID,
+                ...(title !== undefined ? { title } : {}),
+                looperRunID,
+                stepSessions: iterationStepSessions,
+              });
             },
             onStepFinish: ({ nextIndex, status, iteration: stepIteration, title }) => {
               if (status === "done") {
                 saveNextResumeStep(loadSteps(configDir), nextIndex);
-                saveRunStateAdvance(stepIteration, loadSteps(configDir), nextIndex, title, looperRunID);
+                saveRunStateAdvance({
+                  iteration: stepIteration,
+                  steps: loadSteps(configDir),
+                  nextIndex,
+                  title,
+                  looperRunID,
+                  ...(iterationStepSessions.length > 0 ? { stepSessions: iterationStepSessions } : {}),
+                });
               }
               branchWatcher?.refresh();
               githubWatcher?.refresh();
@@ -775,6 +867,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         // recovered step keeps applying it (the failed step's run-state write
         // carries it for inherited-title steps).
         firstIterationTitle = recoveryRunState?.title;
+        // Same-iteration in-process retry: reuse the live in-memory ledger
+        // (already holds this iteration's earlier steps' sessions from the
+        // `onStepSession` hook above) rather than re-reading disk; only fall
+        // back to the persisted pointer if the in-memory ledger is somehow
+        // empty.
+        iterationStepSessions = iterationStepSessions.length > 0 ? iterationStepSessions : (recoveryRunState?.stepSessions ?? []);
         looperRunID = recoveryRunState?.looperRunID ?? looperRunID;
         disarmEscConfirm();
         clearStopFilesForNewRun();
@@ -860,6 +958,7 @@ async function main(): Promise<number> {
       ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
       useSessionIdle: runtimeConfig.useSessionIdle,
       vcsSummary: runtimeConfig.vcsSummary,
+      ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });
