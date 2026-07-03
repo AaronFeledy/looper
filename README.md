@@ -103,6 +103,42 @@ Per-step fields:
 - `prompt` &mdash; path to a markdown file; relative paths resolve against `.local/looper`.
 - `prefix`, `suffix` &mdash; literal text wrapped around the prompt file content. Looper inserts a blank line between prefix/file/suffix unless they already end with a newline.
 - `title` &mdash; see "Session titles" below.
+- `context` &mdash; see "Prompt context" below.
+
+### Prompt context
+
+Every prompt looper sends (fresh step, recovery nudge, restart, retry, background continuation) is
+prefixed with a small `<looper-context>` block giving the agent situational facts it would otherwise
+have to rediscover: current datetime, repo dir, loop position, this step's timebox, an uncached VCS
+delta, and the opencode session IDs of this iteration's already-finished steps (heading `Opencode
+sessions from earlier steps this iteration:`). The block is read-only context, never instructions, and
+never contains anything from a past iteration.
+
+Control it with `context:`, at the top level of `looper.yaml` and/or per-step, both optional and
+defaulting to everything on:
+
+```yaml
+context: false   # disable the block entirely for every step (shorthand for all six keys false)
+
+steps:
+  build:
+    ...
+    context:                # per-step override; each key defaults to true (or to the top-level value)
+      vcsDelta: false        # e.g. skip the (possibly large) file-change list for this one step
+      sessionIds: true
+```
+
+Valid keys: `datetime`, `repoDir`, `loopPosition`, `timebox`, `vcsDelta`, `sessionIds`. Each accepts a
+boolean; an unknown key throws at load time naming the offending key. `context: false` (top level or
+per-step) is shorthand for all six keys `false`; `context: true` or an absent `context:` leaves every
+key at its default (`true`). A per-step key wins over the top-level value for that same key, which wins
+over the default.
+
+`vcsDelta` is a file list + counts (branch plus each changed file's `+adds/-dels` and status), not a
+full diff, capped at 50 files; it is fetched fresh immediately before every prompt send and is
+independent of the `vcsSummary` TUI panel &mdash; turning one off does not affect the other. If the VCS
+lookup errors or hangs past its bound, looper logs one line and sends the prompt without that section
+rather than blocking or failing the step.
 
 ### Session titles
 
