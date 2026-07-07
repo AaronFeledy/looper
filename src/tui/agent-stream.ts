@@ -7,9 +7,11 @@ import {
   type CliRenderer,
 } from "@opentui/core";
 
+import type { LooperEvent } from "../core/events.ts";
 import type { BackgroundAgent, HistoryView, LoopState, LoopStep, ScrollIntent } from "../lib/state.ts";
-import { ansiToStyledText, stripAnsi } from "../lib/ansi.ts";
+import { ansiToStyledText } from "../lib/ansi.ts";
 import { backgroundAgentLabel, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
+import { eventsToOutputBlocks, type OutputBlock } from "../presentation/tui/stream-blocks.ts";
 
 type SelectedOutput = {
   step: LoopStep | null;
@@ -18,276 +20,11 @@ type SelectedOutput = {
   history: HistoryView | null;
   lines: string[];
   times: number[];
+  events: readonly LooperEvent[];
+  eventTimes: readonly number[];
 };
 
-export type OutputBlock =
-  | { kind: "lines"; lines: string[] }
-  | { kind: "group"; title: string; borderColor: string; contentColor: string; lines: string[]; firstSeenAt: number }
-  | { kind: "reasoning"; lines: string[]; firstSeenAt: number }
-  | { kind: "looper"; lines: string[]; firstSeenAt: number }
-  | { kind: "step-start"; firstSeenAt: number }
-  | { kind: "step-finish"; summary: string; firstSeenAt: number }
-  | { kind: "tool"; tool: string; callLine: string; status: "waiting" | "done" | "error"; outputLines: string[]; firstSeenAt: number };
-
-type ToolBlock = Extract<OutputBlock, { kind: "tool" }>;
-
 type OutputRenderable = BoxRenderable | TextRenderable;
-
-const GROUP_LINE_PREFIX = /^(?:\u001B\[[0-9;]*m)*│(?:\u001B\[[0-9;]*m)* ?/;
-
-function headerTitle(line: string): string | null {
-  const visible = stripAnsi(line);
-  if (!visible.startsWith("╭─ ")) return null;
-  return visible.slice(3).replace(/\s*(?:─+\s*)?\d{1,2}:\d{2}\s[ap]m$/, "").trim();
-}
-
-function headerColors(line: string, title: string): { borderColor: string; contentColor: string } {
-  if (line.includes("\u001b[32m") || title.startsWith("Tool output")) return { borderColor: "#a6e3a1", contentColor: "#cdd6f4" };
-  if (line.includes("\u001b[33m")) return { borderColor: "#f9e2af", contentColor: "#cdd6f4" };
-  if (line.includes("\u001b[31m")) return { borderColor: "#f38ba8", contentColor: "#cdd6f4" };
-  return { borderColor: "#89dceb", contentColor: "#cdd6f4" };
-}
-
-function groupContentLine(line: string): string {
-  if (GROUP_LINE_PREFIX.test(line)) return line.replace(GROUP_LINE_PREFIX, "");
-
-  const visible = stripAnsi(line);
-  if (visible.startsWith("│ ")) return visible.slice(2);
-
-  return line;
-}
-
-function toolCallName(line: string): string | null {
-  const visible = stripAnsi(line);
-  if (!visible.startsWith("◌ tool ")) return null;
-  return visible.slice("◌ tool ".length).split(" ")[0] || null;
-}
-
-function toolOutputName(title: string): string | null {
-  if (!title.startsWith("Tool output · ")) return null;
-  return title.slice("Tool output · ".length).trim() || null;
-}
-
-function toolFailureName(line: string): string | null {
-  const visible = stripAnsi(line);
-  if (!visible.startsWith("✗ tool failed ")) return null;
-  return visible.slice("✗ tool failed ".length).split(" ")[0] || null;
-}
-
-function isLooperLine(line: string): boolean {
-  return stripAnsi(line).startsWith("[looper]");
-}
-
-function stepDoneSummary(line: string): string | null {
-  if (!stripAnsi(line).startsWith("✓ step done")) return null;
-  return line;
-}
-
-function isStandaloneStatusLine(line: string): boolean {
-  const visible = stripAnsi(line);
-  return (
-    visible.startsWith("◌ tool") ||
-    visible.startsWith("✓ step done") ||
-    visible.startsWith("✗ tool failed") ||
-    visible.startsWith("✗ session error") ||
-    visible.startsWith("↻ retry") ||
-    visible.startsWith("[looper]")
-  );
-}
-
-export function parseOutputBlocks(lines: string[], times: number[]): OutputBlock[] {
-  const blocks: OutputBlock[] = [];
-  const pendingTools = new Map<string, ToolBlock[]>();
-  const pendingToolOrder: ToolBlock[] = [];
-  let pendingLines: string[] = [];
-  let currentGroup: Extract<OutputBlock, { kind: "group" }> | undefined;
-  let currentReasoning: Extract<OutputBlock, { kind: "reasoning" }> | undefined;
-  let currentLooper: Extract<OutputBlock, { kind: "looper" }> | undefined;
-  let currentTool: ToolBlock | undefined;
-  let currentToolAlreadyRendered = false;
-  const timeAt = (index: number): number => times[index] ?? Date.now();
-
-  const flushLines = () => {
-    if (pendingLines.length === 0) return;
-    blocks.push({ kind: "lines", lines: pendingLines });
-    pendingLines = [];
-  };
-
-  const flushGroup = () => {
-    if (currentGroup === undefined) return;
-    blocks.push(currentGroup);
-    currentGroup = undefined;
-  };
-
-  const flushReasoning = () => {
-    if (currentReasoning === undefined) return;
-    blocks.push(currentReasoning);
-    currentReasoning = undefined;
-  };
-
-  const flushLooper = () => {
-    if (currentLooper === undefined) return;
-    blocks.push(currentLooper);
-    currentLooper = undefined;
-  };
-
-  const flushTool = () => {
-    if (currentTool === undefined) return;
-    if (!currentToolAlreadyRendered) blocks.push(currentTool);
-    if (!currentToolAlreadyRendered && currentTool.status === "waiting") {
-      const tools = pendingTools.get(currentTool.tool) ?? [];
-      tools.push(currentTool);
-      pendingTools.set(currentTool.tool, tools);
-      pendingToolOrder.push(currentTool);
-    }
-    currentTool = undefined;
-    currentToolAlreadyRendered = false;
-  };
-
-  const removePendingTool = (tool: ToolBlock): void => {
-    const orderedIndex = pendingToolOrder.lastIndexOf(tool);
-    if (orderedIndex !== -1) pendingToolOrder.splice(orderedIndex, 1);
-    const tools = pendingTools.get(tool.tool);
-    if (tools === undefined) return;
-    const namedIndex = tools.lastIndexOf(tool);
-    if (namedIndex !== -1) tools.splice(namedIndex, 1);
-    if (tools.length === 0) pendingTools.delete(tool.tool);
-  };
-
-  const takePendingTool = (tool: string | null): { block: ToolBlock; alreadyRendered: boolean } | undefined => {
-    if (tool !== null && currentTool !== undefined && currentTool.tool === tool) return { block: currentTool, alreadyRendered: currentToolAlreadyRendered };
-    const requestedTool = tool;
-    const tools = requestedTool === null ? undefined : pendingTools.get(requestedTool);
-    const pendingTool = tools?.pop();
-    if (requestedTool !== null && tools !== undefined && tools.length === 0) pendingTools.delete(requestedTool);
-    if (pendingTool !== undefined) {
-      const orderedIndex = pendingToolOrder.lastIndexOf(pendingTool);
-      if (orderedIndex !== -1) pendingToolOrder.splice(orderedIndex, 1);
-      return { block: pendingTool, alreadyRendered: true };
-    }
-
-    const fallbackTool = pendingToolOrder.pop();
-    if (fallbackTool === undefined) return undefined;
-    removePendingTool(fallbackTool);
-    return { block: fallbackTool, alreadyRendered: true };
-  };
-
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex]!;
-
-    if (isLooperLine(line)) {
-      flushTool();
-      flushReasoning();
-      flushGroup();
-      flushLines();
-      if (currentLooper === undefined) currentLooper = { kind: "looper", lines: [], firstSeenAt: timeAt(lineIndex) };
-      currentLooper.lines.push(line);
-      continue;
-    }
-    flushLooper();
-
-    const stepDone = stepDoneSummary(line);
-    if (stepDone !== null) {
-      flushTool();
-      flushReasoning();
-      flushGroup();
-      flushLines();
-      blocks.push({ kind: "step-finish", summary: stepDone, firstSeenAt: timeAt(lineIndex) });
-      continue;
-    }
-
-    const title = headerTitle(line);
-    const toolName = toolCallName(line);
-
-    if (toolName !== null) {
-      flushReasoning();
-      flushGroup();
-      flushTool();
-      flushLines();
-      currentTool = { kind: "tool", tool: toolName, callLine: line, status: "waiting", outputLines: [], firstSeenAt: timeAt(lineIndex) };
-      currentToolAlreadyRendered = false;
-      continue;
-    }
-
-    if (title !== null) {
-      if (title === "OpenCode step") {
-        flushTool();
-        flushReasoning();
-        flushGroup();
-        flushLines();
-        blocks.push({ kind: "step-start", firstSeenAt: timeAt(lineIndex) });
-        continue;
-      }
-
-      const outputToolName = toolOutputName(title);
-      if (outputToolName !== null) {
-        const pendingTool = takePendingTool(outputToolName);
-        if (pendingTool !== undefined) {
-          pendingTool.block.status = "done";
-          currentTool = pendingTool.block;
-          currentToolAlreadyRendered = pendingTool.alreadyRendered;
-          flushReasoning();
-          flushGroup();
-          flushLines();
-          continue;
-        }
-      }
-
-      if (outputToolName !== null && currentTool !== undefined && outputToolName === currentTool.tool) {
-        currentTool.status = "done";
-        continue;
-      }
-
-      flushTool();
-      flushReasoning();
-      flushGroup();
-      flushLines();
-      if (title === "Reasoning") {
-        currentReasoning = { kind: "reasoning", lines: [], firstSeenAt: timeAt(lineIndex) };
-        continue;
-      }
-      currentGroup = { kind: "group", title, ...headerColors(line, title), lines: [], firstSeenAt: timeAt(lineIndex) };
-      continue;
-    }
-
-    const failedToolName = toolFailureName(line);
-    if (failedToolName !== null) {
-      const pendingTool = takePendingTool(failedToolName);
-      if (pendingTool !== undefined) {
-        pendingTool.block.status = "error";
-        pendingTool.block.outputLines.push(line);
-        currentTool = pendingTool.block;
-        currentToolAlreadyRendered = pendingTool.alreadyRendered;
-        continue;
-      }
-    }
-
-    if (currentGroup !== undefined && isStandaloneStatusLine(line)) {
-      flushGroup();
-    }
-
-    if (currentTool !== undefined && isStandaloneStatusLine(line)) {
-      flushTool();
-    }
-
-    if (currentReasoning !== undefined && isStandaloneStatusLine(line)) {
-      flushReasoning();
-    }
-
-    if (currentTool !== undefined && currentTool.status !== "waiting") currentTool.outputLines.push(groupContentLine(line));
-    else if (currentReasoning !== undefined) currentReasoning.lines.push(groupContentLine(line));
-    else if (currentGroup !== undefined) currentGroup.lines.push(groupContentLine(line));
-    else pendingLines.push(line);
-  }
-
-  flushTool();
-  flushReasoning();
-  flushLooper();
-  flushGroup();
-  flushLines();
-
-  return blocks;
-}
 
 function createTextBlock(renderer: CliRenderer, id: string, lines: string[], color = "#cdd6f4"): TextRenderable {
   return new TextRenderable(renderer, {
@@ -460,6 +197,8 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
       history: view,
       lines: hasLines ? view.lines : [historyPlaceholder(view)],
       times: hasLines ? view.lineTimes : [Date.now()],
+      events: view.events,
+      eventTimes: view.eventTimes,
     };
   }
 
@@ -484,6 +223,8 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
           history: null,
           lines: agent.outputLines,
           times: agent.outputLineTimes,
+      events: agent.outputEvents ?? [],
+      eventTimes: agent.outputEventTimes ?? [],
         };
       }
     }
@@ -494,6 +235,8 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
       history: null,
       lines: step.outputLines,
       times: step.outputLineTimes,
+      events: step.outputEvents ?? [],
+      eventTimes: step.outputEventTimes ?? [],
     };
   }
 
@@ -504,6 +247,8 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
     history: null,
     lines: state.agentLines,
     times: state.agentLineTimes,
+    events: state.agentEvents,
+    eventTimes: state.agentEventTimes,
   };
 }
 
@@ -555,7 +300,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
   let outputRenderables: OutputRenderable[] = [];
 
-  const replaceOutput = (lines: string[], times: number[]) => {
+  const replaceOutput = (output: SelectedOutput) => {
     for (const renderable of outputRenderables) {
       stream.content.remove(renderable.id);
       renderable.destroyRecursively();
@@ -563,9 +308,9 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
     outputRenderables = [];
 
-    const sourceLines = lines.length > 0 ? lines : ["No output yet."];
-    const sourceTimes = lines.length > 0 ? times : [Date.now()];
-    const blocks = parseOutputBlocks(sourceLines, sourceTimes);
+    const blocks = output.events.length > 0
+      ? eventsToOutputBlocks(output.events, output.eventTimes)
+      : [{ kind: "lines", lines: output.lines.length > 0 ? output.lines : ["No output yet."] } satisfies OutputBlock];
     blocks.forEach((block, index) => {
       let renderable: OutputRenderable;
       if (block.kind === "group") {
@@ -602,15 +347,16 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   const outputKey = (output: SelectedOutput): string => {
     let lengthHash = 0;
     for (const line of output.lines) lengthHash = (Math.imul(lengthHash, 31) + line.length) | 0;
+    for (const event of output.events) lengthHash = (Math.imul(lengthHash, 31) + event.kind.length) | 0;
     if (output.history !== null) {
-      return `history:${output.history.entryIndex}:${output.history.stepIndex}:${output.history.status}:${output.lines.length}:${lengthHash}`;
+      return `history:${output.history.entryIndex}:${output.history.stepIndex}:${output.history.status}:${output.lines.length}:${output.events.length}:${lengthHash}`;
     }
     const stepKey = output.stepIndex ?? "agent";
     const bgKey = output.backgroundAgent?.sessionID ?? "step";
     // Fold each line's length into a cheap rolling hash so a middle-of-stream
     // edit (same line count, same first/last line) still changes the key and
     // forces a re-render. O(line count), no content scan, so perf is unchanged.
-    return `${stepKey}:${bgKey}:${output.lines.length}:${lengthHash}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
+    return `${stepKey}:${bgKey}:${output.lines.length}:${output.events.length}:${lengthHash}:${output.lines[0] ?? ""}:${output.lines.at(-1) ?? ""}`;
   };
 
   const selectedScrollTarget = (): { outputScrollTop: number; outputPinnedToBottom: boolean } | null =>
@@ -721,7 +467,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     const nextOutputKey = outputKey(selectedOutput);
     if (nextOutputKey !== renderedOutputKey) {
       renderedOutputKey = nextOutputKey;
-      replaceOutput(selectedOutput.lines, selectedOutput.times);
+      replaceOutput(selectedOutput);
     }
     renderer.requestRender();
     if (syncingStateScroll) return;
