@@ -77,14 +77,4 @@ describe("prd.json reading", () => {
       expect(result).toEqual({ kind: "ok", remaining: 3, total: 4 });
     });
   });
-
-  test("reads the real beta-1 PRD as a smoke test", () => {
-    const result = readPrd("/home/aaron/projects/experiments/lando4-rewrite2/spec/beta-1");
-
-    if (result.kind !== "ok") throw new Error(`expected beta-1 prd.json to parse: ${result.message}`);
-    expect(result.total).toBe(41);
-    expect(Number.isInteger(result.remaining)).toBe(true);
-    expect(result.remaining).toBeGreaterThanOrEqual(0);
-    expect(result.remaining).toBeLessThanOrEqual(result.total);
-  });
 });
