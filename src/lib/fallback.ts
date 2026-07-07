@@ -39,6 +39,7 @@ export type FallbackOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   vcsSummary?: boolean;
+  prdDir?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 };
@@ -192,6 +193,7 @@ export async function runNonTty({
   questionPolicy,
   useSessionIdle,
   vcsSummary,
+  prdDir,
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
@@ -236,6 +238,7 @@ export async function runNonTty({
       ...(questionPolicy !== undefined ? { questionPolicy } : {}),
       ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
       ...(vcsSummary !== undefined ? { vcsSummary } : {}),
+      ...(prdDir !== undefined ? { prdDir } : {}),
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       currentBranch,
     });
@@ -317,6 +320,7 @@ export async function runNonTtyIterations({
   questionPolicy,
   useSessionIdle,
   vcsSummary,
+  prdDir,
   contextPolicy,
   currentBranch,
 }: {
@@ -330,6 +334,7 @@ export async function runNonTtyIterations({
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   vcsSummary?: boolean;
+  prdDir?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
@@ -404,6 +409,7 @@ export async function runNonTtyIterations({
       ...(questionPolicy !== undefined ? { questionPolicy } : {}),
       ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
       ...(vcsSummary !== undefined ? { vcsSummary } : {}),
+      ...(prdDir !== undefined ? { prdDir } : {}),
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       ...(iteration === startIteration && firstIterationResumedPriorSteps ? { resumedPriorSteps: true } : {}),
       ...(iteration === startIteration && iterationStepSessions.length > 0 ? { resumedStepSessions: iterationStepSessions } : {}),

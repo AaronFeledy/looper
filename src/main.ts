@@ -20,11 +20,24 @@ import {
   DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
   LOOPER_MANAGED_RESOURCES,
 } from "./lib/opencode-managed-resources.ts";
+import { type PrdWatcher, watchPrd } from "./lib/prd-watcher.ts";
 import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
 import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
-import { cancelPendingNotify, createLoopState, createStepRow, dismissEscConfirm, type EscConfirmMode, notify, resetIterationNavigationState, setGithubStatus, snapshotIterationToHistory } from "./lib/state.ts";
+import {
+  cancelPendingNotify,
+  createLoopState,
+  createStepRow,
+  dismissEscConfirm,
+  type EscConfirmMode,
+  notify,
+  resetIterationNavigationState,
+  resetPrdIterationBaseline,
+  setGithubStatus,
+  setPrdStatus,
+  snapshotIterationToHistory,
+} from "./lib/state.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
 import {
   clearStopAfterIterationFile,
@@ -53,6 +66,7 @@ import { createGithubStatusPanel } from "./tui/github-status.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
+import { createPrdPanel } from "./tui/prd-status.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 import { createTodoPanel } from "./tui/todo-panel.ts";
 import { createVcsSummaryPanel } from "./tui/vcs-summary.ts";
@@ -120,6 +134,7 @@ function resetIterationState(
   state.stepOutputLines = steps.map(() => []);
   state.steps = steps.map((step) => createStepRow(step.name));
   resetIterationNavigationState(state);
+  resetPrdIterationBaseline(state);
   notify();
 }
 
@@ -388,6 +403,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let branchWatcher: BranchWatcher | null = null;
   let branchSafetyTimer: ReturnType<typeof setInterval> | undefined;
   let githubWatcher: GithubWatcher | undefined;
+  let prdWatcher: PrdWatcher | undefined;
   let exitReason: string | undefined;
 
   const finish = (exitCode: number, reason: string): number => {
@@ -511,7 +527,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
 
     bootScreen.begin("Loading configuration");
-    const runtimeConfig = loadRuntimeConfig(configDir);
+    const runtimeConfig = loadRuntimeConfig(configDir, repoDir);
     const attachUrl = resolveAttachUrl(options, runtimeConfig);
 
     bootScreen.begin(attachUrl !== undefined ? `Attaching to opencode (${attachUrl})` : "Starting opencode server");
@@ -587,6 +603,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
     leftColumn.add(createTodoPanel(renderer, state));
     leftColumn.add(createVcsSummaryPanel(renderer, state));
+    if (runtimeConfig.prdDir !== undefined) {
+      leftColumn.add(createPrdPanel(renderer, state));
+      prdWatcher = watchPrd({
+        prdDir: runtimeConfig.prdDir,
+        onUpdate: (status) => setPrdStatus(state, status),
+      });
+    }
     bootScreen.done();
 
     root.add(createHeader(renderer, state));
@@ -780,6 +803,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
           ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
           ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
+          ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
           useSessionIdle: runtimeConfig.useSessionIdle,
           vcsSummary: runtimeConfig.vcsSummary,
           looperRunID,
@@ -908,6 +932,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     backgroundAgentStreamer?.stop();
     historyStreamer?.stop();
     githubWatcher?.stop();
+    prdWatcher?.stop();
     if (branchSafetyTimer !== undefined) clearInterval(branchSafetyTimer);
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);
@@ -945,7 +970,7 @@ async function main(): Promise<number> {
       return 0;
     }
 
-    const runtimeConfig = loadRuntimeConfig(configDir);
+    const runtimeConfig = loadRuntimeConfig(configDir, repoDir);
     await runNonTty({
       options,
       repoDir,
@@ -959,6 +984,7 @@ async function main(): Promise<number> {
       useSessionIdle: runtimeConfig.useSessionIdle,
       vcsSummary: runtimeConfig.vcsSummary,
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
+      ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });

@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { $ } from "bun";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
@@ -51,6 +52,30 @@ function setupScratch(steps: StepSpec[]): { repoDir: string; configDir: string }
     if (step.context !== undefined) lines.push(`    context: ${step.context}`);
   }
   writeFileSync(join(configDir, "looper.yaml"), `${lines.join("\n")}\n`);
+  return { repoDir, configDir };
+}
+
+/**
+ * A real git repo (not just a scratch dir) for the committed-branch-delta
+ * tests: `main` gets one commit, then an optional `feature` branch is
+ * created with `featureCommits` more commits on top, each ADDING a distinct
+ * `feature-<i>.txt` file (real file changes, not `--allow-empty` commits,
+ * since these tests assert on the branch's changed FILE PATHS, not just an
+ * ahead count). Leaves the checkout on `feature` when it was created, else
+ * on `main`.
+ */
+async function setupGitScratch(steps: StepSpec[], featureCommits: number): Promise<{ repoDir: string; configDir: string }> {
+  const { repoDir, configDir } = setupScratch(steps);
+  await $`git init -q -b main`.cwd(repoDir).quiet();
+  await $`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`.cwd(repoDir).quiet();
+  if (featureCommits > 0) {
+    await $`git checkout -q -b feature`.cwd(repoDir).quiet();
+    for (let i = 0; i < featureCommits; i += 1) {
+      writeFileSync(join(repoDir, `feature-${i}.txt`), `feature file ${i}\n`);
+      await $`git add feature-${i}.txt`.cwd(repoDir).quiet();
+      await $`git -c user.email=t@t -c user.name=t commit -q -m feature-${i}`.cwd(repoDir).quiet();
+    }
+  }
   return { repoDir, configDir };
 }
 
@@ -389,5 +414,174 @@ describe("runIteration <looper-context> prompt injection", () => {
     expect(stub.promptTexts[0]).toContain("Repo dir:");
     expect(stub.promptTexts[0]).toContain("Loop position:");
     expect(stub.promptTexts[0]).toContain("This step is aborted after");
+  });
+
+  test("prdDir injects a fresh PRD progress line into the step context", async () => {
+    const { repoDir, configDir } = setupScratch([{ key: "build" }]);
+    scratchDirs.push(repoDir);
+    const prdDir = join(repoDir, "spec");
+    mkdirSync(prdDir, { recursive: true });
+    writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ passes: true }, { passes: false }, {}] }));
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeClient({ repoDir, sessionIDs: ["ses_build"] });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).toContain("PRD: 1 of 3 user stories passing (2 remaining)");
+  });
+
+  test("contextPolicy prd false omits the PRD line even when prdDir is readable", async () => {
+    const { repoDir, configDir } = setupScratch([{ key: "build" }]);
+    scratchDirs.push(repoDir);
+    const prdDir = join(repoDir, "spec");
+    mkdirSync(prdDir, { recursive: true });
+    writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ passes: true }] }));
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeClient({ repoDir, sessionIDs: ["ses_build"] });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir, contextPolicy: { prd: false } });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).not.toContain("PRD:");
+  });
+
+  test("invalid prd.json silently omits the PRD line", async () => {
+    const { repoDir, configDir } = setupScratch([{ key: "build" }]);
+    scratchDirs.push(repoDir);
+    const prdDir = join(repoDir, "spec");
+    mkdirSync(prdDir, { recursive: true });
+    writeFileSync(join(prdDir, "prd.json"), "not json");
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeClient({ repoDir, sessionIDs: ["ses_build"] });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).not.toContain("PRD:");
+  });
+});
+
+describe("runIteration <looper-context> committed branch delta (real git repos)", () => {
+  const scratchDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("clean feature branch (zero uncommitted changes) shows the branch's committed changed file paths, not just an ahead count", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 2);
+    scratchDirs.push(repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({ repoDir, sessionID: "ses_build", vcsStatus: async () => ({ data: [] }) });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).toContain("2 commits ahead of main");
+    expect(stub.promptTexts[0]).toContain("Branch changes vs main:");
+    expect(stub.promptTexts[0]).toContain("feature-0.txt (+1/-0, added)");
+    expect(stub.promptTexts[0]).toContain("feature-1.txt (+1/-0, added)");
+  });
+
+  test("committed branch delta and uncommitted file changes render as separate, non-confusing sections", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 1);
+    scratchDirs.push(repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({
+      repoDir,
+      sessionID: "ses_build",
+      vcsStatus: async () => ({ data: [{ file: "src/a.ts", additions: 4, deletions: 1, status: "modified" }] }),
+    });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    const prompt = stub.promptTexts[0] ?? "";
+    expect(prompt).toContain("1 commit ahead of main");
+    expect(prompt).toContain("Branch changes vs main:");
+    expect(prompt).toContain("feature-0.txt (+1/-0, added)");
+    expect(prompt).toContain("Uncommitted:");
+    expect(prompt).toContain("src/a.ts (+4/-1, modified)");
+    // Uncommitted's own file must not appear under the branch-delta heading (it was never committed).
+    const branchSection = prompt.slice(prompt.indexOf("Branch changes vs main:"), prompt.indexOf("Uncommitted:"));
+    expect(branchSection).not.toContain("src/a.ts");
+  });
+
+  test("a file changed both in the committed branch delta and the working tree renders once per group with distinct stats", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 1);
+    scratchDirs.push(repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({
+      repoDir,
+      sessionID: "ses_build",
+      // Same path the feature commit already added, further modified in the working tree.
+      vcsStatus: async () => ({ data: [{ file: "feature-0.txt", additions: 1, deletions: 0, status: "modified" }] }),
+    });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    const prompt = stub.promptTexts[0] ?? "";
+    const branchSection = prompt.slice(prompt.indexOf("Branch changes vs main:"), prompt.indexOf("Uncommitted:"));
+    const uncommittedSection = prompt.slice(prompt.indexOf("Uncommitted:"));
+    expect(branchSection).toContain("feature-0.txt (+1/-0, added)");
+    expect(uncommittedSection).toContain("feature-0.txt (+1/-0, modified)");
+  });
+
+  test("no divergent commits (on main) never fabricates a branch-changes section, and still lists uncommitted files", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 0);
+    scratchDirs.push(repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({
+      repoDir,
+      sessionID: "ses_build",
+      vcsStatus: async () => ({ data: [{ file: "README.md", additions: 1, deletions: 0, status: "modified" }] }),
+    });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).not.toContain("ahead of");
+    expect(stub.promptTexts[0]).not.toContain("Branch changes vs");
+    expect(stub.promptTexts[0]).toContain("README.md (+1/-0, modified)");
+  });
+
+  test("vcsDelta: false suppresses the branch-changes section even with real commits ahead of main", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 3);
+    scratchDirs.push(repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({ repoDir, sessionID: "ses_build", vcsStatus: async () => ({ data: [] }) });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: { vcsDelta: false } });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).not.toContain("VCS delta");
+    expect(stub.promptTexts[0]).not.toContain("ahead of");
+    expect(stub.promptTexts[0]).not.toContain("feature-0.txt");
+  });
+
+  test("a feature branch tracking its own origin/<feature> upstream still reports its delta vs main, not vs its own upstream", async () => {
+    const { repoDir, configDir } = await setupGitScratch([{ key: "build" }], 1);
+    scratchDirs.push(repoDir);
+    // Fake a remote-tracking ref for "origin/feature" pointing at the SAME commit as local
+    // feature (0 commits ahead of ITS OWN upstream), and set the branch to track it - this
+    // reproduces a normal `git push -u origin feature` setup without needing a real remote.
+    // Verified empirically in a scratch repo: @{u} resolves to "origin/feature" with 0 commits
+    // ahead of it, while the branch is still 1 commit / 1 file ahead of "main". The prior
+    // upstream-first implementation returned NO branch delta here - this is the regression test.
+    await $`git remote add origin https://example.invalid/repo.git`.cwd(repoDir).quiet();
+    await $`git update-ref refs/remotes/origin/feature refs/heads/feature`.cwd(repoDir).quiet();
+    await $`git config branch.feature.remote origin`.cwd(repoDir).quiet();
+    await $`git config branch.feature.merge refs/heads/feature`.cwd(repoDir).quiet();
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const stub = makeVcsClient({ repoDir, sessionID: "ses_build", vcsStatus: async () => ({ data: [] }) });
+
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+
+    expect(result).toBe("complete");
+    expect(stub.promptTexts[0]).toContain("1 commit ahead of main");
+    expect(stub.promptTexts[0]).toContain("Branch changes vs main:");
+    expect(stub.promptTexts[0]).toContain("feature-0.txt (+1/-0, added)");
   });
 });
