@@ -3,6 +3,7 @@ export type ContextPolicy = {
   readonly repoDir: boolean;
   readonly loopPosition: boolean;
   readonly timebox: boolean;
+  readonly prd: boolean;
   readonly vcsDelta: boolean;
   readonly sessionIds: boolean;
 };
@@ -20,9 +21,19 @@ export type VcsChange = {
   readonly status: string;
 };
 
+export type VcsBranchDelta = {
+  readonly base: string;
+  readonly aheadCount: number;
+  /** Files changed by the branch's committed delta vs `base` (merge-base relative); never includes working-tree-only changes. */
+  readonly changes: readonly VcsChange[];
+};
+
 export type VcsSnapshot = {
   readonly branch?: string;
+  /** Uncommitted working-tree changes. */
   readonly changes: readonly VcsChange[];
+  /** The branch's committed delta vs its resolved base; absent when on the base branch or not determinable. */
+  readonly branchDelta?: VcsBranchDelta;
 };
 
 export type ContextInput = {
@@ -35,6 +46,7 @@ export type ContextInput = {
   readonly totalSteps: number;
   readonly priorSteps: readonly PriorStepInfo[];
   readonly timeoutMs: number;
+  readonly prd?: { readonly remaining: number; readonly total: number };
   readonly vcs?: VcsSnapshot;
 };
 
@@ -72,6 +84,10 @@ function buildLoopPositionLine(input: ContextInput): string {
   return `${base}; prior steps this iteration: ${statuses}`;
 }
 
+function buildPrdLine(prd: { readonly remaining: number; readonly total: number }): string {
+  return `PRD: ${prd.total - prd.remaining} of ${prd.total} user stories passing (${prd.remaining} remaining)`;
+}
+
 function buildSessionLines(priorSteps: readonly PriorStepInfo[]): string[] {
   const seen = new Set<string>();
   const lines: string[] = [];
@@ -87,25 +103,55 @@ function formatVcsLine(change: VcsChange): string {
   return `  - ${change.file} (+${change.additions}/-${change.deletions}, ${change.status})`;
 }
 
-function buildVcsHeader(branch: string | undefined, total: number, shown: number): string {
-  const branchPart = branch ? `branch ${branch}, ` : "";
+function buildVcsHeader(vcs: VcsSnapshot, total: number, shown: number): string {
+  const branchPart = vcs.branch ? `branch ${vcs.branch}, ` : "";
+  const delta = vcs.branchDelta;
+  const aheadPart = delta ? `${delta.aheadCount} commit${delta.aheadCount === 1 ? "" : "s"} ahead of ${delta.base}, ` : "";
   const omitted = total - shown;
   const morePart = omitted > 0 ? ` (+${omitted} more)` : "";
   const fileWord = total === 1 ? "file" : "files";
-  return `VCS delta (${branchPart}${shown} of ${total} changed ${fileWord} shown${morePart}):`;
+  return `VCS delta (${branchPart}${aheadPart}${shown} of ${total} changed ${fileWord} shown${morePart}):`;
+}
+
+type TaggedVcsChange = { readonly origin: "branch" | "worktree"; readonly change: VcsChange };
+
+function formatVcsGroup(heading: string, changes: readonly VcsChange[]): string {
+  return [heading, ...changes.map(formatVcsLine)].join("\n");
+}
+
+/**
+ * Renders the kept, already-capped changes. When `vcs.branchDelta` is absent
+ * this is a flat list (unchanged from before branch-delta support existed).
+ * When present, committed branch-delta files and uncommitted working-tree
+ * files render under separate labeled headings so an overlapping file (e.g.
+ * modified on the branch AND further modified in the working tree) shows up
+ * as two distinct, clearly-attributed lines instead of one ambiguous one.
+ */
+function buildVcsBody(vcs: VcsSnapshot, kept: readonly TaggedVcsChange[]): string {
+  if (vcs.branchDelta === undefined) return kept.map((tagged) => formatVcsLine(tagged.change)).join("\n");
+  const branchKept = kept.filter((tagged) => tagged.origin === "branch").map((tagged) => tagged.change);
+  const worktreeKept = kept.filter((tagged) => tagged.origin === "worktree").map((tagged) => tagged.change);
+  const groups: string[] = [];
+  if (branchKept.length > 0) groups.push(formatVcsGroup(`Branch changes vs ${vcs.branchDelta.base}:`, branchKept));
+  if (worktreeKept.length > 0) groups.push(formatVcsGroup("Uncommitted:", worktreeKept));
+  return groups.join("\n");
 }
 
 function buildVcsSection(vcs: VcsSnapshot, budgetChars: number): string {
-  const total = vcs.changes.length;
-  const capped = vcs.changes.slice(0, VCS_FILE_CAP);
+  const tagged: TaggedVcsChange[] = [
+    ...(vcs.branchDelta?.changes ?? []).map((change) => ({ origin: "branch", change }) as const),
+    ...vcs.changes.map((change) => ({ origin: "worktree", change }) as const),
+  ];
+  const total = tagged.length;
+  const capped = tagged.slice(0, VCS_FILE_CAP);
   for (let count = capped.length; count >= 0; count -= 1) {
     const kept = capped.slice(0, count);
-    const header = buildVcsHeader(vcs.branch, total, kept.length);
-    const body = kept.map(formatVcsLine).join("\n");
+    const header = buildVcsHeader(vcs, total, kept.length);
+    const body = buildVcsBody(vcs, kept);
     const candidate = body.length > 0 ? `${header}\n${body}` : header;
     if (candidate.length <= budgetChars || count === 0) return candidate;
   }
-  return buildVcsHeader(vcs.branch, total, 0);
+  return buildVcsHeader(vcs, total, 0);
 }
 
 export function buildLooperContext(policy: ContextPolicy, input: ContextInput): string {
@@ -114,13 +160,14 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
   if (policy.repoDir) fixedLines.push(`Repo dir: ${input.repoDir}`);
   if (policy.loopPosition) fixedLines.push(buildLoopPositionLine(input));
   if (policy.timebox) fixedLines.push(`This step is aborted after ${formatDuration(input.timeoutMs)}`);
+  if (policy.prd && input.prd !== undefined) fixedLines.push(buildPrdLine(input.prd));
   const fixedBlock = fixedLines.join("\n");
 
   const sessionLines = policy.sessionIds ? buildSessionLines(input.priorSteps) : [];
   const sessionsBlock = sessionLines.length > 0 ? [SESSIONS_HEADING, ...sessionLines].join("\n") : "";
 
   const vcs = input.vcs;
-  const vcsEligible = policy.vcsDelta && vcs !== undefined && vcs.changes.length > 0;
+  const vcsEligible = policy.vcsDelta && vcs !== undefined;
 
   if (fixedBlock.length === 0 && sessionsBlock.length === 0 && !vcsEligible) return "";
 

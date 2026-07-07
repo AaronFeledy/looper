@@ -16,6 +16,7 @@ const ALL_ON: ContextPolicy = {
   repoDir: true,
   loopPosition: true,
   timebox: true,
+  prd: true,
   vcsDelta: true,
   sessionIds: true,
 };
@@ -25,6 +26,7 @@ const ALL_OFF: ContextPolicy = {
   repoDir: false,
   loopPosition: false,
   timebox: false,
+  prd: false,
   vcsDelta: false,
   sessionIds: false,
 };
@@ -45,8 +47,9 @@ function baseInput(overrides: Partial<ContextInput> = {}): ContextInput {
 }
 
 describe("buildLooperContext", () => {
-  test("renders all 6 sections when policy is all-on and data is present", () => {
+  test("renders all sections when policy is all-on and data is present", () => {
     const input = baseInput({
+      prd: { remaining: 13, total: 41 },
       priorSteps: [
         { name: "build", status: "done", sessionID: "ses_build1" },
         { name: "lint", status: "done", sessionID: "ses_lint1" },
@@ -71,6 +74,7 @@ describe("buildLooperContext", () => {
     expect(block).toMatch(/step "test" \(2 of 3\)/);
     // timebox
     expect(block).toMatch(/90m/);
+    expect(block).toContain("PRD: 28 of 41 user stories passing (13 remaining)");
     // vcsDelta
     expect(block).toContain("main");
     expect(block).toContain("src/a.ts");
@@ -124,6 +128,9 @@ describe("buildLooperContext", () => {
         case "timebox":
           expect(block).not.toMatch(/aborted after/);
           break;
+        case "prd":
+          expect(block).not.toContain("PRD:");
+          break;
         case "vcsDelta":
           expect(block).not.toContain("a.ts");
           break;
@@ -134,11 +141,93 @@ describe("buildLooperContext", () => {
     });
   }
 
-  test("empty vcs changes omits the vcsDelta section entirely", () => {
+  test("branch with zero uncommitted changes still renders the VCS section with the branch name", () => {
     const input = baseInput({ vcs: { branch: "main", changes: [] } });
     const block = buildLooperContext(ALL_ON, input);
+    expect(block).toContain("VCS delta (branch main, 0 of 0 changed files shown):");
+  });
+
+  test("vcsDelta disabled still omits the VCS section even with a branch and zero changes", () => {
+    const input = baseInput({ vcs: { branch: "main", changes: [] } });
+    const block = buildLooperContext({ ...ALL_ON, vcsDelta: false }, input);
     expect(block).not.toContain("VCS delta");
-    expect(block).not.toContain("changed file");
+  });
+
+  test("committed branch delta lists the branch's changed file paths, not just an ahead count, with zero uncommitted files", () => {
+    const input = baseInput({
+      vcs: {
+        branch: "feature/x",
+        changes: [],
+        branchDelta: {
+          base: "main",
+          aheadCount: 3,
+          changes: [
+            { file: "src/a.ts", additions: 10, deletions: 2, status: "modified" },
+            { file: "src/new.ts", additions: 5, deletions: 0, status: "added" },
+          ],
+        },
+      },
+    });
+    const block = buildLooperContext(ALL_ON, input);
+    expect(block).toContain("VCS delta (branch feature/x, 3 commits ahead of main, 2 of 2 changed files shown):");
+    expect(block).toContain("Branch changes vs main:");
+    expect(block).toContain("src/a.ts (+10/-2, modified)");
+    expect(block).toContain("src/new.ts (+5/-0, added)");
+  });
+
+  test("an ahead count alone (no file list) is not sufficient - regression guard for the ahead-count-only shape", () => {
+    const input = baseInput({
+      vcs: { branch: "feature/x", changes: [], branchDelta: { base: "main", aheadCount: 3, changes: [] } },
+    });
+    const block = buildLooperContext(ALL_ON, input);
+    // The ahead count may still appear in the header, but with zero files there is nothing to list -
+    // this asserts the header alone never claims files were shown when none were collected.
+    expect(block).toContain("0 of 0 changed files shown");
+    expect(block).not.toContain("Branch changes vs main:");
+  });
+
+  test("committed branch delta and uncommitted file changes render as clearly separate, non-confusing groups", () => {
+    const input = baseInput({
+      vcs: {
+        branch: "feature/x",
+        changes: [{ file: "src/a.ts", additions: 2, deletions: 0, status: "modified" }],
+        branchDelta: {
+          base: "main",
+          aheadCount: 1,
+          changes: [{ file: "src/a.ts", additions: 10, deletions: 2, status: "modified" }],
+        },
+      },
+    });
+    const block = buildLooperContext(ALL_ON, input);
+    expect(block).toContain("1 commit ahead of main");
+    expect(block).toContain("Branch changes vs main:");
+    expect(block).toContain("Uncommitted:");
+    // The same file appears once under each heading with its own distinct stats - not merged/ambiguous.
+    const branchSection = block.slice(block.indexOf("Branch changes vs main:"), block.indexOf("Uncommitted:"));
+    const uncommittedSection = block.slice(block.indexOf("Uncommitted:"));
+    expect(branchSection).toContain("src/a.ts (+10/-2, modified)");
+    expect(uncommittedSection).toContain("src/a.ts (+2/-0, modified)");
+  });
+
+  test("branchDelta without a branch name still renders the ahead-of-base line and file list", () => {
+    const input = baseInput({
+      vcs: {
+        changes: [],
+        branchDelta: { base: "origin/main", aheadCount: 5, changes: [{ file: "x.ts", additions: 1, deletions: 0, status: "added" }] },
+      },
+    });
+    const block = buildLooperContext(ALL_ON, input);
+    expect(block).toContain("VCS delta (5 commits ahead of origin/main, 1 of 1 changed file shown):");
+    expect(block).toContain("Branch changes vs origin/main:");
+    expect(block).toContain("x.ts (+1/-0, added)");
+  });
+
+  test("no branchDelta (on base branch) never fabricates a 'Branch changes' section", () => {
+    const input = baseInput({ vcs: { branch: "main", changes: [{ file: "README.md", additions: 1, deletions: 0, status: "modified" }] } });
+    const block = buildLooperContext(ALL_ON, input);
+    expect(block).not.toContain("Branch changes vs");
+    expect(block).not.toContain("ahead of");
+    expect(block).toContain("README.md (+1/-0, modified)");
   });
 
   test("vcs list truncates at 50 files with (+N more)", () => {
@@ -194,6 +283,26 @@ describe("buildLooperContext", () => {
       vcs: { branch: "main", changes: [{ file: "a.ts", additions: 1, deletions: 0, status: "modified" }] },
     });
     expect(buildLooperContext(ALL_OFF, input)).toBe("");
+  });
+
+  test("renders the neutral PRD progress line when policy and input are present", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({ prd: { remaining: 13, total: 41 } }));
+
+    expect(block).toContain("PRD: 28 of 41 user stories passing (13 remaining)");
+    expect(block.startsWith("<looper-context>")).toBe(true);
+    expect(block.endsWith("</looper-context>")).toBe(true);
+  });
+
+  test("omits the PRD progress line when policy is off", () => {
+    const block = buildLooperContext({ ...ALL_ON, prd: false }, baseInput({ prd: { remaining: 13, total: 41 } }));
+
+    expect(block).not.toContain("PRD:");
+  });
+
+  test("omits the PRD progress line when input is absent", () => {
+    const block = buildLooperContext(ALL_ON, baseInput());
+
+    expect(block).not.toContain("PRD:");
   });
 
   test("empty priorSteps and no vcs with all-on policy renders remaining sections only", () => {
