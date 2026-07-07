@@ -13,7 +13,7 @@ export type QuestionPolicy = "ask" | "reject";
 // Keys of the `<looper-context>` prompt-injection block (see prompt-context.ts),
 // each individually toggleable via `context:` config. Kept in sync manually;
 // this list IS the config-side source of truth for valid keys.
-export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds"] as const;
+export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd"] as const;
 export type ContextKey = (typeof CONTEXT_KEYS)[number];
 export type ContextPolicy = Record<ContextKey, boolean>;
 type ContextPolicyOverride = Partial<ContextPolicy>;
@@ -58,6 +58,7 @@ type RawConfig = {
   vcsSummary?: unknown;
   validateResources?: unknown;
   context?: unknown;
+  prd?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -86,6 +87,7 @@ export type RuntimeConfig = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   contextPolicy?: ContextPolicyOverride;
+  prdDir?: string;
   useSessionIdle: boolean;
   vcsSummary: boolean;
   validateResources: boolean;
@@ -216,6 +218,7 @@ const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   timebox: true,
   vcsDelta: true,
   sessionIds: true,
+  prd: true,
 };
 
 export function resolveContextPolicy(
@@ -374,7 +377,7 @@ function parseRecoveryConfig(value: unknown): RuntimeConfig["recovery"] {
   return { snapshots: parseRecoverySnapshots(raw.snapshots) };
 }
 
-export function loadRuntimeConfig(configDir: string): RuntimeConfig {
+export function loadRuntimeConfig(configDir: string, repoDir: string = process.cwd()): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
   let title: TitleGenConfig | undefined;
@@ -391,6 +394,8 @@ export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   const permissionPolicy = parsePermissionPolicy(rawConfig.permissionPolicy, "permissionPolicy");
   const questionPolicy = parseQuestionPolicy(rawConfig.questionPolicy, "questionPolicy");
   const contextPolicy = parseContextPolicy(rawConfig.context, "context");
+  const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
+  const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -398,6 +403,7 @@ export function loadRuntimeConfig(configDir: string): RuntimeConfig {
     ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
+    ...(prdDir !== undefined ? { prdDir } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     vcsSummary: booleanFlagValue(rawConfig.vcsSummary, "vcsSummary", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
