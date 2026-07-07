@@ -1,10 +1,12 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+import type { LooperEvent } from "../core/events.ts";
 
-import { renderSessionMessages } from "./event-consumer.ts";
+import { renderSessionEvents, renderSessionMessages } from "./event-consumer.ts";
 import {
   clearBackgroundAgentBuffer,
   notify,
   pushBackgroundAgentLines,
+  replaceBackgroundAgentEvents,
   subscribe,
   type LoopState,
 } from "./state.ts";
@@ -38,19 +40,22 @@ export function startBackgroundAgentStreamer({
 }): { stop: () => void } {
   let active: ActiveStream | null = null;
 
-  const replaceBuffer = (stepIndex: number, sessionID: string, lines: string[]): void => {
+  const replaceBuffer = (stepIndex: number, sessionID: string, lines: string[], events: readonly LooperEvent[]): void => {
     const step = state.steps[stepIndex];
     if (!step) return;
     const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
     if (!agent) return;
     agent.outputLines = [];
     agent.outputLineTimes = [];
-    if (lines.length === 0) {
+    agent.outputEvents = [];
+    agent.outputEventTimes = [];
+    if (lines.length === 0 && events.length === 0) {
       agent.outputScrollTop = 0;
       notify();
       return;
     }
     pushBackgroundAgentLines(state, stepIndex, sessionID, lines);
+    replaceBackgroundAgentEvents(state, stepIndex, sessionID, events);
   };
 
   const inflight = new Set<string>();
@@ -62,7 +67,8 @@ export function startBackgroundAgentStreamer({
       if (result.error || !result.data) return;
       if (active === null || active.sessionID !== target.sessionID) return;
       const lines = renderSessionMessages(result.data);
-      replaceBuffer(target.stepIndex, target.sessionID, lines);
+      const events = renderSessionEvents(result.data);
+      replaceBuffer(target.stepIndex, target.sessionID, lines, events);
     } catch (error) {
       if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] background agent stream: refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
