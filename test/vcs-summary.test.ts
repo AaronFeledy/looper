@@ -5,9 +5,20 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import type { ContextPolicy } from "../src/lib/config.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState, type VcsChange } from "../src/lib/state.ts";
+
+/**
+ * These tests exercise the legacy end-of-step `vcsSummary` display fetch,
+ * which is independent from the `<looper-context>` prompt's own `vcsDelta`
+ * fetch (by design - see prompt-context-injection plan Todo 3(c)). Disabling
+ * just the prompt-side `vcsDelta` section keeps `vcs.status` call counts
+ * exactly as this suite always expected, without touching unrelated context
+ * sections or the product behavior under test.
+ */
+const PROMPT_VCS_DELTA_OFF: Partial<ContextPolicy> = { vcsDelta: false };
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -92,7 +103,7 @@ describe("runIteration VCS summary", () => {
     ];
     const stub = makeSuccessClient(repoDir, { kind: "ok", changes });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: true });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: true, contextPolicy: PROMPT_VCS_DELTA_OFF });
 
     expect(result).toBe("complete");
     expect(stub.vcsStatusDirectories).toEqual([repoDir]);
@@ -105,7 +116,7 @@ describe("runIteration VCS summary", () => {
     scratch = repoDir;
     const stub = makeSuccessClient(repoDir, { kind: "ok", changes: [{ file: "x", additions: 1, deletions: 0, status: "added" }] });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: false });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: false, contextPolicy: PROMPT_VCS_DELTA_OFF });
 
     expect(result).toBe("complete");
     expect(stub.vcsStatusDirectories).toEqual([]);
@@ -117,7 +128,7 @@ describe("runIteration VCS summary", () => {
     scratch = repoDir;
     const stub = makeSuccessClient(repoDir, { kind: "error", message: "not a git repository" });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: true });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, vcsSummary: true, contextPolicy: PROMPT_VCS_DELTA_OFF });
 
     expect(result).toBe("complete");
     expect(stub.vcsStatusDirectories).toEqual([repoDir]);

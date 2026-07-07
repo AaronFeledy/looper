@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   loadRuntimeConfig,
   loadSteps,
+  resolveContextPolicy,
   resolvePermissionAction,
   type PermissionAction,
 } from "../src/lib/config.ts";
@@ -80,9 +81,28 @@ describe("loadRuntimeConfig policy and flags", () => {
       const cfg = loadRuntimeConfig(dir);
       expect(cfg.permissionPolicy).toBeUndefined();
       expect(cfg.questionPolicy).toBeUndefined();
+      expect(cfg.prdDir).toBeUndefined();
       expect(cfg.useSessionIdle).toBe(false);
       expect(cfg.vcsSummary).toBe(false);
       expect(cfg.validateResources).toBe(false);
+    });
+  });
+
+  test("parses an absolute prd directory", () => {
+    withConfigDir("prd: /tmp/looper-prd\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).prdDir).toBe("/tmp/looper-prd");
+    });
+  });
+
+  test("resolves a relative prd directory against the repo dir", () => {
+    withConfigDir("prd: specs/beta-1\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir, "/repo/project").prdDir).toBe("/repo/project/specs/beta-1");
+    });
+  });
+
+  test("rejects an empty prd directory", () => {
+    withConfigDir("prd: \"\"\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/prd cannot be empty/);
     });
   });
 
@@ -123,6 +143,149 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects invalid questionPolicy", () => {
     withConfigDir("questionPolicy: always\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/questionPolicy/);
+    });
+  });
+});
+
+describe("context policy config parsing", () => {
+  test("defaults contextPolicy to undefined and resolves all keys true when absent", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.contextPolicy).toBeUndefined();
+      const steps = loadSteps(dir);
+      expect(steps[0]!.contextPolicy).toBeUndefined();
+      expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+        datetime: true,
+        repoDir: true,
+        loopPosition: true,
+        timebox: true,
+        vcsDelta: true,
+        sessionIds: true,
+        prd: true,
+      });
+    });
+  });
+
+  test("parses a root context: mapping of known keys to booleans", () => {
+    withConfigDir(
+      ["context:", "  vcsDelta: false", "  sessionIds: false", "  prd: false", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        expect(cfg.contextPolicy).toEqual({ vcsDelta: false, sessionIds: false, prd: false });
+        const steps = loadSteps(dir);
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: true,
+          repoDir: true,
+          loopPosition: true,
+          timebox: true,
+          vcsDelta: false,
+          sessionIds: false,
+          prd: false,
+        });
+      },
+    );
+  });
+
+  test("per-step context override wins over the global override, per key", () => {
+    withConfigDir(
+      [
+        "context:",
+        "  vcsDelta: false",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    context:",
+        "      vcsDelta: true",
+        "      datetime: false",
+      ].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+        expect(steps[0]!.contextPolicy).toEqual({ vcsDelta: true, datetime: false });
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: false,
+          repoDir: true,
+          loopPosition: true,
+          timebox: true,
+          vcsDelta: true,
+          sessionIds: true,
+          prd: true,
+        });
+      },
+    );
+  });
+
+  test("context: false at root disables all keys", () => {
+    withConfigDir(["context: false", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.contextPolicy).toEqual({
+        datetime: false,
+        repoDir: false,
+        loopPosition: false,
+        timebox: false,
+        vcsDelta: false,
+        sessionIds: false,
+        prd: false,
+      });
+      const steps = loadSteps(dir);
+      expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+        datetime: false,
+        repoDir: false,
+        loopPosition: false,
+        timebox: false,
+        vcsDelta: false,
+        sessionIds: false,
+        prd: false,
+      });
+    });
+  });
+
+  test("context: false per-step disables all keys for that step only", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context: false"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+        expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
+          datetime: false,
+          repoDir: false,
+          loopPosition: false,
+          timebox: false,
+          vcsDelta: false,
+          sessionIds: false,
+          prd: false,
+        });
+      },
+    );
+  });
+
+  test("rejects an unknown context key, naming the key and valid keys", () => {
+    withConfigDir(["context:", "  bogus: true", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/bogus/);
+      expect(() => loadRuntimeConfig(dir)).toThrow(
+        /datetime.*repoDir.*loopPosition.*timebox.*vcsDelta.*sessionIds.*prd/s,
+      );
+    });
+  });
+
+  test("rejects an unknown per-step context key", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context:", "      bogus: true"].join("\n"),
+      (dir) => {
+        expect(() => loadSteps(dir)).toThrow(/bogus/);
+      },
+    );
+  });
+
+  test("rejects a non-boolean context value", () => {
+    withConfigDir(["context:", "  vcsDelta: yes-please", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/vcsDelta/);
+    });
+  });
+
+  test("rejects a non-boolean prd context value", () => {
+    withConfigDir(["context:", "  prd: no", "steps:", "  build:", "    prompt: hi"].join("\n"), (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/context\.prd must be a boolean/);
     });
   });
 });

@@ -10,9 +10,18 @@ export type PermissionPolicy = Record<string, PermissionAction>;
 
 export type QuestionPolicy = "ask" | "reject";
 
+// Keys of the `<looper-context>` prompt-injection block (see prompt-context.ts),
+// each individually toggleable via `context:` config. Kept in sync manually;
+// this list IS the config-side source of truth for valid keys.
+export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd"] as const;
+export type ContextKey = (typeof CONTEXT_KEYS)[number];
+export type ContextPolicy = Record<ContextKey, boolean>;
+type ContextPolicyOverride = Partial<ContextPolicy>;
+
 export type LoadedStep = RunnerStep & {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
+  contextPolicy?: ContextPolicyOverride;
 };
 
 // Config file name candidates, in resolution order. `.yml` is preferred over
@@ -34,6 +43,7 @@ type RawStep = {
   timeout?: unknown;
   permissionPolicy?: unknown;
   questionPolicy?: unknown;
+  context?: unknown;
 };
 
 type RawConfig = {
@@ -47,6 +57,8 @@ type RawConfig = {
   useSessionIdle?: unknown;
   vcsSummary?: unknown;
   validateResources?: unknown;
+  context?: unknown;
+  prd?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -74,6 +86,8 @@ export type RuntimeConfig = {
   };
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
+  contextPolicy?: ContextPolicyOverride;
+  prdDir?: string;
   useSessionIdle: boolean;
   vcsSummary: boolean;
   validateResources: boolean;
@@ -151,6 +165,25 @@ function parsePermissionPolicy(value: unknown, label: string): PermissionPolicy 
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
+function parseContextPolicy(value: unknown, label: string): ContextPolicyOverride | undefined {
+  if (value === undefined || value === null || value === true) return undefined;
+  if (value === false) {
+    return Object.fromEntries(CONTEXT_KEYS.map((key) => [key, false])) as ContextPolicyOverride;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a boolean or a mapping of ${CONTEXT_KEYS.join(", ")} to booleans`);
+  }
+  const out: ContextPolicyOverride = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!CONTEXT_KEYS.includes(key as ContextKey)) {
+      throw new Error(`${label}.${key} is not a valid context key (valid keys: ${CONTEXT_KEYS.join(", ")})`);
+    }
+    if (typeof entry !== "boolean") throw new Error(`${label}.${key} must be a boolean`);
+    out[key as ContextKey] = entry;
+  }
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
 function parseQuestionPolicy(value: unknown, label: string): QuestionPolicy | undefined {
   if (value === undefined || value === null) return undefined;
   if (value === "ask" || value === "reject") return value;
@@ -176,6 +209,33 @@ export function resolvePermissionAction(
   const wildcard = global.permissionPolicy?.["*"];
   if (wildcard !== undefined) return wildcard;
   return "ask";
+}
+
+const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+  datetime: true,
+  repoDir: true,
+  loopPosition: true,
+  timebox: true,
+  vcsDelta: true,
+  sessionIds: true,
+  prd: true,
+};
+
+export function resolveContextPolicy(
+  step: Pick<LoadedStep, "contextPolicy">,
+  global: Pick<RuntimeConfig, "contextPolicy">,
+): ContextPolicy {
+  const resolved = { ...DEFAULT_CONTEXT_POLICY };
+  for (const key of CONTEXT_KEYS) {
+    const stepOverride = step.contextPolicy?.[key];
+    if (stepOverride !== undefined) {
+      resolved[key] = stepOverride;
+      continue;
+    }
+    const globalOverride = global.contextPolicy?.[key];
+    if (globalOverride !== undefined) resolved[key] = globalOverride;
+  }
+  return resolved;
 }
 
 function optionalNonEmptyStringValue(value: unknown, label: string): string | undefined {
@@ -215,6 +275,7 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedSt
       title: titleValue(rawStep.title, `steps.${key}.title`),
       permissionPolicy: parsePermissionPolicy(rawStep.permissionPolicy, `steps.${key}.permissionPolicy`),
       questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `steps.${key}.questionPolicy`),
+      contextPolicy: parseContextPolicy(rawStep.context, `steps.${key}.context`),
     };
   });
 }
@@ -316,7 +377,7 @@ function parseRecoveryConfig(value: unknown): RuntimeConfig["recovery"] {
   return { snapshots: parseRecoverySnapshots(raw.snapshots) };
 }
 
-export function loadRuntimeConfig(configDir: string): RuntimeConfig {
+export function loadRuntimeConfig(configDir: string, repoDir: string = process.cwd()): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
   let title: TitleGenConfig | undefined;
@@ -332,12 +393,17 @@ export function loadRuntimeConfig(configDir: string): RuntimeConfig {
   const recovery = parseRecoveryConfig(rawConfig.recovery);
   const permissionPolicy = parsePermissionPolicy(rawConfig.permissionPolicy, "permissionPolicy");
   const questionPolicy = parseQuestionPolicy(rawConfig.questionPolicy, "questionPolicy");
+  const contextPolicy = parseContextPolicy(rawConfig.context, "context");
+  const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
+  const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
     recovery,
     ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    ...(contextPolicy !== undefined ? { contextPolicy } : {}),
+    ...(prdDir !== undefined ? { prdDir } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     vcsSummary: booleanFlagValue(rawConfig.vcsSummary, "vcsSummary", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),

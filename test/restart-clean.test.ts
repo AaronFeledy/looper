@@ -5,9 +5,18 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import type { ContextPolicy } from "../src/lib/config.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
+
+/**
+ * These restart tests pin the exact first/second prompt text to prove
+ * restart-session behavior, predating the `<looper-context>` block (which
+ * defaults on). Disabling it keeps the equality assertions focused on
+ * restart wiring instead of also pinning unrelated context-block formatting.
+ */
+const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false };
 
 function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
   const dir = join(repoDir, ".omo", "run-continuation");
@@ -197,7 +206,7 @@ describe("clean manual and timeout restarts", () => {
     const { repoDir, configDir, state } = setup("1h");
     const stub = makeRestartClient({ repoDir, state, mode: "manual" });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: CONTEXT_OFF });
 
     expect(result).toBe("complete");
     expect(stub.createdSessionIDs).toEqual(["ses_old", "ses_new"]);
@@ -237,7 +246,7 @@ describe("clean manual and timeout restarts", () => {
     const { repoDir, configDir, state } = setup("1s");
     const stub = makeRestartClient({ repoDir, state, mode: "timeout" });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: CONTEXT_OFF });
 
     expect(result).toBe("complete");
     expect(stub.createdSessionIDs).toEqual(["ses_old", "ses_new"]);

@@ -5,10 +5,19 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import type { ContextPolicy } from "../src/lib/config.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { bindKeys, installBootInterruptHandler, type KeyHooks } from "../src/tui/keys.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState, type RecoveryChoice } from "../src/lib/state.ts";
+
+/**
+ * This suite asserts on the recoveryNudge prompt's exact plain-text shape,
+ * predating the `<looper-context>` block (which defaults on). Disabling it
+ * keeps these assertions focused on recoveryNudge behavior instead of also
+ * pinning unrelated context-block formatting.
+ */
+const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false };
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -86,7 +95,7 @@ describe("recoveryNudge prompt injection", () => {
     const { repoDir, configDir, state } = setup();
     const stub = makeSuccessClient(repoDir);
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: CONTEXT_OFF });
 
     expect(result).toBe("complete");
     expect(stub.promptTexts[0]).toBe("build from scratch\n");

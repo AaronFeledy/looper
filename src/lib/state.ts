@@ -83,6 +83,11 @@ export type GithubStatus =
   | { kind: "error"; message: string }
   | { kind: "pr"; pr: GithubPr };
 
+export type PrdStatus =
+  | { kind: "loading" }
+  | { kind: "ok"; remaining: number; total: number }
+  | { kind: "error"; message: string };
+
 /**
  * A live child opencode session spawned by a step's parent session (e.g. via
  * the task tool). Rendered as an indented sub-row beneath its parent step.
@@ -224,6 +229,8 @@ export type LoopState = {
   stepOutputLines: string[][];
   scrollIntent: ScrollIntent | null;
   github: GithubStatus;
+  prd: PrdStatus;
+  prdIterationBaseline: number | null;
   history: IterationHistoryEntry[];
   historyView: HistoryView | null;
 };
@@ -343,6 +350,8 @@ export function createLoopState({
     stepOutputLines: stepNames.map(() => []),
     scrollIntent: null,
     github: { kind: "loading" },
+    prd: { kind: "loading" },
+    prdIterationBaseline: null,
     history: [],
     historyView: null,
   };
@@ -377,6 +386,25 @@ export function setGithubStatus(state: LoopState, status: GithubStatus): void {
     state.focusedPane = "steps";
   }
   notifyStateChange();
+}
+
+export function setPrdStatus(state: LoopState, status: PrdStatus): void {
+  const changed = JSON.stringify(state.prd) !== JSON.stringify(status);
+  if (status.kind === "ok" && state.prdIterationBaseline === null) {
+    state.prdIterationBaseline = status.total - status.remaining;
+  }
+  if (!changed) return;
+  state.prd = status;
+  notifyStateChange();
+}
+
+export function resetPrdIterationBaseline(state: LoopState): void {
+  state.prdIterationBaseline = state.prd.kind === "ok" ? state.prd.total - state.prd.remaining : null;
+}
+
+export function prdPassingGain(status: PrdStatus, baseline: number | null): number {
+  if (status.kind !== "ok" || baseline === null) return 0;
+  return Math.max(0, status.total - status.remaining - baseline);
 }
 
 let scrollIntentSeq = 0;

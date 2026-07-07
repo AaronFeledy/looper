@@ -3,12 +3,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   cancelPendingNotify,
   createLoopState,
+  prdPassingGain,
+  resetPrdIterationBaseline,
   setPendingPermission,
+  setPrdStatus,
   setPendingQuestion,
   setStepVcsSummary,
   setTodos,
   subscribe,
   type PendingPermission,
+  type PrdStatus,
   type PendingQuestion,
   type TodoItem,
   type VcsChange,
@@ -28,7 +32,96 @@ describe("createLoopState panel defaults", () => {
     expect(state.pendingPermission).toBeNull();
     expect(state.pendingQuestion).toBeNull();
     expect(state.todos).toEqual([]);
+    expect(state.prd).toEqual({ kind: "loading" });
+    expect(state.prdIterationBaseline).toBeNull();
     expect(state.steps[0]!.vcsSummary).toBeUndefined();
+  });
+});
+
+describe("setPrdStatus", () => {
+  test("captures first ok status as the iteration baseline and notifies on status change", async () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    setPrdStatus(state, { kind: "ok", remaining: 13, total: 41 });
+
+    expect(state.prd).toEqual({ kind: "ok", remaining: 13, total: 41 });
+    expect(state.prdIterationBaseline).toBe(28);
+    expect(prdPassingGain(state.prd, state.prdIterationBaseline)).toBe(0);
+    await flushNotify();
+    expect(calls).toBe(1);
+  });
+
+  test("captures baseline before returning for an identical ok status", async () => {
+    const status: PrdStatus = { kind: "ok", remaining: 13, total: 41 };
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    state.prd = status;
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    setPrdStatus(state, status);
+
+    expect(state.prdIterationBaseline).toBe(28);
+    await flushNotify();
+    expect(calls).toBe(0);
+  });
+
+  test("keeps the first baseline while later ok statuses report positive gain", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+
+    setPrdStatus(state, { kind: "ok", remaining: 13, total: 41 });
+    setPrdStatus(state, { kind: "ok", remaining: 10, total: 41 });
+
+    expect(state.prdIterationBaseline).toBe(28);
+    expect(prdPassingGain(state.prd, state.prdIterationBaseline)).toBe(3);
+  });
+
+  test("resetPrdIterationBaseline re-baselines current ok status without notifying", async () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    setPrdStatus(state, { kind: "ok", remaining: 13, total: 41 });
+    setPrdStatus(state, { kind: "ok", remaining: 10, total: 41 });
+    await flushNotify();
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    resetPrdIterationBaseline(state);
+
+    expect(state.prdIterationBaseline).toBe(31);
+    expect(prdPassingGain(state.prd, state.prdIterationBaseline)).toBe(0);
+    await flushNotify();
+    expect(calls).toBe(0);
+  });
+
+  test("gain is zero for non-ok status, null baseline, and passing regressions", () => {
+    expect(prdPassingGain({ kind: "loading" }, 28)).toBe(0);
+    expect(prdPassingGain({ kind: "error", message: "bad prd" }, 28)).toBe(0);
+    expect(prdPassingGain({ kind: "ok", remaining: 13, total: 41 }, null)).toBe(0);
+    expect(prdPassingGain({ kind: "ok", remaining: 16, total: 41 }, 28)).toBe(0);
+  });
+
+  test("resetPrdIterationBaseline clears baseline for non-ok status without notifying", async () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    setPrdStatus(state, { kind: "ok", remaining: 13, total: 41 });
+    setPrdStatus(state, { kind: "error", message: "missing" });
+    await flushNotify();
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    resetPrdIterationBaseline(state);
+
+    expect(state.prdIterationBaseline).toBeNull();
+    expect(prdPassingGain(state.prd, state.prdIterationBaseline)).toBe(0);
+    await flushNotify();
+    expect(calls).toBe(0);
   });
 });
 

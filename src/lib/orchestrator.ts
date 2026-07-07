@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
 
+import { $ } from "bun";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { loadSteps, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { loadSteps, resolveContextPolicy, type ContextPolicy, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { readPrd } from "./prd.ts";
+import { buildLooperContext, withLooperContext, type ContextInput, type PriorStepInfo, type VcsSnapshot } from "./prompt-context.ts";
 import {
   DEFAULT_STEP_TIMEOUT_MS,
   evaluatePriorSession,
@@ -42,6 +45,217 @@ function formatError(error: unknown): string {
     return JSON.stringify(error);
   } catch {
     return String(error);
+  }
+}
+
+/**
+ * Bounded timeout for the fresh, per-prompt-send VCS delta fetch used by the
+ * `<looper-context>` block (see prompt-context.ts). Deliberately separate
+ * from `captureStepVcsSummary`'s end-of-step display fetch below. Override
+ * with `LOOPER_PROMPT_VCS_TIMEOUT_MS` (tests use a tiny value so a hang
+ * doesn't slow the suite).
+ */
+function promptVcsTimeoutMs(): number {
+  const raw = Number(process.env["LOOPER_PROMPT_VCS_TIMEOUT_MS"]);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+}
+
+/** Base branches tried, in order, to find the branch's mainline base. */
+const FALLBACK_BASE_BRANCHES = ["origin/main", "origin/master", "main", "master"];
+
+/** Bare branch names (i.e. ignoring any `<remote>/` prefix) considered a mainline base. */
+const MAINLINE_BRANCH_NAMES = ["main", "master"];
+
+/**
+ * True when `ref` (e.g. `origin/main`, `upstream/main`, or a bare `main`)
+ * names a mainline branch. Used to decide whether the current branch's OWN
+ * upstream tracking ref is a legitimate branch-delta base: a feature branch
+ * tracking `origin/<same-feature-branch>` must NOT be used as its own base
+ * (comparing HEAD to its own upstream reports 0 commits ahead as soon as
+ * it's pushed, even when it has a large delta vs `main`) - only an upstream
+ * that itself points at a mainline branch qualifies.
+ */
+function isMainlineRef(ref: string): boolean {
+  const shortName = ref.split("/").pop() ?? ref;
+  return MAINLINE_BRANCH_NAMES.includes(shortName);
+}
+
+type BranchDeltaChange = { file: string; additions: number; deletions: number; status: string };
+type BranchDelta = { base: string; aheadCount: number; changes: BranchDeltaChange[] };
+
+/**
+ * Commits HEAD is ahead of `base` in `repoDir`, or `undefined` when `base`
+ * doesn't resolve to a ref there. A bad ref is a normal "nothing to compare"
+ * outcome (fresh repo, unrelated base name), not a failure - callers treat
+ * `undefined` as "try the next candidate", not as an error.
+ */
+async function commitsAheadOfRef(repoDir: string, base: string): Promise<number | undefined> {
+  const result = await $`git rev-list --count ${base}..HEAD`.cwd(repoDir).quiet().nothrow();
+  if (result.exitCode !== 0) return undefined;
+  const count = Number.parseInt(result.stdout.toString().trim(), 10);
+  return Number.isFinite(count) ? count : undefined;
+}
+
+/** Maps a `git diff --name-status` single-letter code to the same status vocabulary `vcs.status` uses. */
+function normalizeGitStatusCode(code: string): string {
+  if (code === "A") return "added";
+  if (code === "D") return "deleted";
+  return "modified";
+}
+
+/**
+ * Parses NUL-separated `git diff --numstat -z` output into a file -> stat
+ * map. Binary files report `-`/`-` for added/deleted, which parse to `0`
+ * (matching how `vcs.status` already treats unknown stats).
+ */
+function parseNumstatZ(raw: string): Map<string, { additions: number; deletions: number }> {
+  const stats = new Map<string, { additions: number; deletions: number }>();
+  for (const record of raw.split("\0")) {
+    if (record.length === 0) continue;
+    const [addedRaw, deletedRaw, ...pathParts] = record.split("	");
+    const file = pathParts.join("	");
+    if (file.length === 0) continue;
+    const additions = Number.parseInt(addedRaw ?? "", 10);
+    const deletions = Number.parseInt(deletedRaw ?? "", 10);
+    stats.set(file, {
+      additions: Number.isFinite(additions) ? additions : 0,
+      deletions: Number.isFinite(deletions) ? deletions : 0,
+    });
+  }
+  return stats;
+}
+
+/** Parses NUL-separated `git diff --name-status -z` output (alternating code, path, code, path, ...) into a file -> status map, preserving diff order. */
+function parseNameStatusZ(raw: string): Map<string, string> {
+  const tokens = raw.split("\0").filter((token) => token.length > 0);
+  const statuses = new Map<string, string>();
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const code = tokens[i];
+    const file = tokens[i + 1];
+    if (code === undefined || file === undefined) continue;
+    statuses.set(file, normalizeGitStatusCode(code));
+  }
+  return statuses;
+}
+
+/**
+ * Files changed by the branch's committed delta vs `base` - i.e. `git diff
+ * <base>...HEAD` (merge-base relative, so upstream-only commits on `base`
+ * never leak in; verified in a scratch repo). `--no-renames` avoids the
+ * ambiguous `old => new` numstat path syntax by reporting a rename as a
+ * plain delete+add pair, matching opencode's own `git diff` flag choices
+ * (`packages/opencode/src/git/index.ts`). Empty (never throws) on any git
+ * failure - the caller only reaches this after `base` is already confirmed
+ * to have commits ahead, so a failure here just means an emptier file list,
+ * not a broken ahead-count.
+ */
+async function branchDeltaChangedFiles(repoDir: string, base: string): Promise<BranchDeltaChange[]> {
+  const [numstat, nameStatus] = await Promise.all([
+    $`git diff --no-ext-diff --no-renames --numstat -z ${base}...HEAD`.cwd(repoDir).quiet().nothrow(),
+    $`git diff --no-ext-diff --no-renames --name-status -z ${base}...HEAD`.cwd(repoDir).quiet().nothrow(),
+  ]);
+  if (numstat.exitCode !== 0 || nameStatus.exitCode !== 0) return [];
+  const stats = parseNumstatZ(numstat.stdout.toString());
+  const statuses = parseNameStatusZ(nameStatus.stdout.toString());
+  const changes: BranchDeltaChange[] = [];
+  for (const [file, status] of statuses) {
+    const stat = stats.get(file);
+    changes.push({ file, additions: stat?.additions ?? 0, deletions: stat?.deletions ?? 0, status });
+  }
+  return changes;
+}
+
+/**
+ * The branch's committed delta vs its mainline base (`FALLBACK_BASE_BRANCHES`,
+ * plus the branch's own upstream tracking ref FIRST if - and only if - that
+ * upstream itself is a mainline branch): how many commits ahead, and which
+ * files those commits touched. Resolves to `undefined` when there's no base
+ * to compare against, or the branch has 0 commits ahead (i.e. checked out
+ * on the base branch itself) - both normal states, not failures.
+ */
+async function resolveBranchDelta(repoDir: string): Promise<BranchDelta | undefined> {
+  const upstream = await $`git rev-parse --abbrev-ref --symbolic-full-name @{u}`.cwd(repoDir).quiet().nothrow();
+  const upstreamRef = upstream.exitCode === 0 ? upstream.stdout.toString().trim() : "";
+  const mainlineUpstream = upstreamRef.length > 0 && isMainlineRef(upstreamRef) ? [upstreamRef] : [];
+  const candidates = [...new Set([...mainlineUpstream, ...FALLBACK_BASE_BRANCHES])];
+  for (const base of candidates) {
+    const aheadCount = await commitsAheadOfRef(repoDir, base);
+    if (aheadCount === undefined) continue;
+    if (aheadCount === 0) return undefined;
+    const changes = await branchDeltaChangedFiles(repoDir, base);
+    return { base, aheadCount, changes };
+  }
+  return undefined;
+}
+
+/**
+ * Bounded, fail-open wrapper around `resolveBranchDelta` for the fresh,
+ * per-prompt-send fetch. A timeout or thrown error (e.g. missing `git`
+ * binary) logs one `[looper]` line and resolves to `undefined`; a
+ * non-git-repo or "no base branch" outcome resolves to `undefined` silently,
+ * since that's an expected state rather than a fetch failure.
+ */
+async function fetchBranchDelta(repoDir: string, log: (line: string) => void): Promise<BranchDelta | undefined> {
+  const timeoutMs = promptVcsTimeoutMs();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      resolveBranchDelta(repoDir),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`branch delta timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    log(`[looper] prompt branch delta fetch threw: ${formatError(error)}`);
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetches the working-tree delta and the branch's committed delta (vs its
+ * resolved base) for the `<looper-context>` prompt block, fresh immediately
+ * before each prompt send. Never throws: a timeout, error, or missing
+ * `vcs.status` capability logs one `[looper]` line via `log` and resolves to
+ * `undefined` (section omitted), so a hanging or unsupported server can
+ * never block a step. The working-tree fetch and the branch-delta fetch are
+ * independently bounded; a snapshot is still returned (with `branchDelta`
+ * absent) if only the branch-delta fetch fails, since the working-tree data
+ * remains useful on its own.
+ */
+async function fetchPromptVcsDelta(
+  client: OpencodeClient,
+  repoDir: string,
+  branch: string | undefined,
+  log: (line: string) => void,
+): Promise<VcsSnapshot | undefined> {
+  const timeoutMs = promptVcsTimeoutMs();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const status = await Promise.race([
+      client.vcs.status({ directory: repoDir }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`vcs.status timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+    if (status.error) {
+      log(`[looper] prompt vcs delta fetch failed: ${formatError(status.error)}`);
+      return undefined;
+    }
+    const changes = (status.data ?? []).map((change) => ({
+      file: change.file,
+      additions: change.additions,
+      deletions: change.deletions,
+      status: change.status,
+    }));
+    const branchDelta = await fetchBranchDelta(repoDir, log);
+    return { ...(branch !== undefined ? { branch } : {}), changes, ...(branchDelta !== undefined ? { branchDelta } : {}) };
+  } catch (error) {
+    log(`[looper] prompt vcs delta fetch threw: ${formatError(error)}`);
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -147,6 +361,26 @@ export type RunIterationOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   vcsSummary?: boolean;
+  prdDir?: string;
+  /**
+   * Total configured iteration budget for the "iteration N of M" line in the
+   * `<looper-context>` prompt block (see prompt-context.ts). Falls back to
+   * `state.maxIterations` when omitted, so existing callers that don't pass
+   * it keep working unchanged.
+   */
+  maxIterations?: number;
+  /** Global `context:` policy resolved from RuntimeConfig; per-step `contextPolicy` overrides it. Both default to all-true when omitted (see resolveContextPolicy in config.ts). */
+  contextPolicy?: Partial<ContextPolicy>;
+  /**
+   * Iteration-scoped opencode session ids for logical steps that finished
+   * BEFORE `startStepIndex` in a prior run of this same iteration (persisted
+   * via `.looper-run.json`'s `stepSessions` field). Seeds the
+   * `<looper-context>` prior-steps ledger on a mid-iteration resume; entries
+   * whose `stepIndex` is `>= startStepIndex` (the about-to-run/in-flight
+   * step) are ignored so a crash-mid-step can't leak its own session back to
+   * itself as a "prior step".
+   */
+  resumedStepSessions?: { stepIndex: number; stepName: string; sessionID: string }[];
 };
 
 async function waitWhilePaused(state: LoopState): Promise<void> {
@@ -476,8 +710,26 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     questionPolicy,
     useSessionIdle,
     vcsSummary,
+    prdDir,
+    maxIterations,
+    contextPolicy: globalContextPolicy,
+    resumedStepSessions,
   } = options;
   const completed: LoopStep[] = [];
+  // Logical-step ledger for the `<looper-context>` prior-steps section, keyed
+  // by `stepIndex` (config position; immune to duplicate step names) rather
+  // than row position in `state.steps` or dedupe-by-name like `completed`
+  // above (which is left untouched and keeps driving existing UI rendering).
+  // Exactly one entry is pushed per logical step, only once its retry/restart
+  // loop has fully resolved, so a step's own attempts never show up here as a
+  // distinct prior step.
+  const completedLogicalSteps: { stepIndex: number; name: string; status: StepResult; sessionID?: string }[] = [];
+  if (resumedStepSessions !== undefined) {
+    const seeded = [...resumedStepSessions].filter((entry) => entry.stepIndex < startStepIndex).sort((a, b) => a.stepIndex - b.stepIndex);
+    for (const entry of seeded) {
+      completedLogicalSteps.push({ stepIndex: entry.stepIndex, name: entry.stepName, status: "done", sessionID: entry.sessionID });
+    }
+  }
   let index = Math.max(0, startStepIndex);
   let startStepIndexApplied = false;
   let recoveryNudgePending = recoveryNudge;
@@ -829,10 +1081,35 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = pendingResult;
         pendingResult = undefined;
       } else {
+        const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
+        const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
+          name: entry.name,
+          status: entry.status,
+          ...(entry.sessionID !== undefined ? { sessionID: entry.sessionID } : {}),
+        }));
+        const vcs = stepContextPolicy.vcsDelta
+          ? await fetchPromptVcsDelta(client, repoDir, state.branch || undefined, (line) => logStepLine(currentStepIndex, line))
+          : undefined;
+        const prdResult = stepContextPolicy.prd && prdDir !== undefined ? readPrd(prdDir) : undefined;
+        const prd = prdResult?.kind === "ok" ? { remaining: prdResult.remaining, total: prdResult.total } : undefined;
+        const contextInput: ContextInput = {
+          now: new Date(),
+          repoDir,
+          iteration,
+          maxIterations: maxIterations ?? state.maxIterations,
+          stepName: step.name,
+          stepIndex: index,
+          totalSteps: steps.length,
+          priorSteps,
+          timeoutMs: budgetMs,
+          ...(prd !== undefined ? { prd } : {}),
+          ...(vcs !== undefined ? { vcs } : {}),
+        };
+        const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
         result = await runOpenCodeStep({
           state,
           stepIndex: currentStepIndex,
-          prompt: resumePrompt ?? promptText(step),
+          prompt: withLooperContext(contextBlock, resumePrompt ?? promptText(step)),
           client,
           repoDir,
           step,
@@ -1165,6 +1442,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (result.status === "done") await captureStepVcsSummary(currentStepIndex);
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
+
+    const finishedSessionID = state.steps[currentStepIndex]?.sessionID;
+    completedLogicalSteps.push({
+      stepIndex: index,
+      name: step.name,
+      status: result.status,
+      ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+    });
 
     completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
 
