@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 
-import { DEFAULT_STEP_TIMEOUT_MS, type Step as RunnerStep } from "./runner.ts";
+import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 
 export type PermissionAction = "always" | "once" | "reject" | "ask";
 
@@ -18,7 +18,17 @@ export type ContextKey = (typeof CONTEXT_KEYS)[number];
 export type ContextPolicy = Record<ContextKey, boolean>;
 type ContextPolicyOverride = Partial<ContextPolicy>;
 
-export type LoadedStep = RunnerStep & {
+export type LoadedStep = {
+  name: string;
+  agent?: string;
+  variant?: string;
+  model?: string;
+  prompt: string;
+  prefix?: string;
+  suffix?: string;
+  args?: string[];
+  timeoutMs?: number;
+  title?: boolean | number | "branch";
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   contextPolicy?: ContextPolicyOverride;
