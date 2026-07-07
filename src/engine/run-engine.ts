@@ -54,6 +54,11 @@ function stepSessionsForPlan(runState: ReturnType<RunStateStore["read"]>, iterat
   return runState.stepSessions;
 }
 
+function stepIndexFromRunState<StepLike extends RunStateStoreStep>(runState: NonNullable<ReturnType<RunStateStore["read"]>>, steps: readonly StepLike[]): number {
+  const named = steps.findIndex((step) => step.name === runState.stepName);
+  return named !== -1 ? named : Math.max(0, Math.min(steps.length - 1, runState.stepIndex));
+}
+
 function defaultElapsedSeconds(startedAt: number): number {
   return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
 }
@@ -72,8 +77,7 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
     if (runState !== null) {
       resumed = true;
       startIteration = Math.max(1, runState.iteration);
-      const named = input.steps.findIndex((step) => step.name === runState.stepName);
-      firstIterationStartStepIndex = named !== -1 ? named : Math.max(0, Math.min(input.steps.length - 1, runState.stepIndex));
+      firstIterationStartStepIndex = stepIndexFromRunState(runState, input.steps);
       firstIterationTitle = runState.title;
       firstIterationStepSessions = stepSessionsForPlan(runState, startIteration);
       looperRunID = runState.looperRunID;
@@ -232,7 +236,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(error.stepName !== undefined ? { failedStepName: error.stepName } : {}),
         runState: recoveryRunState,
       });
-      const failedStepIndex = input.legacyResumeStepIndex(input.loadSteps());
+      const recoverySteps = input.loadSteps();
+      const failedStepIndex = recoveryRunState !== null ? stepIndexFromRunState(recoveryRunState, recoverySteps) : input.legacyResumeStepIndex(recoverySteps);
       startIteration = iteration;
       firstIterationStartStepIndex = failedStepIndex;
       firstIterationResumed = failedStepIndex > 0;

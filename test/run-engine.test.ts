@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { computeRunResumePlan, runEngine } from "../src/engine/run-engine.ts";
 import type { EngineFrontendHooks, RunStateStore } from "../src/engine/engine-ports.ts";
+import { StepFailureError } from "../src/lib/orchestrator.ts";
 import type { RunState } from "../src/lib/state-files.ts";
 
 type Step = { readonly name: string; readonly prompt: string };
@@ -112,5 +113,37 @@ describe("runEngine", () => {
     const waits: number[] = [];
     await runEngine({ maxIterations: 2, fresh: false, waitProvided: true, waitDuration: "execution-time", repoDir: "/repo", configDir: "/cfg", client: {}, store: memoryStore(), hooks: { createIterationState: () => ({}), waitBetweenIterations: async ({ seconds }) => { waits.push(seconds); } }, loadSteps: () => [{ name: "build", prompt: "build.md" }], currentBranch: async () => "main", createLooperRunID: () => "run", legacyResumeStepIndex: () => 0, elapsedSeconds: () => 7, runIteration: async () => "complete" });
     expect(waits).toEqual([7, 7]);
+  });
+
+  test("recovery retry starts from authoritative run-state instead of stale legacy checkpoint", async () => {
+    const store = memoryStore();
+    const steps: Step[] = [{ name: "build", prompt: "build.md" }, { name: "review", prompt: "review.md" }, { name: "deploy", prompt: "deploy.md" }];
+    const startStepIndexes: number[] = [];
+    let attempts = 0;
+    await runEngine({
+      maxIterations: 1,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: {},
+      store,
+      hooks: { createIterationState: () => ({}), onStepFailure: async () => "restart", recoveryResumeForChoice: () => undefined },
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run",
+      legacyResumeStepIndex: () => 0,
+      runIteration: async (input) => {
+        startStepIndexes.push(input.startStepIndex);
+        attempts += 1;
+        if (attempts === 1) {
+          store.savePosition({ iteration: input.iteration, stepIndex: 2, stepName: "deploy", steps, looperRunID: "run" });
+          throw new StepFailureError("deploy failed", { stepName: "deploy" });
+        }
+        return "complete";
+      },
+    });
+    expect(startStepIndexes).toEqual([0, 2]);
   });
 });
