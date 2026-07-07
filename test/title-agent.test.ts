@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { ensureTitleAgent, TITLE_AGENT_NAME, titleAgentPath } from "../src/lib/title-agent.ts";
+import { TITLE_AGENT_NAME, titleAgentPath } from "../src/lib/title-agent.ts";
+import { ensureTitleAgent } from "../src/lib/opencode-managed-resources.ts";
 
 describe("ensureTitleAgent", () => {
   let xdg: string;
