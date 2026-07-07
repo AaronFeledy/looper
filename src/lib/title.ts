@@ -1,6 +1,8 @@
 import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { TitleGenConfig } from "./config.ts";
+import { titleGenTimeoutMs } from "../config/tunables.ts";
+import { acquireRelease } from "../platform/acquire-release.ts";
 import { createOpencodeID } from "./runner.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "./session-metadata.ts";
 import { TITLE_AGENT_NAME } from "./title-agent.ts";
@@ -223,9 +225,11 @@ export function extractAssistantModel(
   return undefined;
 }
 
-const TITLE_MAX_CHARS = 100;
+class TitleGenAcquireFailed extends Error {
+  override readonly name = "TitleGenAcquireFailed";
+}
 
-const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
+const TITLE_MAX_CHARS = 100;
 
 const TITLE_SMALL_WORDS = new Set(["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "the", "to", "vs", "via", "with"]);
 
@@ -273,11 +277,6 @@ export function isBoilerplateTitle(title: string): boolean {
   if (/\bmode(?: enabled)?!?$/i.test(trimmed)) return true;
   if (/^(?:i['’]?ll|i['’]?m|i am|i need|i will|let me|now i|continuing|starting|beginning)\b/i.test(trimmed)) return true;
   return false;
-}
-
-function titleGenTimeoutMs(): number {
-  const raw = Number(process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
 }
 
 /**
@@ -474,7 +473,6 @@ export async function generateWorkDescription({
       log,
     }));
 
-  let titleSessionID: string | undefined;
   // A correct title is one turn; exceeding this bound means the agent is
   // executing the work-log instead of titling it. The timeout aborts the
   // server-side session so a misbehaving agent cannot run unbounded.
@@ -486,91 +484,103 @@ export async function generateWorkDescription({
     timeoutController.abort();
   }, timeoutMs);
   const genSignal = signal ? AbortSignal.any([signal, timeoutController.signal]) : timeoutController.signal;
+
+  const releaseTitleSession = async (titleSessionID: string): Promise<void> => {
+    // Always abort then delete the throwaway: it keeps generating server-side
+    // even after our client request returns/aborts, and on failure it holds a
+    // copy of the step's work-log. Keeping failed sessions "for review" leaked
+    // them (the error is already logged), so success and failure both clean up.
+    try {
+      await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
+    } catch (error) {
+      log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
+    }
+    try {
+      const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
+      if (deleted?.error) {
+        log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
+      }
+    } catch (error) {
+      log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
+    }
+  };
+
+  let activeTitleSessionID: string | undefined;
   try {
-    const created = await client.session.create(
-      {
-        directory: repoDir,
-        ...(titleAgent ? { agent: titleAgent } : {}),
-        ...(sessionMetadata?.parentSessionID !== undefined ? { parentID: sessionMetadata.parentSessionID } : {}),
-        ...(sessionMetadata !== undefined ? { metadata: buildLooperSessionMetadata(sessionMetadata) } : {}),
+    return await acquireRelease(
+      async () => {
+        const created = await client.session.create(
+          {
+            directory: repoDir,
+            ...(titleAgent ? { agent: titleAgent } : {}),
+            ...(sessionMetadata?.parentSessionID !== undefined ? { parentID: sessionMetadata.parentSessionID } : {}),
+            ...(sessionMetadata !== undefined ? { metadata: buildLooperSessionMetadata(sessionMetadata) } : {}),
+          },
+          { signal: genSignal },
+        );
+        if (created.error || !created.data?.id) {
+          log?.(`[looper] title gen: session.create failed: ${formatError(created.error)}`);
+          throw new TitleGenAcquireFailed();
+        }
+        const sessionID = created.data.id;
+        activeTitleSessionID = sessionID;
+        return sessionID;
       },
-      { signal: genSignal },
-    );
-    if (created.error || !created.data?.id) {
-      log?.(`[looper] title gen: session.create failed: ${formatError(created.error)}`);
-      return undefined;
-    }
-    titleSessionID = created.data.id;
+      async (titleSessionID) => {
+        const resp = await client.session.prompt(
+          {
+            sessionID: titleSessionID,
+            directory: repoDir,
+            messageID: createOpencodeID("msg"),
+            parts: [{ type: "text", text: userMessage }],
+            system: TITLE_PROMPT,
+            ...(titleAgent ? { agent: titleAgent } : {}),
+            ...(titleModel ? { model: titleModel } : {}),
+            ...(titleVariant ? { variant: titleVariant } : {}),
+          },
+          { signal: genSignal },
+        );
+        if (resp.error || !resp.data) {
+          log?.(`[looper] title gen: prompt failed: ${formatError(resp.error)}`);
+          return undefined;
+        }
+        logTitleAgentUsage(resp.data.info, log);
 
-    const resp = await client.session.prompt(
-      {
-        sessionID: titleSessionID,
-        directory: repoDir,
-        messageID: createOpencodeID("msg"),
-        parts: [{ type: "text", text: userMessage }],
-        system: TITLE_PROMPT,
-        ...(titleAgent ? { agent: titleAgent } : {}),
-        ...(titleModel ? { model: titleModel } : {}),
-        ...(titleVariant ? { variant: titleVariant } : {}),
+        const modelError = extractMessageError(resp.data.info);
+        if (modelError !== undefined) {
+          log?.(`[looper] title gen: model returned an error: ${modelError}`);
+          return undefined;
+        }
+
+        const titleText = extractAssistantText([{ info: resp.data.info, parts: resp.data.parts }]);
+        if (titleText.length === 0) {
+          log?.("[looper] title gen: assistant returned no text");
+          return undefined;
+        }
+        const cleaned = postprocessTitle(titleText);
+        if (cleaned.length === 0) {
+          log?.("[looper] title gen: title empty after postprocessing");
+          return undefined;
+        }
+        if (isBoilerplateTitle(cleaned)) {
+          const fallback = branchHint !== undefined ? humanizeBranchName(branchHint) : "";
+          log?.(`[looper] title gen: rejected boilerplate title: ${cleaned}`);
+          return fallback.length > 0 ? fallback : undefined;
+        }
+        return toBookTitleCase(cleaned);
       },
-      { signal: genSignal },
+      (titleSessionID) => releaseTitleSession(titleSessionID),
     );
-    if (resp.error || !resp.data) {
-      log?.(`[looper] title gen: prompt failed: ${formatError(resp.error)}`);
-      return undefined;
-    }
-    logTitleAgentUsage(resp.data.info, log);
-
-    const modelError = extractMessageError(resp.data.info);
-    if (modelError !== undefined) {
-      log?.(`[looper] title gen: model returned an error: ${modelError}`);
-      return undefined;
-    }
-
-    const titleText = extractAssistantText([{ info: resp.data.info, parts: resp.data.parts }]);
-    if (titleText.length === 0) {
-      log?.("[looper] title gen: assistant returned no text");
-      return undefined;
-    }
-    const cleaned = postprocessTitle(titleText);
-    if (cleaned.length === 0) {
-      log?.("[looper] title gen: title empty after postprocessing");
-      return undefined;
-    }
-    if (isBoilerplateTitle(cleaned)) {
-      const fallback = branchHint !== undefined ? humanizeBranchName(branchHint) : "";
-      log?.(`[looper] title gen: rejected boilerplate title: ${cleaned}`);
-      return fallback.length > 0 ? fallback : undefined;
-    }
-    return toBookTitleCase(cleaned);
   } catch (error) {
+    if (error instanceof TitleGenAcquireFailed) return undefined;
     if (isAbort(error) && timedOut) {
-      log?.(`[looper] title gen: exceeded ${timeoutMs}ms; aborting title session ${titleSessionID ?? "(uncreated)"}`);
+      log?.(`[looper] title gen: exceeded ${timeoutMs}ms; aborting title session ${activeTitleSessionID ?? "(uncreated)"}`);
     } else if (!isAbort(error)) {
       log?.(`[looper] title gen threw: ${formatError(error)}`);
     }
     return undefined;
   } finally {
     clearTimeout(timer);
-    if (titleSessionID !== undefined) {
-      // Always abort then delete the throwaway: it keeps generating server-side
-      // even after our client request returns/aborts, and on failure it holds a
-      // copy of the step's work-log. Keeping failed sessions "for review" leaked
-      // them (the error is already logged), so success and failure both clean up.
-      try {
-        await client.session.abort({ sessionID: titleSessionID, directory: repoDir });
-      } catch (error) {
-        log?.(`[looper] title gen: session.abort threw for ${titleSessionID}: ${formatError(error)}`);
-      }
-      try {
-        const deleted = await client.session.delete({ sessionID: titleSessionID, directory: repoDir });
-        if (deleted?.error) {
-          log?.(`[looper] title gen: session.delete failed for ${titleSessionID}: ${formatError(deleted.error)}`);
-        }
-      } catch (error) {
-        log?.(`[looper] title gen: session.delete threw for ${titleSessionID}: ${formatError(error)}`);
-      }
-    }
   }
 }
 

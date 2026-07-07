@@ -1,5 +1,8 @@
 import type { Event, Message, Part } from "@opencode-ai/sdk/v2";
 
+import type { LooperEvent } from "../core/events.ts";
+import { formatLooperEvent } from "../presentation/legacy-line-format.ts";
+
 type PermissionAskedProperties = Extract<Event, { type: "permission.asked" }>["properties"];
 type QuestionAskedProperties = Extract<Event, { type: "question.asked" }>["properties"];
 
@@ -27,6 +30,7 @@ export type TodoUpdatedPayload = Extract<Event, { type: "todo.updated" }>["prope
 export type EventConsumerCallbacks = {
   pushLine: (line: string) => void;
   pushLines?: (lines: string[]) => void;
+  onEvent?: (event: LooperEvent) => void;
   onSessionError?: (message: string) => void;
   onFirstAssistantContent?: () => void;
   onPermissionAsked?: (payload: PermissionAskedPayload) => void;
@@ -76,11 +80,6 @@ function eventSessionID(event: Event): string | undefined {
   return props?.sessionID ?? props?.part?.sessionID;
 }
 
-function formatInput(input: Record<string, unknown>): string {
-  const json = JSON.stringify(input);
-  return json.length <= 200 ? json : `${json.slice(0, 200)}…`;
-}
-
 function retainedOutputPath(state: { metadata?: Record<string, unknown> }, part: { metadata?: Record<string, unknown> }): string | undefined {
   const metadata = state.metadata ?? part.metadata;
   const candidates = [
@@ -92,9 +91,8 @@ function retainedOutputPath(state: { metadata?: Record<string, unknown> }, part:
   return candidates.find((value): value is string => typeof value === "string" && value.length > 0);
 }
 
-function color(code: string, text: string): string {
-  if (process.env.NO_COLOR || (!process.stdout.isTTY && !process.stderr.isTTY)) return text;
-  return `\u001b[${code}m${text}\u001b[0m`;
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 /** opencode assistant errors that represent a deliberate abort, not a step failure. */
@@ -116,96 +114,85 @@ function formatMessageError(error: unknown): string | undefined {
   return message === undefined || message === name ? name : `${name}: ${message}`;
 }
 
-function sectionTimestamp(): string {
-  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
-    .format(new Date())
-    .toLowerCase();
-}
+type EventDelivery = "line" | "lines";
+type EmitLooperEvent = (event: LooperEvent, delivery?: EventDelivery) => void;
 
-function terminalWidth(): number {
-  return Math.max(40, process.stdout.columns ?? 80);
-}
-
-const ui = {
-  dim: (text: string) => color("2", text),
-  cyan: (text: string) => color("36", text),
-  green: (text: string) => color("32", text),
-  yellow: (text: string) => color("33", text),
-  red: (text: string) => color("31", text),
-  magenta: (text: string) => color("35", text),
-  bold: (text: string) => color("1", text),
+type LineEmitterOptions = {
+  readonly pushLine: (line: string) => void;
+  readonly pushLines?: (lines: string[]) => void;
+  readonly onEvent?: (event: LooperEvent) => void;
 };
 
-function groupHeader(title: string, accent: (text: string) => string): string {
-  const prefix = `╭─ ${title}`;
-  const timestamp = sectionTimestamp();
-  const gap = " ".repeat(Math.max(1, terminalWidth() - prefix.length - timestamp.length));
-  return `${accent(prefix)}${gap}${ui.dim(timestamp)}`;
+function createLineEmitter(options: LineEmitterOptions): EmitLooperEvent {
+  const pushLines = options.pushLines ?? ((lines: string[]) => {
+    for (const line of lines) options.pushLine(line);
+  });
+  return (event, delivery = "line") => {
+    options.onEvent?.(event);
+    const lines = formatLooperEvent(event);
+    if (delivery === "lines") {
+      pushLines(lines);
+      return;
+    }
+    for (const line of lines) options.pushLine(line);
+  };
 }
 
-function groupLine(text: string): string {
-  return `${ui.dim("│")} ${text}`;
+function textStartedEvent(kind: "text" | "reasoning"): LooperEvent {
+  return kind === "reasoning" ? { kind: "reasoning.started" } : { kind: "assistant.started" };
 }
 
-function prefixFor(kind: "text" | "reasoning"): string {
-  return kind === "reasoning" ? `${ui.dim("│")} ` : "";
+function textChunkEvent(kind: "text" | "reasoning", text: string): LooperEvent {
+  return kind === "reasoning" ? { kind: "reasoning.text", text } : { kind: "assistant.text", text };
 }
 
-function printTextHeader(state: TextPartState, push: (line: string) => void): void {
+function printTextHeader(state: TextPartState, emit: EmitLooperEvent): void {
   if (state.headerPrinted) return;
   state.headerPrinted = true;
-  const title = state.kind === "reasoning" ? "Reasoning" : "Assistant";
-  const accent = state.kind === "reasoning" ? ui.magenta : ui.cyan;
-  push(groupHeader(title, accent));
+  emit(textStartedEvent(state.kind));
 }
 
-function flushNewlines(state: TextPartState, push: (line: string) => void): void {
-  const prefix = prefixFor(state.kind);
+function flushNewlines(state: TextPartState, emit: EmitLooperEvent): void {
   while (true) {
     const nl = state.buffer.indexOf("\n", state.flushed);
     if (nl === -1) break;
-    printTextHeader(state, push);
-    push(prefix + state.buffer.slice(state.flushed, nl));
+    printTextHeader(state, emit);
+    emit(textChunkEvent(state.kind, state.buffer.slice(state.flushed, nl)));
     state.flushed = nl + 1;
   }
 }
 
-function flushRemaining(state: TextPartState, push: (line: string) => void): void {
+function flushRemaining(state: TextPartState, emit: EmitLooperEvent): void {
   if (state.flushed < state.buffer.length) {
-    printTextHeader(state, push);
-    push(prefixFor(state.kind) + state.buffer.slice(state.flushed));
+    printTextHeader(state, emit);
+    emit(textChunkEvent(state.kind, state.buffer.slice(state.flushed)));
     state.flushed = state.buffer.length;
   }
 }
 
-function syncTextLikePart(
-  parts: Map<string, PartState>,
-  partID: string,
-  kind: "text" | "reasoning",
-  fullText: string,
-  push: (line: string) => void,
-): void {
-  let state = parts.get(partID);
-  if (!state || state.kind !== kind) {
-    state = { kind, buffer: "", flushed: 0, headerPrinted: false };
-    parts.set(partID, state);
+type TextPartInput = {
+  readonly partID: string;
+  readonly kind: "text" | "reasoning";
+  readonly fullText: string;
+};
+
+function syncTextLikePart(parts: Map<string, PartState>, input: TextPartInput, emit: EmitLooperEvent): void {
+  let state = parts.get(input.partID);
+  if (!state || state.kind !== input.kind) {
+    state = { kind: input.kind, buffer: "", flushed: 0, headerPrinted: false };
+    parts.set(input.partID, state);
   }
   const textState = state as TextPartState;
-  if (fullText.length > textState.buffer.length) textState.buffer = fullText;
-  flushNewlines(textState, push);
+  if (input.fullText.length > textState.buffer.length) textState.buffer = input.fullText;
+  flushNewlines(textState, emit);
 }
 
-function handlePartUpdate(
-  parts: Map<string, PartState>,
-  part: Part,
-  push: (line: string) => void,
-  pushLines: (lines: string[]) => void,
-): void {
+function handlePartUpdate(parts: Map<string, PartState>, part: Part, emit: EmitLooperEvent): void {
   switch (part.type) {
     case "step-start": {
       if (parts.has(part.id)) return;
       parts.set(part.id, { kind: "step-start" });
-      push(groupHeader("OpenCode step", ui.cyan));
+      emit({ kind: "step.started" });
       return;
     }
     case "step-finish": {
@@ -215,21 +202,29 @@ function handlePartUpdate(
       // system boundary (live opencode stream): guard every field so a partial /
       // schema-drifted payload degrades gracefully instead of crashing or
       // printing NaN/undefined into the stream.
-      const num = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
       const reason = typeof part.reason === "string" && part.reason.length > 0 ? part.reason : "unknown";
       const t = part.tokens;
       const cache = t?.cache;
-      push(
-        `${ui.green("✓ step done")} ${ui.dim("reason=")}${reason} ${ui.dim("cost=")}$${num(part.cost).toFixed(4)} ${ui.dim("tokens=")}in ${num(t?.input)} / out ${num(t?.output)} / think ${num(t?.reasoning)} ${ui.dim("cache=")}r ${num(cache?.read)} / w ${num(cache?.write)}`,
-      );
+      emit({
+        kind: "step.done",
+        reason,
+        cost: finiteNumber(part.cost),
+        tokens: {
+          input: finiteNumber(t?.input),
+          output: finiteNumber(t?.output),
+          reasoning: finiteNumber(t?.reasoning),
+          cacheRead: finiteNumber(cache?.read),
+          cacheWrite: finiteNumber(cache?.write),
+        },
+      });
       return;
     }
     case "text":
     case "reasoning": {
-      syncTextLikePart(parts, part.id, part.type, part.text, push);
+      syncTextLikePart(parts, { partID: part.id, kind: part.type, fullText: part.text }, emit);
       if (part.time?.end !== undefined) {
         const state = parts.get(part.id);
-        if (state && (state.kind === "text" || state.kind === "reasoning")) flushRemaining(state, push);
+        if (state && (state.kind === "text" || state.kind === "reasoning")) flushRemaining(state, emit);
       }
       return;
     }
@@ -246,7 +241,7 @@ function handlePartUpdate(
       let callPrinted = prev && prev.kind === "tool" ? prev.callPrinted : false;
       const printCall = (): void => {
         if (callPrinted) return;
-        push(`${ui.yellow("◌ tool")} ${ui.bold(part.tool)} ${ui.dim(formatInput(state.input ?? {}))}`);
+        emit({ kind: "tool.started", tool: part.tool, input: state.input ?? {} });
         callPrinted = true;
       };
       if (status === "pending") {
@@ -255,19 +250,11 @@ function handlePartUpdate(
         printCall();
       } else if (status === "completed") {
         printCall();
-        const outputLines = [groupHeader(`Tool output · ${part.tool}`, ui.green)];
-        const lines = (state.output ?? "")
-          .split("\n")
-          .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line))
-          .filter((line) => line.length > 0);
-        if (lines.length === 0) outputLines.push(groupLine(ui.dim("(no output)")));
-        for (const line of lines) outputLines.push(groupLine(line));
         const retainedPath = retainedOutputPath(state, part as { metadata?: Record<string, unknown> });
-        if (retainedPath !== undefined) outputLines.push(groupLine(`${ui.dim("retained full output:")} ${retainedPath}`));
-        pushLines(outputLines);
+        emit({ kind: "tool.done", tool: part.tool, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
       } else if (status === "error") {
         printCall();
-        push(`${ui.red("✗ tool failed")} ${ui.bold(part.tool)} ${state.error ?? ""}`);
+        emit({ kind: "tool.failed", tool: part.tool, error: state.error ?? "" });
       }
       parts.set(part.id, { kind: "tool", tool: part.tool, status, callPrinted });
       return;
@@ -277,19 +264,13 @@ function handlePartUpdate(
   }
 }
 
-function handlePartDelta(
-  parts: Map<string, PartState>,
-  partID: string,
-  field: string,
-  delta: string,
-  push: (line: string) => void,
-): void {
-  const state = parts.get(partID);
+function handlePartDelta(parts: Map<string, PartState>, delta: PendingPartDelta, emit: EmitLooperEvent): void {
+  const state = parts.get(delta.partID);
   if (!state) return;
   if (state.kind !== "text" && state.kind !== "reasoning") return;
-  if (field !== "text") return;
-  state.buffer += delta;
-  flushNewlines(state, push);
+  if (delta.field !== "text") return;
+  state.buffer += delta.delta;
+  flushNewlines(state, emit);
 }
 
 export type SessionEventConsumer = {
@@ -310,10 +291,7 @@ export function createSessionEventConsumer(
   const printedMessageErrors = new Set<string>();
   const seenPermissionRequests = new Set<string>();
   const seenQuestionRequests = new Set<string>();
-  const push = callbacks.pushLine;
-  const pushLines = callbacks.pushLines ?? ((lines: string[]) => {
-    for (const line of lines) push(line);
-  });
+  const emit = createLineEmitter(callbacks);
   const onFirstAssistantContent = callbacks.onFirstAssistantContent;
   const onActivity = callbacks.onActivity;
   let firstContentFired = false;
@@ -333,10 +311,10 @@ export function createSessionEventConsumer(
     if (message === undefined) return;
     printedMessageErrors.add(info.id);
     if (isAbortMessageError(error)) {
-      push(`${ui.dim(`(aborted) ${message}`)}`);
+      emit({ kind: "assistant.aborted", message });
       return;
     }
-    push(`${ui.red("✗ assistant error")} ${message}`);
+    emit({ kind: "assistant.error", message });
     callbacks.onSessionError?.(message);
   };
 
@@ -344,14 +322,14 @@ export function createSessionEventConsumer(
     if (roleForPart(messageID) !== "assistant") return;
     const updates = pendingPartUpdates.get(messageID) ?? [];
     for (const part of updates) {
-      handlePartUpdate(parts, part, push, pushLines);
+      handlePartUpdate(parts, part, emit);
       if (part.type === "text") fireFirstContent();
     }
     pendingPartUpdates.delete(messageID);
 
     const deltas = pendingPartDeltas.get(messageID) ?? [];
     for (const delta of deltas) {
-      handlePartDelta(parts, delta.partID, delta.field, delta.delta, push);
+      handlePartDelta(parts, delta, emit);
       if (delta.field === "text") fireFirstContent();
     }
     pendingPartDeltas.delete(messageID);
@@ -366,7 +344,7 @@ export function createSessionEventConsumer(
   const handleEvent = (event: Event): void => {
     onActivity?.();
     const evSid = eventSessionID(event);
-    if (debug) push(`[debug] event=${event.type} sid=${evSid ?? "-"}`);
+    if (debug) emit({ kind: "debug.event", eventType: event.type, ...(evSid !== undefined ? { sessionID: evSid } : {}) });
     if (evSid !== undefined && evSid !== sessionID) return;
 
     switch (event.type) {
@@ -388,7 +366,7 @@ export function createSessionEventConsumer(
           pendingPartUpdates.set(part.messageID, pending);
           break;
         }
-        handlePartUpdate(parts, part, push, pushLines);
+        handlePartUpdate(parts, part, emit);
         if (part.type === "text") fireFirstContent();
         break;
       }
@@ -403,7 +381,7 @@ export function createSessionEventConsumer(
           pendingPartDeltas.set(messageID, pending);
           break;
         }
-        handlePartDelta(parts, event.properties.partID, event.properties.field, event.properties.delta, push);
+        handlePartDelta(parts, { partID: event.properties.partID, field: event.properties.field, delta: event.properties.delta }, emit);
         if (event.properties.field === "text") fireFirstContent();
         break;
       }
@@ -415,12 +393,12 @@ export function createSessionEventConsumer(
         if (evSid !== sessionID) break;
         const err = event.properties.error;
         const message = err && typeof err === "object" && "message" in err ? String(err.message) : JSON.stringify(err);
-        push(`${ui.red("✗ session error")} ${message}`);
+        emit({ kind: "session.error", message });
         callbacks.onSessionError?.(message);
         break;
       }
       case "session.next.retried":
-        push(`${ui.yellow(`↻ retry ${event.properties.attempt}`)} ${event.properties.error.message}`);
+        emit({ kind: "retry", attempt: event.properties.attempt, message: event.properties.error.message });
         break;
       case "permission.asked": {
         const props = event.properties;
@@ -482,7 +460,7 @@ export function createSessionEventConsumer(
         }
         for (const part of entry.parts) {
           partMessages.set(part.id, part.messageID);
-          handlePartUpdate(parts, part, push, pushLines);
+          handlePartUpdate(parts, part, emit);
           if (part.type === "text") fireFirstContent();
         }
         replayPendingAssistantParts(info.id);
@@ -493,7 +471,7 @@ export function createSessionEventConsumer(
         if (state.kind !== "text" && state.kind !== "reasoning") continue;
         const messageID = partMessages.get(partID);
         if (messageID && roleForPart(messageID) === "user") continue;
-        flushRemaining(state, push);
+        flushRemaining(state, emit);
       }
     },
   };
@@ -512,19 +490,40 @@ export async function consumeSessionEvents(
 export function renderSessionMessages(messages: { info: Message; parts: Part[] }[]): string[] {
   const lines: string[] = [];
   const partsMap = new Map<string, PartState>();
-  const push = (line: string) => lines.push(line);
-  const pushLines = (xs: string[]) => {
-    for (const line of xs) lines.push(line);
+  const emit = createLineEmitter({
+    pushLine: (line) => lines.push(line),
+    pushLines: (xs) => {
+      for (const line of xs) lines.push(line);
+    },
+  });
+
+  for (const entry of messages) {
+    if (entry.info.role !== "assistant") continue;
+    for (const part of entry.parts) handlePartUpdate(partsMap, part, emit);
+  }
+
+  for (const state of partsMap.values()) {
+    if (state.kind === "text" || state.kind === "reasoning") flushRemaining(state, emit);
+  }
+
+  return lines;
+}
+
+export function renderSessionEvents(messages: { info: Message; parts: Part[] }[]): LooperEvent[] {
+  const events: LooperEvent[] = [];
+  const partsMap = new Map<string, PartState>();
+  const emit: EmitLooperEvent = (event) => {
+    events.push(event);
   };
 
   for (const entry of messages) {
     if (entry.info.role !== "assistant") continue;
-    for (const part of entry.parts) handlePartUpdate(partsMap, part, push, pushLines);
+    for (const part of entry.parts) handlePartUpdate(partsMap, part, emit);
   }
 
   for (const state of partsMap.values()) {
-    if (state.kind === "text" || state.kind === "reasoning") flushRemaining(state, push);
+    if (state.kind === "text" || state.kind === "reasoning") flushRemaining(state, emit);
   }
 
-  return lines;
+  return events;
 }

@@ -1,10 +1,11 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { renderSessionMessages } from "./event-consumer.ts";
+import { renderSessionEvents, renderSessionMessages } from "./event-consumer.ts";
 import {
   historyStepSessionKey,
   selectedHistoryStep,
   setHistoryViewError,
+  setHistoryViewEvents,
   setHistoryViewOutput,
   subscribe,
   type LoopState,
@@ -36,8 +37,10 @@ export function startHistoryStreamer({
         return;
       }
       const lines = renderSessionMessages(result.data);
+      const events = renderSessionEvents(result.data);
       const now = Date.now();
       setHistoryViewOutput(state, sessionKey, lines, lines.map(() => now));
+      setHistoryViewEvents(state, sessionKey, events);
     } catch (error) {
       setHistoryViewError(state, sessionKey, formatError(error));
     } finally {
