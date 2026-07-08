@@ -1,6 +1,6 @@
-import type { OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
+import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { serverRecoveryProbeTimeoutMs } from "../config/tunables.ts";
+import { serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
@@ -8,23 +8,71 @@ import { stopFileExists } from "../lib/state-files.ts";
 import { continuationBackgroundAgent, continuationFallback, logContinuationState, setContinuationStatus, startBackgroundAgentPoller, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { createRunnerEventController, type Step, type StepRunResult } from "./step-runner-types.ts";
-import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withDeadline, type SessionPendingState } from "./session-health.ts";
+import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
 import { classifyAssistantForMessage, type AssistantClassification } from "./assistant-classification.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 
-export type ResumeSessionWorkState = "running" | "idle" | "unknown";
+export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
+
+type ForegroundActivityState = "recent" | "stale" | "unknown";
+
+function continuationMarkerStale(record: RunContinuationRecord): boolean {
+  const updatedAt = Date.parse(record.source.updatedAt);
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS;
+}
+
+function latestMessageActivityAt(messages: SessionMessagesResponse2): number | undefined {
+  let latest: number | undefined;
+  for (const message of messages) {
+    const createdAt = message.info.time.created;
+    if (Number.isFinite(createdAt) && (latest === undefined || createdAt > latest)) latest = createdAt;
+    const completedAt = "completed" in message.info.time ? message.info.time.completed : undefined;
+    if (completedAt !== undefined && Number.isFinite(completedAt) && (latest === undefined || completedAt > latest)) latest = completedAt;
+  }
+  return latest;
+}
+
+async function foregroundActivityState({
+  client,
+  repoDir,
+  sessionID,
+  timeoutMs,
+  thresholdMs,
+  signal,
+}: {
+  client: OpencodeClient;
+  repoDir: string;
+  sessionID: string;
+  timeoutMs: number | undefined;
+  thresholdMs: number;
+  signal?: AbortSignal;
+}): Promise<ForegroundActivityState> {
+  try {
+    const messages = client.session.messages({ sessionID, directory: repoDir });
+    const bounded = timeoutMs === undefined ? messages : withDeadline(messages, timeoutMs);
+    const result = await withAbortSignal(bounded, signal);
+    if (result === DEADLINE_EXCEEDED || result.error || result.data === undefined) return "unknown";
+    const latest = latestMessageActivityAt(result.data);
+    if (latest === undefined) return "stale";
+    return Date.now() - latest <= thresholdMs ? "recent" : "stale";
+  } catch {
+    return "unknown";
+  }
+}
 
 export async function resumeSessionWorkState({
   client,
   repoDir,
   sessionID,
   statusTimeoutMs,
+  staleBusyThresholdMs,
   signal,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
   statusTimeoutMs?: number;
+  staleBusyThresholdMs?: number;
   signal?: AbortSignal;
 }): Promise<ResumeSessionWorkState> {
   const timeoutMs = statusTimeoutMs ?? serverRecoveryProbeTimeoutMs();
@@ -34,7 +82,22 @@ export async function resumeSessionWorkState({
   } catch {
     parentState = "unknown";
   }
-  if (parentState === "pending") return "running";
+  if (parentState === "pending") {
+    const activity = await foregroundActivityState({ client, repoDir, sessionID, timeoutMs, thresholdMs: staleBusyThresholdMs ?? staleBusyResumeThresholdMs(), signal });
+    if (activity === "recent") return "running";
+    if (activity === "unknown") return "unknown";
+
+    try {
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs, signal });
+      if (probe.errorMessage !== undefined) return "unknown";
+      if (probe.pendingChildren.length > 0) return "running";
+      const record = readProjectContinuationRecord(repoDir, sessionID);
+      if (record !== null && record.source.state === "active" && !continuationMarkerStale(record)) return "running";
+      return "stale";
+    } catch {
+      return "unknown";
+    }
+  }
 
   let record: RunContinuationRecord | null;
   try {
@@ -43,9 +106,7 @@ export async function resumeSessionWorkState({
     record = null;
   }
   if (record !== null && record.source.state === "active") {
-    const updatedAt = Date.parse(record.source.updatedAt);
-    const markerStale = Number.isFinite(updatedAt) && Date.now() - updatedAt > CONTINUATION_STALE_MS;
-    if (!markerStale) return "running";
+    if (!continuationMarkerStale(record)) return "running";
 
     try {
       const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs, signal });

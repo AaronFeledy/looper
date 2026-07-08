@@ -21,6 +21,10 @@ const SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
 export const DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS = 10_000;
 
+export function staleBusyResumeThresholdMs(): number {
+  return positiveIntegerEnv("LOOPER_STALE_BUSY_RESUME_MS", DEFAULT_STEP_TIMEOUT_MS);
+}
+
 export function stopSessionConfirmTimeoutMs(): number {
   return positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", STOP_SESSION_CONFIRM_TIMEOUT_MS);
 }

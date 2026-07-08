@@ -140,6 +140,66 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     expect(createIdx).toBeGreaterThan(abortIdx);
   });
 
+  test("stale pending prior session with a messageID is stopped before a fresh restart", async () => {
+    const { repoDir, configDir } = setupScratch();
+    scratch = repoDir;
+    writeFileSync(join(configDir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n    timeout: 1s\n");
+    const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const ops: Ops = [];
+    const created: string[] = [];
+    let oldAborted = false;
+
+    const client = {
+      session: {
+        create: async () => {
+          const id = "ses_new";
+          created.push(id);
+          ops.push(`create:${id}`);
+          return { data: { id } };
+        },
+        prompt: async (params: { sessionID: string }) => {
+          ops.push(`prompt:${params.sessionID}`);
+          writeIdleContinuation(repoDir, params.sessionID);
+          return { data: {} };
+        },
+        abort: async ({ sessionID }: { sessionID: string }) => {
+          ops.push(`abort:${sessionID}`);
+          if (sessionID === "ses_old") oldAborted = true;
+          return { data: {} };
+        },
+        status: async () => ({
+          data: {
+            ses_old: { type: oldAborted ? "idle" : "busy" },
+            ses_new: { type: "idle" },
+          },
+        }),
+        messages: async () => ({
+          data: [
+            {
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: Date.now() - 10_000 }, tokens: { output: 1 } },
+              parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "still pending" }],
+            },
+          ],
+        }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_p: unknown, options: { signal: AbortSignal }) => ({ stream: abortableStream(options.signal) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const resume: ResumeSession = { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" };
+    const result = await runIteration({ state, iteration: 2, client, repoDir, configDir, resume });
+
+    expect(result).toBe("complete");
+    expect(created).toEqual(["ses_new"]);
+    expect(ops.some((op) => op === "prompt:ses_old")).toBe(false);
+    const abortIdx = ops.indexOf("abort:ses_old");
+    const createIdx = ops.indexOf("create:ses_new");
+    expect(abortIdx).toBeGreaterThanOrEqual(0);
+    expect(createIdx).toBeGreaterThan(abortIdx);
+  });
+
   test("pending prior session with a messageID reattaches instead of creating a new session", async () => {
     const { repoDir, configDir } = setupScratch();
     scratch = repoDir;
@@ -171,9 +231,9 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
         },
         messages: async () => ({
           data: [
-            { info: { id: "msg_old", role: "user" }, parts: [] },
+            { info: { id: "msg_old", role: "user", time: { created: Date.now() } }, parts: [] },
             {
-              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 }, tokens: { output: 1 } },
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: Date.now(), completed: Date.now() }, tokens: { output: 1 } },
               parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "done" }],
             },
           ],
@@ -213,9 +273,9 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
         },
         messages: async () => ({
           data: [
-            { info: { id: "msg_old", role: "user" }, parts: [] },
+            { info: { id: "msg_old", role: "user", time: { created: Date.now() } }, parts: [] },
             {
-              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: 1, completed: 2 }, tokens: { output: 1 } },
+              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: Date.now(), completed: Date.now() }, tokens: { output: 1 } },
               parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "done" }],
             },
           ],

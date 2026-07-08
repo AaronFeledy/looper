@@ -22,6 +22,14 @@ describe("decideResume", () => {
     });
   });
 
+  test("stale matching sessions fail closed instead of reattaching", () => {
+    expect(decideResume({ currentStepName: "Build", recordedStepName: "Build", workState: "stale", messageID: "msg_1", recoveryNudgeActive: false })).toEqual({
+      kind: "fail-closed",
+      cause: "stale-session",
+      reason: "prior session is busy but has no recent observable activity",
+    });
+  });
+
   test("fail-closed cases preserve the existing reasons", () => {
     const cases = [
       { name: "step mismatch", input: { currentStepName: "Test", recordedStepName: "Build", workState: "idle", messageID: "msg_1", recoveryNudgeActive: false }, cause: "step-mismatch", reason: "step changed since the session was recorded" },

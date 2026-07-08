@@ -22,6 +22,18 @@ export type PromptEventStream = {
   readonly watchdogStallReason: () => string | undefined;
 };
 
+type PromptEventStreamTimings = {
+  readonly pollMs: number;
+  readonly stallThresholdMs: number;
+  readonly resubscribeBackoffMs: number;
+};
+
+const DEFAULT_PROMPT_EVENT_STREAM_TIMINGS: PromptEventStreamTimings = {
+  pollMs: EVENT_WATCHDOG_POLL_MS,
+  stallThresholdMs: EVENT_STALL_THRESHOLD_MS,
+  resubscribeBackoffMs: EVENT_RESUBSCRIBE_BACKOFF_MS,
+};
+
 export function createPromptEventStream({
   client,
   repoDir,
@@ -31,6 +43,7 @@ export function createPromptEventStream({
   cancellationActive,
   pushLine,
   consumer,
+  timings = DEFAULT_PROMPT_EVENT_STREAM_TIMINGS,
 }: {
   readonly client: OpencodeClient;
   readonly repoDir: string;
@@ -40,6 +53,7 @@ export function createPromptEventStream({
   readonly cancellationActive: () => boolean;
   readonly pushLine: (line: string) => void;
   readonly consumer: SessionEventConsumer;
+  readonly timings?: PromptEventStreamTimings;
 }): PromptEventStream {
   let consumerPromise: Promise<void> | undefined;
   let consumerError: Error | undefined;
@@ -56,8 +70,15 @@ export function createPromptEventStream({
     return sub.stream ?? undefined;
   };
 
+  async function* trackActivity(stream: AsyncIterable<Event>): AsyncGenerator<Event> {
+    for await (const event of stream) {
+      lastEventAt = Date.now();
+      yield event;
+    }
+  }
+
   const startConsume = (stream: AsyncIterable<Event>): void => {
-    consumerPromise = consumer.consume(stream).catch((err) => {
+    consumerPromise = consumer.consume(trackActivity(stream)).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
       consumerError = error;
@@ -69,7 +90,7 @@ export function createPromptEventStream({
   const resubscribe = async (reason: string): Promise<boolean> => {
     if (supervisorStopped || cancellationActive()) return false;
     const sinceLast = Date.now() - lastResubscribeAt;
-    if (sinceLast < EVENT_RESUBSCRIBE_BACKOFF_MS) await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS - sinceLast);
+    if (sinceLast < timings.resubscribeBackoffMs) await Bun.sleep(timings.resubscribeBackoffMs - sinceLast);
     if (supervisorStopped || cancellationActive()) return false;
     lastResubscribeAt = Date.now();
     subscription.ctrl?.abort();
@@ -102,12 +123,12 @@ export function createPromptEventStream({
       const current = consumerPromise ?? Promise.resolve();
       const outcome = await Promise.race([
         current.then(() => "ended" as const),
-        Bun.sleep(EVENT_WATCHDOG_POLL_MS).then(() => "tick" as const),
+        Bun.sleep(timings.pollMs).then(() => "tick" as const),
       ]);
       if (supervisorStopped || cancellationActive()) break;
 
       const streamEnded = outcome === "ended";
-      if (!streamEnded && Date.now() - lastEventAt < EVENT_STALL_THRESHOLD_MS) continue;
+      if (!streamEnded && Date.now() - lastEventAt < timings.stallThresholdMs) continue;
 
       let pending: boolean | undefined;
       try {
@@ -119,14 +140,14 @@ export function createPromptEventStream({
 
       if (pending === undefined) {
         if (streamEnded && !(await resubscribe("stream closed; session status unknown"))) {
-          await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+          await Bun.sleep(timings.resubscribeBackoffMs);
         }
         continue;
       }
 
       if (pending) {
         const reason = streamEnded ? "stream closed while session busy" : "no events while session busy";
-        if (!(await resubscribe(reason))) await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+        if (!(await resubscribe(reason))) await Bun.sleep(timings.resubscribeBackoffMs);
         continue;
       }
 
@@ -145,13 +166,13 @@ export function createPromptEventStream({
           ? "stream closed; assistant still in-progress"
           : "stream stalled; assistant still in-progress";
         if (!(await resubscribe(inProgressReason))) {
-          await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+          await Bun.sleep(timings.resubscribeBackoffMs);
         }
         continue;
       }
 
       if (streamEnded && !(await resubscribe("stream closed before prompt"))) {
-        await Bun.sleep(EVENT_RESUBSCRIBE_BACKOFF_MS);
+        await Bun.sleep(timings.resubscribeBackoffMs);
       }
     }
   };

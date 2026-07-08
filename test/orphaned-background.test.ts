@@ -48,7 +48,19 @@ function writeIdleRecord(repoDir: string): void {
 
 type StatusType = "idle" | "busy" | "retry";
 
-function makeClient(opts: { statusMap?: Record<string, StatusType>; children?: string[]; statusError?: boolean }): OpencodeClient {
+type TestMessage = {
+  readonly info: {
+    readonly id: string;
+    readonly role: "user" | "assistant";
+    readonly time: {
+      readonly created: number;
+      readonly completed?: number;
+    };
+  };
+  readonly parts: readonly [];
+};
+
+function makeClient(opts: { statusMap?: Record<string, StatusType>; children?: string[]; statusError?: boolean; messages?: readonly TestMessage[] }): OpencodeClient {
   return {
     session: {
       status: async () => {
@@ -62,8 +74,20 @@ function makeClient(opts: { statusMap?: Record<string, StatusType>; children?: s
         await Bun.sleep(5);
         return { data: (opts.children ?? []).map((id) => ({ id })) };
       },
+      messages: async () => {
+        await Bun.sleep(5);
+        return { data: opts.messages ?? [] };
+      },
     },
   } as unknown as OpencodeClient;
+}
+
+function userMessage(id: string, created: number): TestMessage {
+  return { info: { id, role: "user", time: { created } }, parts: [] };
+}
+
+function assistantMessage(id: string, created: number, completed?: number): TestMessage {
+  return { info: { id, role: "assistant", time: { created, ...(completed !== undefined ? { completed } : {}) } }, parts: [] };
 }
 
 function state(): LoopState {
@@ -127,9 +151,40 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
 describe("resumeSessionWorkState", () => {
   test("reports a busy saved foreground session as running", async () => {
     const repoDir = freshRepo();
-    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [], messages: [userMessage("msg_user", Date.now())] });
 
     const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID });
+
+    expect(result).toBe("running");
+  });
+
+  test("reports a busy saved foreground session with only old incomplete assistant activity as stale", async () => {
+    const repoDir = freshRepo();
+    const oldCreated = Date.now() - 10_000;
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [], messages: [assistantMessage("msg_old", oldCreated)] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, staleBusyThresholdMs: 1_000 });
+
+    expect(result).toBe("stale");
+  });
+
+  test("reports a busy saved foreground session with recent completed assistant activity as running", async () => {
+    const repoDir = freshRepo();
+    const recentCompleted = Date.now();
+    const oldCreated = recentCompleted - 10_000;
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [], messages: [assistantMessage("msg_recent", oldCreated, recentCompleted)] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, staleBusyThresholdMs: 1_000 });
+
+    expect(result).toBe("running");
+  });
+
+  test("keeps a stale busy foreground session running when a child session is still pending", async () => {
+    const repoDir = freshRepo();
+    const oldCreated = Date.now() - 10_000;
+    const client = makeClient({ statusMap: { [SID]: "busy", child1: "busy" }, children: ["child1"], messages: [assistantMessage("msg_old", oldCreated)] });
+
+    const result = await resumeSessionWorkState({ client, repoDir, sessionID: SID, staleBusyThresholdMs: 1_000 });
 
     expect(result).toBe("running");
   });
