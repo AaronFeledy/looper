@@ -543,7 +543,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       const resumeSession = resumeInfo.sessionID;
       if (resumeSession !== undefined) {
         const stepMatches = resumeInfo.stepName === undefined || resumeInfo.stepName === step.name;
-        let workState: ResumeWorkState = await resumeSessionWorkState({ client, repoDir, sessionID: resumeSession });
+        let workState: ResumeWorkState = await resumeSessionWorkState({ client, repoDir, sessionID: resumeSession, staleBusyThresholdMs: step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS });
         if (stepMatches && workState === "unknown") {
           const recovered = await waitForRecoverableHealth(resumeSession, currentStepIndex);
           if (recovered === "stopped") {
