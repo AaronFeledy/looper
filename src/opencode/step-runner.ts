@@ -177,7 +177,6 @@ export async function runOpenCodeStep({
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
-      onActivity: () => undefined,
       ...(onFirstAssistantContent ? { onFirstAssistantContent } : {}),
     });
 

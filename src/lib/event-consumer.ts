@@ -40,8 +40,6 @@ export type EventConsumerCallbacks = {
   onQuestionRejected?: (payload: QuestionRejectedPayload) => void;
   onSessionIdle?: (payload: SessionIdlePayload) => void;
   onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
-  /** Fires for every event off the stream (before any session filter); a liveness signal for stall detection. */
-  onActivity?: () => void;
 };
 
 type TextPartState = {
@@ -293,7 +291,6 @@ export function createSessionEventConsumer(
   const seenQuestionRequests = new Set<string>();
   const emit = createLineEmitter(callbacks);
   const onFirstAssistantContent = callbacks.onFirstAssistantContent;
-  const onActivity = callbacks.onActivity;
   let firstContentFired = false;
   const fireFirstContent = (): void => {
     if (firstContentFired || onFirstAssistantContent === undefined) return;
@@ -342,7 +339,6 @@ export function createSessionEventConsumer(
   };
 
   const handleEvent = (event: Event): void => {
-    onActivity?.();
     const evSid = eventSessionID(event);
     if (debug) emit({ kind: "debug.event", eventType: event.type, ...(evSid !== undefined ? { sessionID: evSid } : {}) });
     if (evSid !== undefined && evSid !== sessionID) return;
@@ -449,7 +445,6 @@ export function createSessionEventConsumer(
       for await (const event of stream) handleEvent(event);
     },
     backfill: (messages: { info: Message; parts: Part[] }[]): void => {
-      onActivity?.();
       for (const entry of messages) {
         const info = entry.info;
         messageRoles.set(info.id, info.role);
