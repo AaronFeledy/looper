@@ -1,10 +1,10 @@
-export type ResumeWorkState = "running" | "idle" | "unknown";
+export type ResumeWorkState = "running" | "idle" | "unknown" | "stale";
 
 export type ResumeDecision =
   | { readonly kind: "reattach" }
   | { readonly kind: "restart-fresh" }
   | { readonly kind: "nudge-existing" }
-  | { readonly kind: "fail-closed"; readonly cause: "unrecovered-server" | "step-mismatch" | "running-without-message-id" | "unknown-state"; readonly reason: string };
+  | { readonly kind: "fail-closed"; readonly cause: "unrecovered-server" | "step-mismatch" | "running-without-message-id" | "stale-session" | "unknown-state"; readonly reason: string };
 
 export type ResumeDecisionInput = {
   readonly currentStepName: string;
@@ -22,6 +22,7 @@ export function decideResume(input: ResumeDecisionInput): ResumeDecision {
     return { kind: "restart-fresh" };
   }
   if (stepMatches && input.workState === "unknown") return { kind: "fail-closed", cause: "unrecovered-server", reason: "prior session work state is unknown" };
+  if (stepMatches && input.workState === "stale") return { kind: "fail-closed", cause: "stale-session", reason: "prior session is busy but has no recent observable activity" };
   if (!stepMatches) return { kind: "fail-closed", cause: "step-mismatch", reason: "step changed since the session was recorded" };
   if (input.workState === "running") return { kind: "fail-closed", cause: "running-without-message-id", reason: "prior session is running but no messageID was recorded" };
   return { kind: "fail-closed", cause: "unknown-state", reason: `prior session is ${input.workState}` };
