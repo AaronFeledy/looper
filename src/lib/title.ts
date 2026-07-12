@@ -6,6 +6,7 @@ import { acquireRelease } from "../platform/acquire-release.ts";
 import { createOpencodeID } from "./runner.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "./session-metadata.ts";
 import { TITLE_AGENT_NAME } from "./title-agent.ts";
+import { resolvePromptVariant } from "../opencode/variant-resolve.ts";
 
 function parseTitleModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
@@ -460,7 +461,6 @@ export async function generateWorkDescription({
   const branchLine = branchHint && branchHint.length > 0 ? `[branch: ${branchHint}]\n\n` : "";
   const userMessage = `${branchLine}${trimmed}`;
   const titleAgent = config?.agent ?? TITLE_AGENT_NAME;
-  const titleVariant = config?.variant;
   const configuredTitleModel = await resolveConfiguredTitleModel({ client, repoDir, model: config?.model, signal, log });
   if (configuredTitleModel === null) return undefined;
   const titleModel =
@@ -472,6 +472,14 @@ export async function generateWorkDescription({
       signal,
       log,
     }));
+  const titleVariant = await resolvePromptVariant({
+    client,
+    repoDir,
+    model: titleModel,
+    variant: config?.variant,
+    signal,
+    log,
+  });
 
   // A correct title is one turn; exceeding this bound means the agent is
   // executing the work-log instead of titling it. The timeout aborts the
@@ -536,7 +544,7 @@ export async function generateWorkDescription({
             system: TITLE_PROMPT,
             ...(titleAgent ? { agent: titleAgent } : {}),
             ...(titleModel ? { model: titleModel } : {}),
-            ...(titleVariant ? { variant: titleVariant } : {}),
+            ...(titleVariant !== undefined ? { variant: titleVariant } : {}),
           },
           { signal: genSignal },
         );
