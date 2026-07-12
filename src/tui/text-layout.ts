@@ -58,7 +58,11 @@ export function truncateDisplay(value: string, maxWidth: number): string {
  * The last line is ellipsized when more text remains.
  */
 export function wrapDisplayLines(text: string, maxWidth: number, maxLines: number): string[] {
-  if (maxLines <= 0 || maxWidth <= 0) return [];
+  return wrapDisplayLinesToWidths(text, Array.from({ length: maxLines }, () => maxWidth));
+}
+
+export function wrapDisplayLinesToWidths(text: string, widths: readonly number[]): string[] {
+  if (widths.length === 0 || widths.every((width) => width <= 0)) return [];
   const normalized = text.trim();
   if (normalized.length === 0) return [""];
 
@@ -67,10 +71,17 @@ export function wrapDisplayLines(text: string, maxWidth: number, maxLines: numbe
   let current = "";
   let wordIndex = 0;
 
-  while (wordIndex < words.length) {
-    const word = words[wordIndex]!;
+  while (wordIndex < words.length && lines.length < widths.length) {
+    const lineWidth = widths[lines.length];
+    if (lineWidth === undefined) break;
+    if (lineWidth <= 0) {
+      lines.push("");
+      continue;
+    }
+    const word = words[wordIndex];
+    if (word === undefined) break;
     const candidate = current.length === 0 ? word : `${current} ${word}`;
-    if (displayWidth(candidate) <= maxWidth) {
+    if (displayWidth(candidate) <= lineWidth) {
       current = candidate;
       wordIndex += 1;
       continue;
@@ -78,28 +89,39 @@ export function wrapDisplayLines(text: string, maxWidth: number, maxLines: numbe
     if (current.length > 0) {
       lines.push(current);
       current = "";
-      if (lines.length >= maxLines) {
+      if (lines.length >= widths.length) {
         let tail = word;
-        for (let i = wordIndex + 1; i < words.length; i++) tail += ` ${words[i]!}`;
-        lines[maxLines - 1] = truncateDisplay(`${lines[maxLines - 1]!} ${tail}`, maxWidth);
-        return lines.slice(0, maxLines);
+        for (let i = wordIndex + 1; i < words.length; i++) {
+          const nextWord = words[i];
+          if (nextWord !== undefined) tail += ` ${nextWord}`;
+        }
+        const lastIndex = widths.length - 1;
+        const lastLine = lines[lastIndex];
+        if (lastLine !== undefined) lines[lastIndex] = truncateDisplay(`${lastLine} ${tail}`, lineWidth);
+        return lines.slice(0, widths.length);
       }
       continue;
     }
-    if (displayWidth(word) <= maxWidth) {
+    if (displayWidth(word) <= lineWidth) {
       current = word;
       wordIndex += 1;
       continue;
     }
-    lines.push(truncateDisplay(word, maxWidth));
+    lines.push(truncateDisplay(word, lineWidth));
     wordIndex += 1;
-    if (lines.length >= maxLines) return lines.slice(0, maxLines);
+    if (lines.length >= widths.length) return lines.slice(0, widths.length);
   }
 
   if (current.length > 0) {
-    if (lines.length < maxLines) lines.push(current);
-    else lines[maxLines - 1] = truncateDisplay(`${lines[maxLines - 1]!} ${current}`, maxWidth);
+    if (lines.length < widths.length) lines.push(current);
+    else {
+      const lastIndex = widths.length - 1;
+      const lastLine = lines[lastIndex];
+      const lastWidth = widths[lastIndex];
+      if (lastLine !== undefined && lastWidth !== undefined) lines[lastIndex] = truncateDisplay(`${lastLine} ${current}`, lastWidth);
+    }
   }
 
-  return lines.length > 0 ? lines.slice(0, maxLines) : [truncateDisplay(normalized, maxWidth)];
+  const firstWidth = widths[0];
+  return lines.length > 0 ? lines.slice(0, widths.length) : firstWidth === undefined ? [] : [truncateDisplay(normalized, firstWidth)];
 }
