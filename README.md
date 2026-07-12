@@ -96,7 +96,7 @@ steps:
     name: Build                                  # display label (defaults to title-cased step key)
     agent: build                                 # opencode agent name (optional)
     model: openai/gpt-5.5                        # provider/model id (optional, falls back to agent default)
-    variant: high                                # opencode agent variant (optional)
+    variant: high                                # opencode agent variant (optional; null disables)
     prompt: build.md                             # path relative to the config directory, or absolute
     prefix: "Working on $LANDO_TICKET.\n\n"      # optional text prepended to the prompt file content
     suffix: "Stop when CI passes."               # optional text appended to the prompt file content
@@ -119,7 +119,7 @@ Per-step fields:
 - `name` &mdash; display label shown in the TUI; defaults to the step key title-cased.
 - `agent` &mdash; opencode agent name; omit to use opencode's default agent.
 - `model` &mdash; `<provider>/<model>` id; omit to inherit from the agent.
-- `variant` &mdash; opencode agent variant (e.g. `low` / `high`); omit for the agent's default.
+- `variant` &mdash; opencode agent variant (e.g. `low` / `high`); omit for the agent's default. Use `null` to force-disable reasoning variants (opencode's `"default"` sentinel). If a named variant is not listed for the resolved model, looper omits it and logs a note instead of failing the step.
 - `prompt` &mdash; path to a markdown file; relative paths resolve against the config directory.
 - `prefix`, `suffix` &mdash; literal text wrapped around the prompt file content. Looper inserts a blank line between prefix/file/suffix unless they already end with a newline.
 - `args` &mdash; optional string array retained with step config for prompt/integration use.
