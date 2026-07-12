@@ -61,6 +61,42 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("parses variant string, null disable, and rejects empty string", () => {
+    withConfigDir(
+      [
+        "steps:",
+        "  named:",
+        "    prompt: hi",
+        "    variant: low",
+        "  disabled:",
+        "    prompt: hi",
+        "    variant: null",
+        "  omitted:",
+        "    prompt: hi",
+      ].join("\n"),
+      (dir) => {
+        const steps = loadSteps(dir);
+        const byName = Object.fromEntries(steps.map((step) => [step.name, step]));
+        expect(byName["Named"]?.variant).toBe("low");
+        expect(byName["Disabled"]?.variant).toBeNull();
+        expect(byName["Omitted"]?.variant).toBeUndefined();
+      },
+    );
+
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    variant: \"\"\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/variant cannot be empty/);
+    });
+  });
+
+  test("parses opencode.title.variant null as explicit disable", () => {
+    withConfigDir(
+      ["opencode:", "  title:", "    variant: null", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        expect(loadRuntimeConfig(dir).title).toEqual({ variant: null });
+      },
+    );
+  });
+
   test("ignores a directory named like a config file and falls back", () => {
     const dir = mkdtempSync(join(tmpdir(), "looper-config-"));
     try {

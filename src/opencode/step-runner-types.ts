@@ -1,6 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy } from "../lib/config.ts";
+import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy, type VariantConfig } from "../lib/config.ts";
 import type { EventConsumerCallbacks, PermissionAskedPayload, QuestionAskedPayload } from "../lib/event-consumer.ts";
 import { setPendingPermission, setPendingQuestion, setTodos, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { formatRequestError, toError } from "./util.ts";
@@ -8,7 +8,7 @@ import { formatRequestError, toError } from "./util.ts";
 export type Step = {
   name: string;
   agent?: string;
-  variant?: string;
+  variant?: VariantConfig;
   model?: string;
   prompt: string;
   prefix?: string;

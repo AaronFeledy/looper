@@ -18,10 +18,13 @@ export type ContextKey = (typeof CONTEXT_KEYS)[number];
 export type ContextPolicy = Record<ContextKey, boolean>;
 type ContextPolicyOverride = Partial<ContextPolicy>;
 
+/** `string` = named variant; `null` = force-disable; omit = agent/opencode default. */
+export type VariantConfig = string | null;
+
 export type LoadedStep = {
   name: string;
   agent?: string;
-  variant?: string;
+  variant?: VariantConfig;
   model?: string;
   prompt: string;
   prefix?: string;
@@ -85,7 +88,7 @@ export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and
 export type TitleGenConfig = {
   agent?: string;
   model?: string;
-  variant?: string;
+  variant?: VariantConfig;
 };
 
 export type RuntimeConfig = {
@@ -255,6 +258,14 @@ function optionalNonEmptyStringValue(value: unknown, label: string): string | un
   return parsed;
 }
 
+function optionalVariantValue(value: unknown, label: string): VariantConfig | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const parsed = stringValue(value, label);
+  if (parsed.length === 0) throw new Error(`${label} cannot be empty (use null to disable)`);
+  return parsed;
+}
+
 function promptPath(configDir: string, prompt: string, label: string): string {
   if (!prompt) throw new Error(`${label}.prompt is required`);
   return isAbsolute(prompt) ? prompt : resolve(configDir, prompt);
@@ -276,7 +287,7 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedSt
       name: stringValue(rawStep.name, `steps.${key}.name`, titleFromKey(key)),
       agent: optionalNonEmptyStringValue(rawStep.agent, `steps.${key}.agent`),
       model: optionalNonEmptyStringValue(rawStep.model, `steps.${key}.model`),
-      variant: optionalNonEmptyStringValue(rawStep.variant, `steps.${key}.variant`),
+      variant: optionalVariantValue(rawStep.variant, `steps.${key}.variant`),
       prompt: promptPath(configDir, stringValue(rawStep.prompt, `steps.${key}.prompt`), `steps.${key}`),
       prefix: stringValue(rawStep.prefix, `steps.${key}.prefix`) || undefined,
       suffix: stringValue(rawStep.suffix, `steps.${key}.suffix`) || undefined,
@@ -362,7 +373,7 @@ function parseTitleConfig(value: unknown): TitleGenConfig | undefined {
   const raw = value as { agent?: unknown; model?: unknown; variant?: unknown };
   const agent = optionalNonEmptyStringValue(raw.agent, "opencode.title.agent");
   const model = optionalNonEmptyStringValue(raw.model, "opencode.title.model");
-  const variant = optionalNonEmptyStringValue(raw.variant, "opencode.title.variant");
+  const variant = optionalVariantValue(raw.variant, "opencode.title.variant");
   if (agent === undefined && model === undefined && variant === undefined) return undefined;
   return {
     ...(agent !== undefined ? { agent } : {}),
