@@ -5,7 +5,7 @@ import {
   EVENT_STALL_THRESHOLD_MS,
   EVENT_WATCHDOG_POLL_MS,
 } from "../config/tunables.ts";
-import { createSessionEventConsumer } from "../lib/event-consumer.ts";
+import { createSessionEventConsumer, eventSessionID } from "../lib/event-consumer.ts";
 import { classifyAssistantForMessage } from "./assistant-classification.ts";
 import { EVENT_CONSUMER_CLOSE_TIMEOUT_MS } from "./continuation-records.ts";
 import { sessionStillPending } from "./session-health.ts";
@@ -72,7 +72,8 @@ export function createPromptEventStream({
 
   async function* trackActivity(stream: AsyncIterable<Event>): AsyncGenerator<Event> {
     for await (const event of stream) {
-      lastEventAt = Date.now();
+      const evSid = eventSessionID(event);
+      if (evSid === undefined || evSid === sessionID) lastEventAt = Date.now();
       yield event;
     }
   }
