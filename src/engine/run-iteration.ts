@@ -14,6 +14,7 @@ import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export type { BranchDelta, BranchDeltaChange } from "../watchers/branch-delta.ts";
 import { buildLooperContext, withLooperContext, type ContextInput, type PriorStepInfo } from "../lib/prompt-context.ts";
+import { latestUserMessageID } from "../opencode/assistant-classification.ts";
 import {
   evaluatePriorSession,
   reattachOpenCodeStep,
@@ -695,6 +696,32 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           pushStepOutputLine(state, currentStepIndex, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
           notify();
           continue;
+        }
+
+        if (waitResult === "resumed" && !state.quitting && !stopFileExists()) {
+          // Track the continuation hook's own user message so the resumed
+          // turn's outcome decides the step result; classifying against
+          // lastPromptMessageID would grade the already-completed prior turn.
+          const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? lastPromptMessageID;
+          if (resumedMessageID !== undefined) {
+            const line = `[looper] session ${waitSessionID} resumed by opencode after background tasks; reattaching to stream its output`;
+            pushAgentLine(state, line);
+            pushStepOutputLine(state, currentStepIndex, line);
+            notify();
+            pendingResult = await reattachOpenCodeStep({
+              state,
+              stepIndex: currentStepIndex,
+              client,
+              repoDir,
+              step,
+              sessionID: waitSessionID,
+              messageID: resumedMessageID,
+              ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+              ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+              ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+            });
+            continue;
+          }
         }
 
         if (waitResult === "orphaned" && !state.quitting && !stopFileExists()) {
