@@ -146,6 +146,45 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
 
     expect(result).toBe("idle");
   });
+
+  test("idle marker with parent busy again -> resumed (opencode continued the session itself)", async () => {
+    const repoDir = freshRepo();
+    writeIdleRecord(repoDir);
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
+
+    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+
+    expect(result).toBe("resumed");
+  });
+
+  test("missing marker with parent busy -> resumed", async () => {
+    const repoDir = freshRepo();
+    const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
+
+    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+
+    expect(result).toBe("resumed");
+  });
+
+  test("idle marker with parent in retry -> resumed", async () => {
+    const repoDir = freshRepo();
+    writeIdleRecord(repoDir);
+    const client = makeClient({ statusMap: { [SID]: "retry" }, children: [] });
+
+    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+
+    expect(result).toBe("resumed");
+  });
+
+  test("idle marker with status error -> keeps waiting (unknown is not resumed) -> timeout", async () => {
+    const repoDir = freshRepo();
+    writeIdleRecord(repoDir);
+    const client = makeClient({ statusError: true });
+
+    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
+
+    expect(result).toBe("timeout");
+  });
 });
 
 describe("resumeSessionWorkState", () => {

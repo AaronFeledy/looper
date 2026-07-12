@@ -7,7 +7,7 @@ import { CONTINUATION_EXIT_GRACE_POLL_MS, CONTINUATION_MAX_WAIT_MS, CONTINUATION
 import { isPendingSessionStatus, probeBackgroundLiveness, sessionPendingState, sessionStillPending, type BackgroundLivenessProbe, type LiveBackgroundAgentSnapshot, type SessionPendingState } from "./session-health.ts";
 import { sanitizeLogField, formatRequestError, toError } from "./util.ts";
 
-export type ContinuationWaitResult = "idle" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
+export type ContinuationWaitResult = "idle" | "resumed" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
 export type BackgroundAgentSnapshot = { sessionID: string; agent?: string; title?: string; placeholder?: true; startedAt: number };
 type LiveBackgroundAgentScan = { agents: LiveBackgroundAgentSnapshot[]; errorMessage?: string };
 
@@ -302,6 +302,15 @@ export async function waitForLoopContinuationIdle({
             logContinuationState(state, stepIndex, record, "background tasks idle");
           }
           return "idle";
+        }
+        if (pendingState === "pending") {
+          // Background tasks report done but the parent session is busy
+          // again: opencode's own continuation hook won the race and
+          // re-prompted it. Surface this so the caller reattaches and streams
+          // the resumed turn instead of polling blind (yellow step, no
+          // output) until the whole turn finishes.
+          if (record !== null) logContinuationState(state, stepIndex, record, "session resumed by opencode after background tasks");
+          return "resumed";
         }
         if (record !== null) setContinuationStatus(state, stepIndex, record);
       }
