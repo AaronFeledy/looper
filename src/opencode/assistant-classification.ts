@@ -45,6 +45,32 @@ export function emptyAssistantMessage(messageID: string): string {
   return `assistant message ${messageID} completed without assistant output or tool activity`;
 }
 
+/**
+ * ID of the newest user message in a session, or undefined when it cannot be
+ * determined. Used after opencode's continuation hook re-prompts a session
+ * itself: the resumed turn's assistant messages parent that hook's user
+ * message, not looper's original prompt.
+ */
+export async function latestUserMessageID(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+): Promise<string | undefined> {
+  let result;
+  try {
+    result = await client.session.messages({ sessionID, directory: repoDir });
+  } catch {
+    return undefined;
+  }
+  if (result.error || !result.data) return undefined;
+  let latest: string | undefined;
+  for (const entry of result.data) {
+    if (entry.info.role !== "user") continue;
+    latest = stringValue(entry.info.id) ?? latest;
+  }
+  return latest;
+}
+
 export async function classifyAssistantForMessage(
   client: OpencodeClient,
   repoDir: string,
