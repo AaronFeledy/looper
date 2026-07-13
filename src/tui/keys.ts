@@ -5,12 +5,14 @@ import {
   dismissEscConfirm,
   enterHistoryView,
   exitHistoryView,
+  hideHelp,
   historyMoveIteration,
   historyMoveStep,
   requestScrollIntent,
   selectNextStep,
   selectPreviousStep,
   setFocusedPane,
+  showHelp,
   syncSelectionToActiveStep,
   toggleFocusedPane,
 } from "../lib/state.ts";
@@ -111,11 +113,24 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       return;
     }
 
+    // Help is modal: while visible, the next keypress only closes it.
+    if (state.helpVisible) {
+      hideHelp(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
     if (isEscape) {
       hooks.onEscape();
       if (typeof event.preventDefault === "function") {
         event.preventDefault();
       }
+      return;
+    }
+
+    if (keyName === "?" || event.sequence === "?") {
+      showHelp(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }
 

@@ -28,6 +28,8 @@ looper 5                                # cap at 5 iterations (positional; defau
 looper --help
 ```
 
+Press `?` in the TUI for a keybinding overlay.
+
 CLI flags:
 
 - `init` &mdash; scaffold the config directory (`looper.yml`, `work.md`, `check-done.md`) and exit. Refuses to overwrite an existing config.

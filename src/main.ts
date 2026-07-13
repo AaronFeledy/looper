@@ -45,6 +45,7 @@ import { createAgentStream } from "./tui/agent-stream.ts";
 import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
 import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
+import { createHelpOverlay } from "./tui/help-overlay.ts";
 import { createPendingRequestPanel } from "./tui/pending-request-panel.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
@@ -478,6 +479,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     body.add(leftColumn);
     body.add(stream);
     root.add(body);
+    root.add(createHelpOverlay(renderer, state));
     root.add(createPendingRequestPanel(renderer, state));
     root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));

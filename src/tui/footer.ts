@@ -23,9 +23,12 @@ function footerContent(state: LoopState): string {
     const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
     return `[h] exit history  Left/Right: iteration  Tab: ${tabTarget}  ${navHint}  [q]uit`;
   }
+  if (state.helpVisible) {
+    return `press any key to close help`;
+  }
   if (!state.started) {
     const reset = state.resumable ? "  [esc] reset" : "";
-    return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step`;
+    return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step  [?] keys`;
   }
 
   const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
@@ -36,12 +39,12 @@ function footerContent(state: LoopState): string {
         ? `Tab: ${tabTarget}  Enter: open PR`
         : `Tab: ${tabTarget}  Up/Down/PageUp/PageDown/Home/End: scroll`;
 
-  const pause = state.paused ? "[p]aused — press p to resume" : "[p]ause";
+  const pause = state.paused ? "[p]aused before next step — press p to resume" : "[p]ause after step";
   const end = state.stopAfterIteration ? "ending after iteration" : "[e]nd after iteration";
   const restart = state.restartRequested ? "restarting step" : "[r]estart step";
   const skip = state.skipRequested ? "skipping step" : "[s]kip step";
   const history = state.history.length > 0 ? "  [h]istory" : "";
-  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  [esc] stop${history}  ${focusHint}`;
+  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  [esc] stop${history}  ${focusHint}  [?] keys`;
 }
 
 function footerColor(state: LoopState): string {
