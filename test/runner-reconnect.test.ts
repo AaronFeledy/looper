@@ -493,7 +493,6 @@ describe("runIteration reattach policy propagation", () => {
     expect(createdSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
     expect(promptedSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
   }, 10000);
-
 });
 
 describe("runOpenCodeStep event stream recovery", () => {

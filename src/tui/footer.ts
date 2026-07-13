@@ -47,6 +47,7 @@ function footerContent(state: LoopState): string {
 function footerColor(state: LoopState): string {
   if (state.escConfirm !== null) return "#f38ba8";
   if (state.recovery !== null) return "#f38ba8";
+  if (state.pendingPermission !== null || state.pendingQuestion !== null) return "#f9e2af";
   if (state.historyView !== null) return "#cba6f7";
   return state.paused || state.stopAfterIteration || state.skipRequested || state.restartRequested ? "#f9e2af" : "#6c7086";
 }

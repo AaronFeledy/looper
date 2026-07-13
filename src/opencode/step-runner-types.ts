@@ -77,16 +77,12 @@ export function createRunnerEventController({
   const alreadyHandling = (requestID: string): boolean => handledRequestIDs.has(requestID) || inFlightReplies.has(requestID);
 
   const onPermissionAsked = (payload: PermissionAskedPayload): void => {
-    if (!hasPermissionPolicy) return;
     if (payload.sessionID !== activeSessionID) return;
     if (alreadyHandling(payload.requestID)) return;
 
-    const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
-    if (action === "ask") {
-      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
-      return;
-    }
-
+    // Pending state is set for the "ask" path too (and left set until the
+    // permission.replied event) so the TUI can surface that the run is blocked
+    // waiting on a human instead of silently stalling.
     setPendingPermission(state, {
       requestID: payload.requestID,
       sessionID: payload.sessionID,
@@ -94,6 +90,12 @@ export function createRunnerEventController({
       patterns: payload.patterns,
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
+
+    const action = hasPermissionPolicy ? resolvePermissionAction(payload.permission, step, { permissionPolicy }) : "ask";
+    if (action === "ask") {
+      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
+      return;
+    }
 
     const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir })
       .then((result) => {
@@ -110,7 +112,6 @@ export function createRunnerEventController({
   };
 
   const onQuestionAsked = (payload: QuestionAskedPayload): void => {
-    if (effectiveQuestionPolicy !== "reject") return;
     if (payload.sessionID !== activeSessionID) return;
     if (alreadyHandling(payload.requestID)) return;
 
@@ -119,6 +120,11 @@ export function createRunnerEventController({
       sessionID: payload.sessionID,
       questions: payload.questions,
     });
+
+    if (effectiveQuestionPolicy !== "reject") {
+      pushLine(`[looper] question left pending (answer in an attached opencode client, or set questionPolicy: reject)`);
+      return;
+    }
 
     const request = client.question.reject({ requestID: payload.requestID, directory: repoDir })
       .then((result) => {

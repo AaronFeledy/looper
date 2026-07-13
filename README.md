@@ -128,6 +128,9 @@ Per-step fields:
 - `timeout` &mdash; optional per-step timeout. Numbers are minutes; strings accept `s`, `m`, or `h` suffixes.
 - `permissionPolicy` &mdash; optional per-step OpenCode permission auto-reply policy. Actions are `ask`, `always`, `once`, or `reject`; `*` is the wildcard key at the global level.
 - `questionPolicy` &mdash; optional per-step OpenCode question policy: `ask` or `reject`.
+
+When a permission or question is left pending (policy `ask`, or no policy), the TUI shows a "waiting on you" banner above the footer until it is answered from an attached opencode client.
+
 - `title` &mdash; see "Session titles" below.
 - `context` &mdash; see "Prompt context" below.
 
