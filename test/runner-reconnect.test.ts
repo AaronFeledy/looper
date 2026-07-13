@@ -52,6 +52,13 @@ function assistantFatalError(): { info: unknown; parts: unknown[] } {
   };
 }
 
+function assistantInProgress(parentID: string): { info: unknown; parts: unknown[] } {
+  return {
+    info: { id: "msg_in_progress", role: "assistant", parentID, time: { created: Date.now() } },
+    parts: [{ id: "prt_tool", messageID: "msg_in_progress", type: "tool", callID: "tool_1" }],
+  };
+}
+
 function assistantRetryableError(parentID: string): { info: unknown; parts: unknown[] } {
   return {
     info: {
@@ -370,6 +377,63 @@ describe("runIteration reattach policy propagation", () => {
     expect(result).toBe("complete");
     expect(replyCalls).toEqual([{ requestID: "per_resume_edit", reply: "always", directory: repoDir }]);
   });
+
+  test("does not start a fresh retry when the tracked assistant turn remains in-progress after the reattach cap", async () => {
+    // Given
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-cap-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-cap-config-"));
+    const activeRepoDir = repoDir;
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "continue safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n`);
+    initStatePaths({ configDir });
+    const createdSessionIDs: string[] = [];
+    const promptedSessionIDs: string[] = [];
+    let firstMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => {
+          const sessionID = createdSessionIDs.length === 0 ? SID : "ses_fresh_after_cap";
+          createdSessionIDs.push(sessionID);
+          return { data: { id: sessionID } };
+        },
+        prompt: async (params: { sessionID: string; messageID: string }) => {
+          promptedSessionIDs.push(params.sessionID);
+          if (params.sessionID === SID) {
+            firstMessageID = params.messageID;
+            throw new Error("client disconnected while opencode kept working");
+          }
+          writeIdleContinuationRecord(activeRepoDir, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" }, ses_fresh_after_cap: { type: "idle" } } }),
+        messages: async (params: { sessionID: string }) => ({ data: params.sessionID === SID ? [assistantInProgress(firstMessageID)] : [assistantDone("msg_fresh")] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    let thrown: Error | undefined;
+
+    // When
+    try {
+      await runIteration({ state, iteration: 1, client, repoDir, configDir });
+    } catch (error) {
+      thrown = error instanceof Error ? error : new Error(String(error));
+    }
+
+    // Then
+    expect(createdSessionIDs).toEqual([SID]);
+    expect(promptedSessionIDs).toEqual([SID]);
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown?.message).toContain("assistant message still in-progress");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("reattaching (5/5)") && line.includes("assistant message still in-progress"))).toBe(true);
+  }, 10000);
 
   test("gives a fresh failure retry the full step timeout budget after the retry backoff", async () => {
     // Given

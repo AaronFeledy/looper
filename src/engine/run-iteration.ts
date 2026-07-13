@@ -511,6 +511,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+    const failAfterActivePriorSession = (sessionID: string, stepIdx: number, reason: string): StepRunResult => {
+      suppressFailureRetry = true;
+      suppressReason = reason;
+      allowTerminalSessionToContinue = true;
+      lastErrorMessage = reason;
+      logStepLine(stepIdx, `[looper] ${reason}; leaving session ${sessionID} alone so it can complete`);
+      failStepRow(state, stepIdx, "failed");
+      return { status: "failed", sessionID, errorMessage: reason };
+    };
     const stopAfterInterruptedHealthWait = (sessionID: string, stepIdx: number): StepRunResult => {
       if (state.restartRequested) {
         const reason = state.restartReason ?? "manual";
@@ -835,8 +844,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const priorSessionForCheck = state.steps[currentStepIndex]?.sessionID;
         if (
           priorSessionForCheck !== undefined &&
-          lastPromptMessageID !== undefined &&
-          shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: lastPromptMessageID, reattachCount })
+          lastPromptMessageID !== undefined
         ) {
           let ev = await evaluatePriorSession({
             client,
@@ -866,6 +874,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             ev.classification.kind === "done" ||
             ev.classification.kind === "in-progress";
           if (shouldReattach) {
+            if (!shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: lastPromptMessageID, reattachCount })) {
+              const reason = ev.pending
+                ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`
+                : ev.classification.kind === "in-progress"
+                  ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`
+                  : `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
+              result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, reason);
+              break;
+            }
             reattachCount += 1;
             const why = ev.pending
               ? "session still busy on opencode side"
