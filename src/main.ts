@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
-import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { runNonTty } from "./lib/fallback.ts";
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
@@ -89,6 +89,17 @@ function ensureConfigExists(): void {
   process.stderr.write(`error: missing ${CONFIG_FILE_NAMES[0]} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")})\n`);
   process.stderr.write(`Run \`looper init\` to scaffold a starter config, or create ${CONFIG_FILE_NAMES[0]} with at least one step.\n`);
   process.exit(2);
+}
+
+function ensureConfigValid(): void {
+  try {
+    assertPromptFilesExist(loadSteps(configDir));
+    loadRuntimeConfig(configDir, repoDir);
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`Fix ${configFilePath(configDir)} and re-run.\n`);
+    process.exit(2);
+  }
 }
 
 async function currentBranch(): Promise<string> {
@@ -751,6 +762,7 @@ async function main(): Promise<number> {
 
   ensureConfigDir();
   ensureConfigExists();
+  ensureConfigValid();
   applyManagedOpencodeResources({ resources: LOOPER_MANAGED_RESOURCES, log: (line) => process.stderr.write(`${line}\n`) });
 
   const isTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);

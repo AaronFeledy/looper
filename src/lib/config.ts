@@ -431,6 +431,13 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   };
 }
 
+export function assertPromptFilesExist(steps: readonly LoadedStep[]): void {
+  const missing = steps.filter((step) => !isRegularFile(step.prompt));
+  if (missing.length === 0) return;
+  const lines = missing.map((step) => `  ${step.name}: ${step.prompt}`);
+  throw new Error(`missing prompt file${missing.length === 1 ? "" : "s"}:\n${lines.join("\n")}`);
+}
+
 export function loadSteps(configDir: string): LoadedStep[] {
   const rawConfig = loadRawConfig(configDir);
   const steps = parseConfiguredSteps(configDir, rawConfig);

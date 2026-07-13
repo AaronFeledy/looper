@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  assertPromptFilesExist,
   loadRuntimeConfig,
   loadSteps,
   resolveContextPolicy,
@@ -334,5 +335,24 @@ describe("resolvePermissionAction", () => {
     expect(resolvePermissionAction("bash", {}, global)).toBe("reject");
     expect(resolvePermissionAction("webfetch", { permissionPolicy: { webfetch: "once" } }, {})).toBe("once");
     expect(resolvePermissionAction("unknown", {}, {})).toBe("ask");
+  });
+});
+
+describe("assertPromptFilesExist", () => {
+  test("lists every step whose prompt file is missing", () => {
+    withConfigDir("steps:\n  build:\n    prompt: build.md\n  review:\n    prompt: review.md\n", (dir) => {
+      writeFileSync(join(dir, "build.md"), "do the build\n");
+      const steps = loadSteps(dir);
+      expect(() => assertPromptFilesExist(steps)).toThrow(/missing prompt file/);
+      expect(() => assertPromptFilesExist(steps)).toThrow(/Review: .*review\.md/);
+      expect(() => assertPromptFilesExist(steps)).not.toThrow(/Build: .*build\.md/);
+    });
+  });
+
+  test("passes when every prompt file exists", () => {
+    withConfigDir("steps:\n  build:\n    prompt: build.md\n", (dir) => {
+      writeFileSync(join(dir, "build.md"), "do the build\n");
+      expect(() => assertPromptFilesExist(loadSteps(dir))).not.toThrow();
+    });
   });
 });
