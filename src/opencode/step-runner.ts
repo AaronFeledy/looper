@@ -2,7 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
@@ -239,6 +239,8 @@ export async function runOpenCodeStep({
     ctrl.abort();
     await eventStream?.stop();
     eventStream?.flush();
+    setPendingPermission(state, null);
+    setPendingQuestion(state, null);
   }
 
   const consumerError = eventStream?.consumerError();

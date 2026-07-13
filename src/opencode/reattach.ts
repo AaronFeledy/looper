@@ -3,7 +3,7 @@ import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@o
 import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { continuationBackgroundAgent, continuationFallback, logContinuationState, setContinuationStatus, startBackgroundAgentPoller, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
@@ -395,6 +395,8 @@ export async function reattachOpenCodeStep({
       pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
     }
     consumer.flush();
+    setPendingPermission(state, null);
+    setPendingQuestion(state, null);
   }
 
   const finalize = (

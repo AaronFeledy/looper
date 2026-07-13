@@ -888,6 +888,56 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(statusMessagesAfterStreaming).toEqual([undefined]);
   });
 
+  test("reattach clears pending permission and question state after terminal teardown", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-pending-teardown-"));
+    writeIdleContinuationRecord(repoDir, SID);
+    const eventsStreamed = deferred();
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => {
+          await eventsStreamed.promise;
+          return { data: { [SID]: { type: "idle" } } };
+        },
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            yield permissionAsked("perm_reattach", "edit");
+            yield questionAsked("question_reattach");
+            eventsStreamed.resolve();
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("done");
+    expect(state.pendingPermission).toBeNull();
+    expect(state.pendingQuestion).toBeNull();
+  });
+
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;
