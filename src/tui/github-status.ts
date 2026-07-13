@@ -4,7 +4,7 @@ import { openUrl } from "../lib/open-url.ts";
 import type { GithubStatus, LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
 import { formatRow, LIST_WIDTH } from "./step-list.ts";
-import { displayWidth, wrapDisplayLines } from "./text-layout.ts";
+import { displayWidth, wrapDisplayLinesToWidths } from "./text-layout.ts";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PANEL_BORDER = 2;
@@ -96,14 +96,16 @@ export function buildPrTitleLines(
   maxWidth: number = GITHUB_PANEL_TEXT_WIDTH,
   maxLines: number = 2,
 ): string[] {
+  if (maxLines <= 0) return [];
   const prefix = `[${prStateLabel(status)}] `;
-  const titleWidth = Math.max(1, maxWidth - displayWidth(prefix));
-  const wrapped = wrapDisplayLines(status.pr.title, titleWidth, maxLines);
+  const firstTitleWidth = Math.max(1, maxWidth - displayWidth(prefix));
+  const titleWidths = [firstTitleWidth, ...Array.from({ length: Math.max(0, maxLines - 1) }, () => maxWidth)];
+  const wrapped = wrapDisplayLinesToWidths(status.pr.title, titleWidths);
   return wrapped.map((line, index) => (index === 0 ? `${prefix}${line}` : line));
 }
 
 function buildStyledPrTitleLine(status: Extract<GithubStatus, { kind: "pr" }>, content: string, index: number): StyledText {
-  if (index !== 0) return t`${content}`;
+  if (index !== 0) return t`${bold(content)}`;
   const label = `[${prStateLabel(status)}]`;
   const title = content.slice(label.length + 1);
   return t`${bold(fg(prStateColor(status))(label))} ${bold(title)}`;

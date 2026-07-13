@@ -52,6 +52,36 @@ function assistantFatalError(): { info: unknown; parts: unknown[] } {
   };
 }
 
+function assistantInProgress(parentID: string): { info: unknown; parts: unknown[] } {
+  return {
+    info: { id: "msg_in_progress", role: "assistant", parentID, time: { created: Date.now() } },
+    parts: [{ id: "prt_tool", messageID: "msg_in_progress", type: "tool", callID: "tool_1" }],
+  };
+}
+
+function assistantRetryableError(parentID: string): { info: unknown; parts: unknown[] } {
+  return {
+    info: {
+      id: "msg_retryable_error",
+      role: "assistant",
+      parentID,
+      time: { completed: Date.now() },
+      error: { name: "APIError", data: { message: "temporary transport failure", isRetryable: true } },
+    },
+    parts: [],
+  };
+}
+
+function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
+  const continuationDir = join(repoDir, ".omo", "run-continuation");
+  mkdirSync(continuationDir, { recursive: true });
+  const now = new Date().toISOString();
+  writeFileSync(
+    join(continuationDir, `${sessionID}.json`),
+    JSON.stringify({ sessionID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+  );
+}
+
 function textPartUpdated(text: string): Event {
   return {
     type: "message.part.updated",
@@ -347,6 +377,122 @@ describe("runIteration reattach policy propagation", () => {
     expect(result).toBe("complete");
     expect(replyCalls).toEqual([{ requestID: "per_resume_edit", reply: "always", directory: repoDir }]);
   });
+
+  test("does not start a fresh retry when the tracked assistant turn remains in-progress after the reattach cap", async () => {
+    // Given
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-cap-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-cap-config-"));
+    const activeRepoDir = repoDir;
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "continue safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n`);
+    initStatePaths({ configDir });
+    const createdSessionIDs: string[] = [];
+    const promptedSessionIDs: string[] = [];
+    let firstMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => {
+          const sessionID = createdSessionIDs.length === 0 ? SID : "ses_fresh_after_cap";
+          createdSessionIDs.push(sessionID);
+          return { data: { id: sessionID } };
+        },
+        prompt: async (params: { sessionID: string; messageID: string }) => {
+          promptedSessionIDs.push(params.sessionID);
+          if (params.sessionID === SID) {
+            firstMessageID = params.messageID;
+            throw new Error("client disconnected while opencode kept working");
+          }
+          writeIdleContinuationRecord(activeRepoDir, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" }, ses_fresh_after_cap: { type: "idle" } } }),
+        messages: async (params: { sessionID: string }) => ({ data: params.sessionID === SID ? [assistantInProgress(firstMessageID)] : [assistantDone("msg_fresh")] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    let thrown: Error | undefined;
+
+    // When
+    try {
+      await runIteration({ state, iteration: 1, client, repoDir, configDir });
+    } catch (error) {
+      thrown = error instanceof Error ? error : new Error(String(error));
+    }
+
+    // Then
+    expect(createdSessionIDs).toEqual([SID]);
+    expect(promptedSessionIDs).toEqual([SID]);
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown?.message).toContain("assistant message still in-progress");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("reattaching (5/5)") && line.includes("assistant message still in-progress"))).toBe(true);
+  }, 10000);
+
+  test("gives a fresh failure retry the full step timeout budget after the retry backoff", async () => {
+    // Given
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-config-"));
+    const activeRepoDir = repoDir;
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "retry safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n    timeout: 1s\n`);
+    initStatePaths({ configDir });
+    const createdSessionIDs: string[] = [];
+    const promptedSessionIDs: string[] = [];
+    let firstMessageID = "";
+    let retryPromptAbortedEarly = false;
+
+    const client = {
+      session: {
+        create: async () => {
+          const sessionID = `ses_retry_${createdSessionIDs.length + 1}`;
+          createdSessionIDs.push(sessionID);
+          return { data: { id: sessionID } };
+        },
+        prompt: async (params: { sessionID: string; messageID: string }, options: { signal: AbortSignal }) => {
+          promptedSessionIDs.push(params.sessionID);
+          if (params.sessionID === "ses_retry_1") {
+            firstMessageID = params.messageID;
+            throw new Error("first prompt failed before opencode finished");
+          }
+          await Bun.sleep(20);
+          retryPromptAbortedEarly = options.signal.aborted;
+          if (options.signal.aborted) {
+            const error = new Error("retry prompt aborted before it could use its budget");
+            error.name = "AbortError";
+            throw error;
+          }
+          writeIdleContinuationRecord(activeRepoDir, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { ses_retry_1: { type: "idle" }, ses_retry_2: { type: "idle" }, ses_retry_3: { type: "idle" } } }),
+        messages: async (params: { sessionID: string }) => ({ data: params.sessionID === "ses_retry_1" ? [assistantRetryableError(firstMessageID)] : [assistantDone("msg_retry_success")] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+
+    // When
+    const result = await runIteration({ state, iteration: 1, client, repoDir, configDir });
+
+    // Then
+    expect(result).toBe("complete");
+    expect(retryPromptAbortedEarly).toBe(false);
+    expect(createdSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
+    expect(promptedSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
+  }, 10000);
 });
 
 describe("runOpenCodeStep event stream recovery", () => {
@@ -635,6 +781,160 @@ describe("runOpenCodeStep event stream recovery", () => {
       if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
       else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;
     }
+  });
+
+  test("reattach restarts with a timeout when the session stays busy past the step timeout", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-timeout-"));
+    let abortCalled = false;
+
+    const client = {
+      session: {
+        abort: async () => {
+          abortCalled = true;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "busy" } } }),
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt", timeoutMs: 25 };
+    const startedAt = Date.now();
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("restart");
+    expect(state.restartRequested).toBe(true);
+    expect(state.restartReason).toBe("timeout");
+    expect(abortCalled).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach exceeded step timeout"))).toBe(true);
+  });
+
+  test("reattach clears the reattaching status message once the session streams output", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-streaming-status-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const statusMessagesAfterStreaming: (string | undefined)[] = [];
+    const startedAt = Date.now();
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => ({ data: { [SID]: { type: Date.now() - startedAt >= 40 ? "idle" : "busy" } } }),
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            yield assistantUpdated();
+            yield textPartUpdated("hello\n");
+            statusMessagesAfterStreaming.push(state.steps[0]?.statusMessage);
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("done");
+    expect(statusMessagesAfterStreaming).toEqual([undefined]);
+  });
+
+  test("reattach clears pending permission and question state after terminal teardown", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-pending-teardown-"));
+    writeIdleContinuationRecord(repoDir, SID);
+    const eventsStreamed = deferred();
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => {
+          await eventsStreamed.promise;
+          return { data: { [SID]: { type: "idle" } } };
+        },
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            yield permissionAsked("perm_reattach", "edit");
+            yield questionAsked("question_reattach");
+            eventsStreamed.resolve();
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("done");
+    expect(state.pendingPermission).toBeNull();
+    expect(state.pendingQuestion).toBeNull();
   });
 
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {

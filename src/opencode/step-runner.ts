@@ -2,7 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
@@ -13,6 +13,7 @@ import { classifyAssistantForMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
 import { createRunnerEventController, parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
+import { resolvePromptVariant } from "./variant-resolve.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
 export { createRunnerEventController, parseModel } from "./step-runner-types.ts";
@@ -193,13 +194,20 @@ export async function runOpenCodeStep({
     await eventStream.start();
 
     const model = parseModel(step.model);
-    const variant = step.variant || undefined;
+    const variant = await resolvePromptVariant({
+      client,
+      repoDir,
+      model,
+      variant: step.variant,
+      signal: ctrl.signal,
+      log: pushLine,
+    });
     const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
     eventStream.setSentMessageID(messageID);
     onSessionBound?.({ sessionID: sid, messageID });
-    pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant ? ` variant=${variant}` : ""} messageID=${messageID})`);
+    pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant !== undefined ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(
       {
         sessionID: sid,
@@ -208,7 +216,7 @@ export async function runOpenCodeStep({
         parts: [{ type: "text", text: prompt }],
         ...(agent ? { agent } : {}),
         ...(model ? { model } : {}),
-        ...(variant ? { variant } : {}),
+        ...(variant !== undefined ? { variant } : {}),
       },
       { signal: ctrl.signal },
     );
@@ -231,6 +239,8 @@ export async function runOpenCodeStep({
     ctrl.abort();
     await eventStream?.stop();
     eventStream?.flush();
+    setPendingPermission(state, null);
+    setPendingQuestion(state, null);
   }
 
   const consumerError = eventStream?.consumerError();

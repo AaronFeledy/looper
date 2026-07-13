@@ -6,8 +6,9 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
+import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
-import { CONFIG_FILE_NAMES, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { runNonTty } from "./lib/fallback.ts";
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
@@ -44,6 +45,8 @@ import { createAgentStream } from "./tui/agent-stream.ts";
 import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
 import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
+import { createHelpOverlay } from "./tui/help-overlay.ts";
+import { createPendingRequestPanel } from "./tui/pending-request-panel.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
@@ -86,8 +89,19 @@ function ensureConfigDir(): void {
 function ensureConfigExists(): void {
   if (findConfigFile(configDir) !== undefined) return;
   process.stderr.write(`error: missing ${CONFIG_FILE_NAMES[0]} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")})\n`);
-  process.stderr.write(`Create it with at least one step. See https://github.com/ for examples.\n`);
+  process.stderr.write(`Run \`looper init\` to scaffold a starter config, or create ${CONFIG_FILE_NAMES[0]} with at least one step.\n`);
   process.exit(2);
+}
+
+function ensureConfigValid(): void {
+  try {
+    assertPromptFilesExist(loadSteps(configDir));
+    loadRuntimeConfig(configDir, repoDir);
+  } catch (error) {
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(`Fix ${configFilePath(configDir)} and re-run.\n`);
+    process.exit(2);
+  }
 }
 
 async function currentBranch(): Promise<string> {
@@ -465,6 +479,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     body.add(leftColumn);
     body.add(stream);
     root.add(body);
+    root.add(createHelpOverlay(renderer, state));
+    root.add(createPendingRequestPanel(renderer, state));
     root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));
 
@@ -736,8 +752,21 @@ async function main(): Promise<number> {
   }
 
   configDir = resolveConfigDir(options.configDir);
+
+  if (options.init) {
+    const result = scaffoldConfigDir({ configDir, repoDir });
+    if (result.kind === "already-initialized") {
+      process.stdout.write(`Already initialized: ${result.configPath}\n`);
+      return 0;
+    }
+    for (const file of result.files) process.stdout.write(`created ${file}\n`);
+    process.stdout.write(`\nEdit the prompts, then run \`looper\` (or \`looper --start\`) from ${repoDir}.\n`);
+    return 0;
+  }
+
   ensureConfigDir();
   ensureConfigExists();
+  ensureConfigValid();
   applyManagedOpencodeResources({ resources: LOOPER_MANAGED_RESOURCES, log: (line) => process.stderr.write(`${line}\n`) });
 
   const isTty = Boolean(process.stdin.isTTY && process.stdout.isTTY);

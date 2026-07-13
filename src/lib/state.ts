@@ -231,6 +231,7 @@ export type LoopState = {
   todos: TodoItem[];
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
+  helpVisible: boolean;
   resumable: boolean;
   agentLines: string[];
   agentLineTimes: number[];
@@ -372,6 +373,7 @@ export function createLoopState({
     todos: [],
     recoveryChoice: null,
     escConfirm: null,
+    helpVisible: false,
     resumable: false,
     agentLines: [],
     agentLineTimes: [],
@@ -806,6 +808,18 @@ export function setSelectedStepOutputScroll(state: LoopState, scrollTop: number,
 export function dismissEscConfirm(state: LoopState): void {
   if (state.escConfirm === null) return;
   state.escConfirm = null;
+  notifyStateChange();
+}
+
+export function showHelp(state: LoopState): void {
+  if (state.helpVisible) return;
+  state.helpVisible = true;
+  notifyStateChange();
+}
+
+export function hideHelp(state: LoopState): void {
+  if (!state.helpVisible) return;
+  state.helpVisible = false;
   notifyStateChange();
 }
 

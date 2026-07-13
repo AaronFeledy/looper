@@ -14,6 +14,7 @@ import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export type { BranchDelta, BranchDeltaChange } from "../watchers/branch-delta.ts";
 import { buildLooperContext, withLooperContext, type ContextInput, type PriorStepInfo } from "../lib/prompt-context.ts";
+import { latestUserMessageID } from "../opencode/assistant-classification.ts";
 import {
   evaluatePriorSession,
   reattachOpenCodeStep,
@@ -510,6 +511,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+    const failAfterActivePriorSession = (sessionID: string, stepIdx: number, reason: string): StepRunResult => {
+      suppressFailureRetry = true;
+      suppressReason = reason;
+      allowTerminalSessionToContinue = true;
+      lastErrorMessage = reason;
+      logStepLine(stepIdx, `[looper] ${reason}; leaving session ${sessionID} alone so it can complete`);
+      failStepRow(state, stepIdx, "failed");
+      return { status: "failed", sessionID, errorMessage: reason };
+    };
     const stopAfterInterruptedHealthWait = (sessionID: string, stepIdx: number): StepRunResult => {
       if (state.restartRequested) {
         const reason = state.restartReason ?? "manual";
@@ -583,6 +593,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               step,
               sessionID: resumeSession,
               messageID: resumeInfo.messageID,
+              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -697,6 +708,33 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           continue;
         }
 
+        if (waitResult === "resumed" && !state.quitting && !stopFileExists()) {
+          // Track the continuation hook's own user message so the resumed
+          // turn's outcome decides the step result; classifying against
+          // lastPromptMessageID would grade the already-completed prior turn.
+          const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? lastPromptMessageID;
+          if (resumedMessageID !== undefined) {
+            const line = `[looper] session ${waitSessionID} resumed by opencode after background tasks; reattaching to stream its output`;
+            pushAgentLine(state, line);
+            pushStepOutputLine(state, currentStepIndex, line);
+            notify();
+            pendingResult = await reattachOpenCodeStep({
+              state,
+              stepIndex: currentStepIndex,
+              client,
+              repoDir,
+              step,
+              sessionID: waitSessionID,
+              messageID: resumedMessageID,
+              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+              ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+              ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+              ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+            });
+            continue;
+          }
+        }
+
         if (waitResult === "orphaned" && !state.quitting && !stopFileExists()) {
           orphanNudgeCount += 1;
           const orphanNudgeDecision = nextActionForOrphanedBackgroundNudge(orphanNudgeCount);
@@ -806,8 +844,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const priorSessionForCheck = state.steps[currentStepIndex]?.sessionID;
         if (
           priorSessionForCheck !== undefined &&
-          lastPromptMessageID !== undefined &&
-          shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: lastPromptMessageID, reattachCount })
+          lastPromptMessageID !== undefined
         ) {
           let ev = await evaluatePriorSession({
             client,
@@ -837,6 +874,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             ev.classification.kind === "done" ||
             ev.classification.kind === "in-progress";
           if (shouldReattach) {
+            if (!shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: lastPromptMessageID, reattachCount })) {
+              const reason = ev.pending
+                ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`
+                : ev.classification.kind === "in-progress"
+                  ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`
+                  : `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
+              result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, reason);
+              break;
+            }
             reattachCount += 1;
             const why = ev.pending
               ? "session still busy on opencode side"
@@ -853,6 +899,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               step,
               sessionID: priorSessionForCheck,
               messageID: lastPromptMessageID,
+              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -908,6 +955,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         resetStepRowToPending(state, currentStepIndex, { statusMessage: `retry in ${delaySeconds}s` });
         await sleepInterruptible(state, delayMs);
         if (!(state.quitting || stopFileExists() || state.skipRequested || state.restartRequested)) {
+          stepStartTime = Date.now();
           const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
           pushAgentLine(state, retryingLine);
           pushStepOutputLine(state, currentStepIndex, retryingLine);

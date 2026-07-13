@@ -1,6 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy } from "../lib/config.ts";
+import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy, type VariantConfig } from "../lib/config.ts";
 import type { EventConsumerCallbacks, PermissionAskedPayload, QuestionAskedPayload } from "../lib/event-consumer.ts";
 import { setPendingPermission, setPendingQuestion, setTodos, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { formatRequestError, toError } from "./util.ts";
@@ -8,7 +8,7 @@ import { formatRequestError, toError } from "./util.ts";
 export type Step = {
   name: string;
   agent?: string;
-  variant?: string;
+  variant?: VariantConfig;
   model?: string;
   prompt: string;
   prefix?: string;
@@ -77,16 +77,12 @@ export function createRunnerEventController({
   const alreadyHandling = (requestID: string): boolean => handledRequestIDs.has(requestID) || inFlightReplies.has(requestID);
 
   const onPermissionAsked = (payload: PermissionAskedPayload): void => {
-    if (!hasPermissionPolicy) return;
     if (payload.sessionID !== activeSessionID) return;
     if (alreadyHandling(payload.requestID)) return;
 
-    const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
-    if (action === "ask") {
-      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
-      return;
-    }
-
+    // Pending state is set for the "ask" path too (and left set until the
+    // permission.replied event) so the TUI can surface that the run is blocked
+    // waiting on a human instead of silently stalling.
     setPendingPermission(state, {
       requestID: payload.requestID,
       sessionID: payload.sessionID,
@@ -94,6 +90,12 @@ export function createRunnerEventController({
       patterns: payload.patterns,
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
+
+    const action = hasPermissionPolicy ? resolvePermissionAction(payload.permission, step, { permissionPolicy }) : "ask";
+    if (action === "ask") {
+      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
+      return;
+    }
 
     const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir })
       .then((result) => {
@@ -110,7 +112,6 @@ export function createRunnerEventController({
   };
 
   const onQuestionAsked = (payload: QuestionAskedPayload): void => {
-    if (effectiveQuestionPolicy !== "reject") return;
     if (payload.sessionID !== activeSessionID) return;
     if (alreadyHandling(payload.requestID)) return;
 
@@ -119,6 +120,11 @@ export function createRunnerEventController({
       sessionID: payload.sessionID,
       questions: payload.questions,
     });
+
+    if (effectiveQuestionPolicy !== "reject") {
+      pushLine(`[looper] question left pending (answer in an attached opencode client, or set questionPolicy: reject)`);
+      return;
+    }
 
     const request = client.question.reject({ requestID: payload.requestID, directory: repoDir })
       .then((result) => {
@@ -152,9 +158,20 @@ export function createRunnerEventController({
   };
 }
 
+export class MalformedModelError extends Error {
+  readonly model: string;
+  constructor(model: string) {
+    super(`model must be "provider/model" (e.g. "openai/gpt-5.5"); got "${model}"`);
+    this.name = "MalformedModelError";
+    this.model = model;
+  }
+}
+
+// Backstop behind config.ts's optionalModelValue: a malformed model must fail
+// the step loudly, never fall through to opencode's default (expensive) model.
 export function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
   const slash = model.indexOf("/");
-  if (slash === -1) return undefined;
+  if (slash <= 0 || slash === model.length - 1) throw new MalformedModelError(model);
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
 }

@@ -3,6 +3,7 @@ export type Options = {
   attachUrl?: string;
   configDir?: string;
   fresh: boolean;
+  init: boolean;
   maxIterations: number;
   start: boolean;
   waitProvided: boolean;
@@ -18,7 +19,13 @@ export class HelpRequested extends Error {
 
 export function usage() {
   return `Looper - iterative OpenCode step runner
-Usage: looper [--attach[=url]] [--config-dir=path|--config-dir path] [--start] [--fresh] [--wait[=minutes]|--wait minutes] [max_iterations]
+Usage: looper [init] [flags] [max_iterations]
+
+Commands:
+  init                Scaffold a starter config (looper.yml + example prompts) and exit.
+
+Arguments:
+  max_iterations      Stop after this many iterations if no step created .looper-stop. Default: 100.
 
 Flags:
   --attach[=url]      Connect to an existing opencode server. Without a URL, uses looper.yml, OPENCODE_ATTACH_URL, or the local default.
@@ -27,6 +34,7 @@ Flags:
   --fresh             Ignore any saved checkpoint and start a new run from iteration 1, step 1.
   --continue          Deprecated alias of --start (resuming is now the default).
   --wait[=minutes]    Wait between iterations. Without minutes, wait for the previous iteration duration.
+  -h, --help          Show this help.
 
 By default looper resumes the previous run where it left off: it restores the iteration and step, and
 reattaches to the in-progress opencode session if it is still active (otherwise it restarts that step).
@@ -36,6 +44,12 @@ Without --config-dir, looper looks for its config dir under \$PWD in this order:
 If none contain a config file it defaults to .looper. The config file is looper.yml (falling back to looper.yaml, .looper.yml, .looper.yaml).
 State files (.looper-stop, .looper-resume-step.json, .looper-run.json, .last-branch) live in the same directory.
 A step can stop the loop by creating .looper-stop in that directory.
+
+Examples:
+  looper init                      scaffold .looper/ in the current repo
+  looper                           open the TUI, press [g] or [enter] to start
+  looper --start                   start immediately, resuming any checkpoint
+  looper --fresh --start 5         fresh run, start now, cap at 5 iterations
 `;
 }
 
@@ -52,6 +66,7 @@ export function parseArgs(argv: string[]): Options {
   let attachUrl: string | undefined;
   let configDir: string | undefined;
   let fresh = false;
+  let init = false;
   let maxIterations = 100;
   let start = false;
   let waitProvided = false;
@@ -61,6 +76,11 @@ export function parseArgs(argv: string[]): Options {
     const arg = argv[index]!;
     if (arg === "-h" || arg === "--help") {
       throw new HelpRequested(usage());
+    }
+
+    if (arg === "init") {
+      init = true;
+      continue;
     }
 
     if (arg === "--attach") {
@@ -130,7 +150,7 @@ export function parseArgs(argv: string[]): Options {
     throw new Error(`unknown argument '${arg}'`);
   }
 
-  return { attach, attachUrl, ...(configDir !== undefined ? { configDir } : {}), fresh, maxIterations, start, waitProvided, waitDuration };
+  return { attach, attachUrl, ...(configDir !== undefined ? { configDir } : {}), fresh, init, maxIterations, start, waitProvided, waitDuration };
 }
 
 export function resolveAttachUrl(options: Options, configUrl: string | undefined, defaultAttachUrl: string): string | undefined {

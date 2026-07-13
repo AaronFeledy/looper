@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  assertPromptFilesExist,
   loadRuntimeConfig,
   loadSteps,
   resolveContextPolicy,
@@ -59,6 +60,81 @@ describe("loadSteps config parsing", () => {
     withConfigDir("steps:\n  build:\n    prompt: hi\n    permissionPolicy:\n      edit: maybe\n", (dir) => {
       expect(() => loadSteps(dir)).toThrow(/permissionPolicy/);
     });
+  });
+
+  test("parses variant string, null disable, and rejects empty string", () => {
+    withConfigDir(
+      [
+        "steps:",
+        "  named:",
+        "    prompt: hi",
+        "    variant: low",
+        "  disabled:",
+        "    prompt: hi",
+        "    variant: null",
+        "  omitted:",
+        "    prompt: hi",
+      ].join("\n"),
+      (dir) => {
+        const steps = loadSteps(dir);
+        const byName = Object.fromEntries(steps.map((step) => [step.name, step]));
+        expect(byName["Named"]?.variant).toBe("low");
+        expect(byName["Disabled"]?.variant).toBeNull();
+        expect(byName["Omitted"]?.variant).toBeUndefined();
+      },
+    );
+
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    variant: \"\"\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/variant cannot be empty/);
+    });
+  });
+
+  test("rejects a step model without a provider/model separator", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: bogus\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("rejects a step model with an empty provider", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: /gpt-5.5\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("rejects a step model with an empty model id", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openai/\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("accepts a well-formed provider/model step model", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openai/gpt-5.5\n", (dir) => {
+      expect(loadSteps(dir)[0]!.model).toBe("openai/gpt-5.5");
+    });
+  });
+
+  test("accepts a model id containing extra slashes after the provider", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openrouter/meta/llama-3\n", (dir) => {
+      expect(loadSteps(dir)[0]!.model).toBe("openrouter/meta/llama-3");
+    });
+  });
+
+  test("rejects a malformed opencode.title.model", () => {
+    withConfigDir(
+      ["opencode:", "  title:", "    model: bogus", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        expect(() => loadRuntimeConfig(dir)).toThrow(/opencode\.title\.model must be "provider\/model"/);
+      },
+    );
+  });
+
+  test("parses opencode.title.variant null as explicit disable", () => {
+    withConfigDir(
+      ["opencode:", "  title:", "    variant: null", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        expect(loadRuntimeConfig(dir).title).toEqual({ variant: null });
+      },
+    );
   });
 
   test("ignores a directory named like a config file and falls back", () => {
@@ -298,5 +374,24 @@ describe("resolvePermissionAction", () => {
     expect(resolvePermissionAction("bash", {}, global)).toBe("reject");
     expect(resolvePermissionAction("webfetch", { permissionPolicy: { webfetch: "once" } }, {})).toBe("once");
     expect(resolvePermissionAction("unknown", {}, {})).toBe("ask");
+  });
+});
+
+describe("assertPromptFilesExist", () => {
+  test("lists every step whose prompt file is missing", () => {
+    withConfigDir("steps:\n  build:\n    prompt: build.md\n  review:\n    prompt: review.md\n", (dir) => {
+      writeFileSync(join(dir, "build.md"), "do the build\n");
+      const steps = loadSteps(dir);
+      expect(() => assertPromptFilesExist(steps)).toThrow(/missing prompt file/);
+      expect(() => assertPromptFilesExist(steps)).toThrow(/Review: .*review\.md/);
+      expect(() => assertPromptFilesExist(steps)).not.toThrow(/Build: .*build\.md/);
+    });
+  });
+
+  test("passes when every prompt file exists", () => {
+    withConfigDir("steps:\n  build:\n    prompt: build.md\n", (dir) => {
+      writeFileSync(join(dir, "build.md"), "do the build\n");
+      expect(() => assertPromptFilesExist(loadSteps(dir))).not.toThrow();
+    });
   });
 });

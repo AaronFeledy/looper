@@ -12,6 +12,7 @@ import type { BackgroundAgent, HistoryView, LoopState, LoopStep, ScrollIntent } 
 import { ansiToStyledText } from "../lib/ansi.ts";
 import { backgroundAgentLabel, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 import { eventsToOutputBlocks, type OutputBlock } from "../presentation/tui/stream-blocks.ts";
+import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
 
 type SelectedOutput = {
   step: LoopStep | null;
@@ -285,6 +286,9 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     paddingX: 1,
     scrollY: true,
     scrollX: false,
+    // Terminal wheel events commonly carry a three-row delta. Scale that to one row per notch so
+    // navigating dense output remains precise without changing keyboard or page-scroll behavior.
+    scrollAcceleration: createWheelScrollAcceleration(),
     // OpenTUI's sticky scroll + wheel handling sets _hasManualScroll on every scroll event while
     // content is scrollable, so follow-on-output breaks. We pin to the bottom ourselves instead.
     stickyScroll: false,

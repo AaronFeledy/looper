@@ -68,7 +68,7 @@ type PendingPartDelta = {
   delta: string;
 };
 
-function eventSessionID(event: Event): string | undefined {
+export function eventSessionID(event: Event): string | undefined {
   // Most events carry a top-level properties.sessionID. The stream is global
   // (subscribed per repo directory, not per session), so this id is the only
   // thing isolating this session's output from concurrent background sub-sessions.
