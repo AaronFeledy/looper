@@ -89,6 +89,45 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("rejects a step model without a provider/model separator", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: bogus\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("rejects a step model with an empty provider", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: /gpt-5.5\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("rejects a step model with an empty model id", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openai/\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.model must be "provider\/model"/);
+    });
+  });
+
+  test("accepts a well-formed provider/model step model", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openai/gpt-5.5\n", (dir) => {
+      expect(loadSteps(dir)[0]!.model).toBe("openai/gpt-5.5");
+    });
+  });
+
+  test("accepts a model id containing extra slashes after the provider", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    model: openrouter/meta/llama-3\n", (dir) => {
+      expect(loadSteps(dir)[0]!.model).toBe("openrouter/meta/llama-3");
+    });
+  });
+
+  test("rejects a malformed opencode.title.model", () => {
+    withConfigDir(
+      ["opencode:", "  title:", "    model: bogus", "steps:", "  build:", "    prompt: hi"].join("\n"),
+      (dir) => {
+        expect(() => loadRuntimeConfig(dir)).toThrow(/opencode\.title\.model must be "provider\/model"/);
+      },
+    );
+  });
+
   test("parses opencode.title.variant null as explicit disable", () => {
     withConfigDir(
       ["opencode:", "  title:", "    variant: null", "steps:", "  build:", "    prompt: hi"].join("\n"),

@@ -152,9 +152,20 @@ export function createRunnerEventController({
   };
 }
 
+export class MalformedModelError extends Error {
+  readonly model: string;
+  constructor(model: string) {
+    super(`model must be "provider/model" (e.g. "openai/gpt-5.5"); got "${model}"`);
+    this.name = "MalformedModelError";
+    this.model = model;
+  }
+}
+
+// Backstop behind config.ts's optionalModelValue: a malformed model must fail
+// the step loudly, never fall through to opencode's default (expensive) model.
 export function parseModel(model: string | undefined): { providerID: string; modelID: string } | undefined {
   if (!model) return undefined;
   const slash = model.indexOf("/");
-  if (slash === -1) return undefined;
+  if (slash <= 0 || slash === model.length - 1) throw new MalformedModelError(model);
   return { providerID: model.slice(0, slash), modelID: model.slice(slash + 1) };
 }
