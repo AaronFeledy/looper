@@ -834,6 +834,60 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach exceeded step timeout"))).toBe(true);
   });
 
+  test("reattach clears the reattaching status message once the session streams output", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-streaming-status-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const statusMessagesAfterStreaming: (string | undefined)[] = [];
+    const startedAt = Date.now();
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => ({ data: { [SID]: { type: Date.now() - startedAt >= 40 ? "idle" : "busy" } } }),
+        messages: async () => ({ data: [assistantDone(MID)] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            yield assistantUpdated();
+            yield textPartUpdated("hello\n");
+            statusMessagesAfterStreaming.push(state.steps[0]?.statusMessage);
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("done");
+    expect(statusMessagesAfterStreaming).toEqual([undefined]);
+  });
+
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;

@@ -274,10 +274,20 @@ export async function reattachOpenCodeStep({
         wakeReattachStatusPoll();
       });
   };
+  let streamActivitySeen = false;
+  const clearReattachingStatus = (): void => {
+    if (streamActivitySeen) return;
+    streamActivitySeen = true;
+    if (activeStep.statusMessage === "reattaching") {
+      activeStep.statusMessage = undefined;
+      notify();
+    }
+  };
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
     onEvent: (event) => {
+      clearReattachingStatus();
       pushAgentEvent(state, event);
       pushStepOutputEvent(state, stepIndex, event);
     },
