@@ -52,6 +52,29 @@ function assistantFatalError(): { info: unknown; parts: unknown[] } {
   };
 }
 
+function assistantRetryableError(parentID: string): { info: unknown; parts: unknown[] } {
+  return {
+    info: {
+      id: "msg_retryable_error",
+      role: "assistant",
+      parentID,
+      time: { completed: Date.now() },
+      error: { name: "APIError", data: { message: "temporary transport failure", isRetryable: true } },
+    },
+    parts: [],
+  };
+}
+
+function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
+  const continuationDir = join(repoDir, ".omo", "run-continuation");
+  mkdirSync(continuationDir, { recursive: true });
+  const now = new Date().toISOString();
+  writeFileSync(
+    join(continuationDir, `${sessionID}.json`),
+    JSON.stringify({ sessionID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+  );
+}
+
 function textPartUpdated(text: string): Event {
   return {
     type: "message.part.updated",
@@ -347,6 +370,66 @@ describe("runIteration reattach policy propagation", () => {
     expect(result).toBe("complete");
     expect(replyCalls).toEqual([{ requestID: "per_resume_edit", reply: "always", directory: repoDir }]);
   });
+
+  test("gives a fresh failure retry the full step timeout budget after the retry backoff", async () => {
+    // Given
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-config-"));
+    const activeRepoDir = repoDir;
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "retry safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n    timeout: 1s\n`);
+    initStatePaths({ configDir });
+    const createdSessionIDs: string[] = [];
+    const promptedSessionIDs: string[] = [];
+    let firstMessageID = "";
+    let retryPromptAbortedEarly = false;
+
+    const client = {
+      session: {
+        create: async () => {
+          const sessionID = `ses_retry_${createdSessionIDs.length + 1}`;
+          createdSessionIDs.push(sessionID);
+          return { data: { id: sessionID } };
+        },
+        prompt: async (params: { sessionID: string; messageID: string }, options: { signal: AbortSignal }) => {
+          promptedSessionIDs.push(params.sessionID);
+          if (params.sessionID === "ses_retry_1") {
+            firstMessageID = params.messageID;
+            throw new Error("first prompt failed before opencode finished");
+          }
+          await Bun.sleep(20);
+          retryPromptAbortedEarly = options.signal.aborted;
+          if (options.signal.aborted) {
+            const error = new Error("retry prompt aborted before it could use its budget");
+            error.name = "AbortError";
+            throw error;
+          }
+          writeIdleContinuationRecord(activeRepoDir, params.sessionID);
+          return { data: {} };
+        },
+        status: async () => ({ data: { ses_retry_1: { type: "idle" }, ses_retry_2: { type: "idle" }, ses_retry_3: { type: "idle" } } }),
+        messages: async (params: { sessionID: string }) => ({ data: params.sessionID === "ses_retry_1" ? [assistantRetryableError(firstMessageID)] : [assistantDone("msg_retry_success")] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+
+    // When
+    const result = await runIteration({ state, iteration: 1, client, repoDir, configDir });
+
+    // Then
+    expect(result).toBe("complete");
+    expect(retryPromptAbortedEarly).toBe(false);
+    expect(createdSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
+    expect(promptedSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
+  }, 10000);
+
 });
 
 describe("runOpenCodeStep event stream recovery", () => {

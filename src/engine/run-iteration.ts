@@ -938,6 +938,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         resetStepRowToPending(state, currentStepIndex, { statusMessage: `retry in ${delaySeconds}s` });
         await sleepInterruptible(state, delayMs);
         if (!(state.quitting || stopFileExists() || state.skipRequested || state.restartRequested)) {
+          stepStartTime = Date.now();
           const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
           pushAgentLine(state, retryingLine);
           pushStepOutputLine(state, currentStepIndex, retryingLine);
