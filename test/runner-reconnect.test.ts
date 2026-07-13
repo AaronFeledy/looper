@@ -637,6 +637,56 @@ describe("runOpenCodeStep event stream recovery", () => {
     }
   });
 
+  test("reattach restarts with a timeout when the session stays busy past the step timeout", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-timeout-"));
+    let abortCalled = false;
+
+    const client = {
+      session: {
+        abort: async () => {
+          abortCalled = true;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "busy" } } }),
+        messages: async () => ({ data: [] }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const signal = options.signal;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            await new Promise<void>((resolve) => {
+              if (signal.aborted) return resolve();
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt", timeoutMs: 25 };
+    const startedAt = Date.now();
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      messageID: MID,
+    });
+
+    expect(result.status).toBe("restart");
+    expect(state.restartRequested).toBe(true);
+    expect(state.restartReason).toBe("timeout");
+    expect(abortCalled).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach exceeded step timeout"))).toBe(true);
+  });
+
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;

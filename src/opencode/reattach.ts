@@ -1,6 +1,6 @@
 import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@opencode-ai/sdk/v2";
 
-import { serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
@@ -166,6 +166,7 @@ export type ReattachStepOptions = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
+  timeoutMsOverride?: number;
 };
 
 export async function reattachOpenCodeStep({
@@ -179,10 +180,17 @@ export async function reattachOpenCodeStep({
   permissionPolicy,
   questionPolicy,
   useSessionIdle,
+  timeoutMsOverride,
 }: ReattachStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
+  // Enforce the step timeout during reattach exactly like runOpenCodeStep
+  // does for a fresh prompt. Without it, a reattached session with a hung
+  // sub-agent keeps the parent busy and the step sits in "reattaching" for
+  // the whole REATTACH_MAX_WAIT_MS window, then fails without aborting the
+  // session — which recovery then reattaches to again.
+  const effectiveTimeoutMs = Math.min(timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS, REATTACH_MAX_WAIT_MS);
 
   beginStepRun(state, stepIndex, { statusMessage: "reattaching" });
   setStepSessionID(state, stepIndex, sessionID);
@@ -217,6 +225,7 @@ export async function reattachOpenCodeStep({
         });
     }
     ctrl.abort();
+    wakeReattachStatusPoll();
   };
 
   const watcher = setInterval(() => {
@@ -224,6 +233,14 @@ export async function reattachOpenCodeStep({
     if (state.restartRequested) requestCancellation("restart");
     else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
+  const stepTimeout = setTimeout(() => {
+    if (cancellationAction !== null) return;
+    pushLine(`[looper] reattach exceeded step timeout after ${Math.round(effectiveTimeoutMs / 1000)}s for ${step.name}; aborting session and restarting in a fresh session`);
+    state.restartRequested = true;
+    state.restartReason = "timeout";
+    notify();
+    requestCancellation("restart");
+  }, effectiveTimeoutMs);
   const bgPoller = startBackgroundAgentPoller({
     state,
     stepIndex,
@@ -346,6 +363,7 @@ export async function reattachOpenCodeStep({
     }
   } finally {
     clearInterval(watcher);
+    clearTimeout(stepTimeout);
     bgPoller.stop();
     ctrl.abort();
     if (consumerPromise) {
@@ -392,6 +410,7 @@ export async function reattachOpenCodeStep({
   if (timedOut) {
     const reason = `reattach timed out after ${Math.round(REATTACH_MAX_WAIT_MS / 1000)}s waiting for session ${sessionID}`;
     pushLine(`[looper] ${reason}`);
+    void client.session.abort({ sessionID, directory: repoDir }).catch(() => undefined);
     return finalize("failed", { errorMessage: reason });
   }
 
