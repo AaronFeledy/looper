@@ -43,3 +43,20 @@ describe("parseArgs resume flags", () => {
     }
   });
 });
+
+describe("parseArgs init command", () => {
+  test("init positional enables init mode", () => {
+    const opts = parseArgs(["init"]);
+    expect(opts.init).toBe(true);
+  });
+
+  test("init combines with --config-dir", () => {
+    const opts = parseArgs(["init", "--config-dir=.local/looper"]);
+    expect(opts.init).toBe(true);
+    expect(opts.configDir).toBe(".local/looper");
+  });
+
+  test("init is off by default", () => {
+    expect(parseArgs([]).init).toBe(false);
+  });
+});

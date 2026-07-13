@@ -221,7 +221,7 @@ describe("runNonTtyIterations resume wiring", () => {
       const priorExitCode = process.exitCode ?? 0;
       try {
         await runNonTtyIterations({
-          options: { attach: false, configDir, fresh: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
+          options: { attach: false, configDir, fresh: false, init: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
           repoDir,
           configDir,
           client,

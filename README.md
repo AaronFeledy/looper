@@ -16,6 +16,7 @@ ln -sfn "$PWD/bin/looper" "$HOME/.local/bin/looper"
 In any project that has a Looper config file:
 
 ```bash
+looper init                             # scaffold .looper/ with a starter looper.yml + example prompts
 looper                                  # open the TUI, press [g]o or [enter] to start (resumes by default)
 looper --start                          # start immediately (resumes where the last run left off)
 looper --fresh --start                  # start immediately, ignoring any saved checkpoint
@@ -29,6 +30,7 @@ looper --help
 
 CLI flags:
 
+- `init` &mdash; scaffold the config directory (`looper.yml`, `work.md`, `check-done.md`) and exit. Refuses to overwrite an existing config.
 - `--attach[=url]` &mdash; connect to an existing opencode server instead of spawning one. Without a URL: tries `opencode.serverUrl` from the config file, then `$OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 - `--config-dir=path` / `--config-dir path` &mdash; use this directory for config, prompts, and state files. Overrides auto-detection and `$LOOPER_CONFIG_DIR`.
 - `--start` &mdash; skip the TUI start prompt and begin immediately.
