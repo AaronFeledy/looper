@@ -1,7 +1,6 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import type { LooperEvent } from "../core/events.ts";
 
-import { renderSessionEvents, renderSessionMessages } from "./event-consumer.ts";
+import { renderSession, type SessionRender } from "./event-consumer.ts";
 import {
   clearBackgroundAgentBuffer,
   notify,
@@ -40,7 +39,7 @@ export function startBackgroundAgentStreamer({
 }): { stop: () => void } {
   let active: ActiveStream | null = null;
 
-  const replaceBuffer = (stepIndex: number, sessionID: string, lines: string[], events: readonly LooperEvent[]): void => {
+  const replaceBuffer = (stepIndex: number, sessionID: string, rendered: SessionRender): void => {
     const step = state.steps[stepIndex];
     if (!step) return;
     const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
@@ -49,13 +48,13 @@ export function startBackgroundAgentStreamer({
     agent.outputLineTimes = [];
     agent.outputEvents = [];
     agent.outputEventTimes = [];
-    if (lines.length === 0 && events.length === 0) {
+    if (rendered.lines.length === 0 && rendered.events.length === 0) {
       agent.outputScrollTop = 0;
       notify();
       return;
     }
-    pushBackgroundAgentLines(state, stepIndex, sessionID, lines);
-    replaceBackgroundAgentEvents(state, stepIndex, sessionID, events);
+    pushBackgroundAgentLines(state, stepIndex, sessionID, rendered.lines, rendered.lineTimes);
+    replaceBackgroundAgentEvents(state, stepIndex, sessionID, rendered.events, rendered.eventTimes);
   };
 
   const inflight = new Set<string>();
@@ -66,9 +65,7 @@ export function startBackgroundAgentStreamer({
       const result = await client.session.messages({ sessionID: target.sessionID, directory: repoDir });
       if (result.error || !result.data) return;
       if (active === null || active.sessionID !== target.sessionID) return;
-      const lines = renderSessionMessages(result.data);
-      const events = renderSessionEvents(result.data);
-      replaceBuffer(target.stepIndex, target.sessionID, lines, events);
+      replaceBuffer(target.stepIndex, target.sessionID, renderSession(result.data));
     } catch (error) {
       if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] background agent stream: refresh failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {

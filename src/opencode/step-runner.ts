@@ -58,15 +58,15 @@ export async function runOpenCodeStep({
 
   beginStepRun(state, stepIndex);
 
-  const pushLine = (line: string) => {
-    pushAgentLine(state, line);
-    pushStepOutputLine(state, stepIndex, line);
+  const pushLine = (line: string, at?: number) => {
+    pushAgentLine(state, line, at);
+    pushStepOutputLine(state, stepIndex, line, at);
   };
 
-  const pushLines = (lines: string[]) => {
+  const pushLines = (lines: string[], at?: number) => {
     if (lines.length === 0) return;
-    for (const line of lines) pushAgentLine(state, line);
-    pushStepOutputLines(state, stepIndex, lines);
+    for (const line of lines) pushAgentLine(state, line, at);
+    pushStepOutputLines(state, stepIndex, lines, at);
   };
 
   pushLine(`[looper] starting step ${step.name}`);
@@ -161,9 +161,9 @@ export async function runOpenCodeStep({
 	  const consumer = createSessionEventConsumer(boundSessionID, {
 	    pushLine,
 	    pushLines,
-	    onEvent: (event) => {
-	      pushAgentEvent(state, event);
-	      pushStepOutputEvent(state, stepIndex, event);
+	    onEvent: (event, at) => {
+	      pushAgentEvent(state, event, at);
+	      pushStepOutputEvent(state, stepIndex, event, at);
 	    },
 	    ...createRunnerEventController({
         state,

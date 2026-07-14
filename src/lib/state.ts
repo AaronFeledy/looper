@@ -710,17 +710,17 @@ export function failStepRow(
   notify();
 }
 
-export function pushStepOutputLine(state: LoopState, stepIndex: number, line: string): void {
+export function pushStepOutputLine(state: LoopState, stepIndex: number, line: string, at: number = Date.now()): void {
   const step = state.steps[stepIndex];
   if (!step) return;
   step.outputLines.push(line);
-  step.outputLineTimes.push(Date.now());
+  step.outputLineTimes.push(at);
   const event = looperLogEventFromLine(line);
   if (event !== null) {
     step.outputEvents ??= [];
     step.outputEventTimes ??= [];
     step.outputEvents.push(event);
-    step.outputEventTimes.push(Date.now());
+    step.outputEventTimes.push(at);
     trimStepOutputEventBuffer(step);
   }
   trimStepOutputBuffer(step);
@@ -730,18 +730,22 @@ export function pushStepOutputLine(state: LoopState, stepIndex: number, line: st
   notifyStateChange();
 }
 
-export function pushStepOutputLines(state: LoopState, stepIndex: number, lines: string[]): void {
+export function pushStepOutputLines(
+  state: LoopState,
+  stepIndex: number,
+  lines: string[],
+  at: number = Date.now(),
+): void {
   const step = state.steps[stepIndex];
   if (!step || lines.length === 0) return;
-  const now = Date.now();
   step.outputLines.push(...lines);
-  for (let i = 0; i < lines.length; i += 1) step.outputLineTimes.push(now);
+  for (let i = 0; i < lines.length; i += 1) step.outputLineTimes.push(at);
   const events = lines.map((line) => looperLogEventFromLine(line)).filter((event): event is LooperEvent => event !== null);
   if (events.length > 0) {
     step.outputEvents ??= [];
     step.outputEventTimes ??= [];
     step.outputEvents.push(...events);
-    for (let i = 0; i < events.length; i += 1) step.outputEventTimes.push(now);
+    for (let i = 0; i < events.length; i += 1) step.outputEventTimes.push(at);
     trimStepOutputEventBuffer(step);
   }
   trimStepOutputBuffer(step);
@@ -751,13 +755,18 @@ export function pushStepOutputLines(state: LoopState, stepIndex: number, lines: 
   notifyStateChange();
 }
 
-export function pushStepOutputEvent(state: LoopState, stepIndex: number, event: LooperEvent): void {
+export function pushStepOutputEvent(
+  state: LoopState,
+  stepIndex: number,
+  event: LooperEvent,
+  at: number = Date.now(),
+): void {
   const step = state.steps[stepIndex];
   if (!step) return;
   step.outputEvents ??= [];
   step.outputEventTimes ??= [];
   step.outputEvents.push(event);
-  step.outputEventTimes.push(Date.now());
+  step.outputEventTimes.push(at);
   trimStepOutputEventBuffer(step);
   if (step.outputPinnedToBottom) {
     step.outputScrollTop = Math.max(0, Math.max(step.outputLines.length, step.outputEvents.length) - 1);
@@ -765,14 +774,18 @@ export function pushStepOutputEvent(state: LoopState, stepIndex: number, event: 
   notifyStateChange();
 }
 
-export function pushStepOutputEvents(state: LoopState, stepIndex: number, events: readonly LooperEvent[]): void {
+export function pushStepOutputEvents(
+  state: LoopState,
+  stepIndex: number,
+  events: readonly LooperEvent[],
+  at: number = Date.now(),
+): void {
   const step = state.steps[stepIndex];
   if (!step || events.length === 0) return;
-  const now = Date.now();
   step.outputEvents ??= [];
   step.outputEventTimes ??= [];
   step.outputEvents.push(...events);
-  for (let i = 0; i < events.length; i += 1) step.outputEventTimes.push(now);
+  for (let i = 0; i < events.length; i += 1) step.outputEventTimes.push(at);
   trimStepOutputEventBuffer(step);
   if (step.outputPinnedToBottom) {
     step.outputScrollTop = Math.max(0, Math.max(step.outputLines.length, step.outputEvents.length) - 1);
@@ -913,6 +926,7 @@ export function pushBackgroundAgentLines(
   stepIndex: number,
   sessionID: string,
   lines: string[],
+  times?: readonly number[],
 ): void {
   if (lines.length === 0) return;
   const step = state.steps[stepIndex];
@@ -921,7 +935,11 @@ export function pushBackgroundAgentLines(
   if (!agent) return;
   const now = Date.now();
   agent.outputLines.push(...lines);
-  for (let i = 0; i < lines.length; i += 1) agent.outputLineTimes.push(now);
+  if (times !== undefined && times.length === lines.length) {
+    agent.outputLineTimes.push(...times);
+  } else {
+    for (let i = 0; i < lines.length; i += 1) agent.outputLineTimes.push(now);
+  }
   const removed = trimPairedLines(agent.outputLines, agent.outputLineTimes);
   if (removed > 0) agent.outputScrollTop = Math.max(0, agent.outputScrollTop - removed);
   if (agent.outputPinnedToBottom) {
@@ -935,6 +953,7 @@ export function replaceBackgroundAgentEvents(
   stepIndex: number,
   sessionID: string,
   events: readonly LooperEvent[],
+  times?: readonly number[],
 ): void {
   const step = state.steps[stepIndex];
   if (!step) return;
@@ -942,7 +961,10 @@ export function replaceBackgroundAgentEvents(
   if (!agent) return;
   const now = Date.now();
   agent.outputEvents = [...events];
-  agent.outputEventTimes = events.map(() => now);
+  agent.outputEventTimes =
+    times !== undefined && times.length === events.length
+      ? [...times]
+      : events.map(() => now);
   trimPairedEvents(agent.outputEvents, agent.outputEventTimes);
   if (agent.outputPinnedToBottom) agent.outputScrollTop = Math.max(0, Math.max(agent.outputLines.length, agent.outputEvents.length) - 1);
   notifyStateChange();
@@ -962,15 +984,15 @@ export function clearBackgroundAgentBuffer(state: LoopState, stepIndex: number, 
   notifyStateChange();
 }
 
-export function pushAgentLine(state: LoopState, line: string): void {
+export function pushAgentLine(state: LoopState, line: string, at: number = Date.now()): void {
   state.agentLines.push(line);
-  state.agentLineTimes.push(Date.now());
+  state.agentLineTimes.push(at);
   trimPairedLines(state.agentLines, state.agentLineTimes);
 }
 
-export function pushAgentEvent(state: LoopState, event: LooperEvent): void {
+export function pushAgentEvent(state: LoopState, event: LooperEvent, at: number = Date.now()): void {
   state.agentEvents.push(event);
-  state.agentEventTimes.push(Date.now());
+  state.agentEventTimes.push(at);
   trimPairedEvents(state.agentEvents, state.agentEventTimes);
 }
 
@@ -1073,7 +1095,12 @@ export function setHistoryViewOutput(state: LoopState, sessionKey: string, lines
   notifyStateChange();
 }
 
-export function setHistoryViewEvents(state: LoopState, sessionKey: string, events: readonly LooperEvent[]): void {
+export function setHistoryViewEvents(
+  state: LoopState,
+  sessionKey: string,
+  events: readonly LooperEvent[],
+  times?: readonly number[],
+): void {
   const view = state.historyView;
   if (view === null) return;
   const expected = historyStepSessionKey(view.entryIndex, view.stepIndex, selectedHistoryStep(state)?.step.sessionID);
@@ -1081,7 +1108,10 @@ export function setHistoryViewEvents(state: LoopState, sessionKey: string, event
   const now = Date.now();
   view.sessionKey = sessionKey;
   view.events = [...events];
-  view.eventTimes = events.map(() => now);
+  view.eventTimes =
+    times !== undefined && times.length === events.length
+      ? [...times]
+      : events.map(() => now);
   view.status = events.length > 0 ? "ready" : "empty";
   delete view.error;
   if (view.outputPinnedToBottom) view.outputScrollTop = Math.max(0, Math.max(view.lines.length, view.events.length) - 1);

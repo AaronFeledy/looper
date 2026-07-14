@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Event } from "@opencode-ai/sdk/v2";
 
-import { consumeSessionEvents, createSessionEventConsumer } from "../src/lib/event-consumer.ts";
+import { consumeSessionEvents, createSessionEventConsumer, renderSession } from "../src/lib/event-consumer.ts";
 import type {
   PermissionAskedPayload,
   PermissionRepliedPayload,
@@ -446,5 +446,220 @@ describe("assistant message errors", () => {
 
     expect(errors).toEqual([]);
     expect(lines.some((line) => line.includes("assistant error"))).toBe(false);
+  });
+});
+
+describe("renderSession timestamps", () => {
+  test("stamps events from opencode message/part times, not wall clock", () => {
+    const messageCreated = 1_700_000_000_000;
+    const textStart = messageCreated + 1_000;
+    const toolStart = messageCreated + 5_000;
+    const toolEnd = messageCreated + 6_000;
+
+    const { events, eventTimes } = renderSession([
+      {
+        info: {
+          id: "msg_a",
+          sessionID: SID,
+          role: "assistant",
+          time: { created: messageCreated, completed: toolEnd },
+          parentID: "msg_u",
+          modelID: "gpt",
+          providerID: "openai",
+          mode: "build",
+          agent: "build",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [
+          {
+            id: "p_text",
+            sessionID: SID,
+            messageID: "msg_a",
+            type: "text",
+            text: "hello\n",
+            time: { start: textStart, end: textStart + 10 },
+          },
+          {
+            id: "p_tool",
+            sessionID: SID,
+            messageID: "msg_a",
+            type: "tool",
+            callID: "call_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "ls" },
+              output: "ok",
+              title: "bash",
+              metadata: {},
+              time: { start: toolStart, end: toolEnd },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const byKind = new Map<string, number[]>();
+    events.forEach((event, index) => {
+      const times = byKind.get(event.kind) ?? [];
+      times.push(eventTimes[index]!);
+      byKind.set(event.kind, times);
+    });
+
+    expect(byKind.get("assistant.started")).toEqual([textStart]);
+    expect(byKind.get("assistant.text")?.[0]).toBe(textStart);
+    expect(byKind.get("tool.started")).toEqual([toolStart]);
+    expect(byKind.get("tool.done")).toEqual([toolEnd]);
+
+    // Must not collapse everything to "now" (the old history-reload bug).
+    const now = Date.now();
+    for (const t of eventTimes) {
+      expect(Math.abs(t - now)).toBeGreaterThan(60_000);
+    }
+  });
+
+  test("final flush of unterminated text keeps that part's start, not a later tool end", () => {
+    const messageCreated = 1_700_000_200_000;
+    const textStart = messageCreated + 1_000;
+    const toolStart = messageCreated + 5_000;
+    const toolEnd = messageCreated + 6_000;
+
+    const { events, eventTimes, lines, lineTimes } = renderSession([
+      {
+        info: {
+          id: "msg_a",
+          sessionID: SID,
+          role: "assistant",
+          time: { created: messageCreated, completed: toolEnd },
+          parentID: "msg_u",
+          modelID: "gpt",
+          providerID: "openai",
+          mode: "build",
+          agent: "build",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [
+          {
+            id: "p_text",
+            sessionID: SID,
+            messageID: "msg_a",
+            type: "text",
+            // No trailing newline and no time.end — only final flushRemaining emits this.
+            text: "trailing partial",
+            time: { start: textStart },
+          },
+          {
+            id: "p_tool",
+            sessionID: SID,
+            messageID: "msg_a",
+            type: "tool",
+            callID: "call_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "ls" },
+              output: "ok",
+              title: "bash",
+              metadata: {},
+              time: { start: toolStart, end: toolEnd },
+            },
+          },
+        ],
+      },
+    ]);
+
+    expect(events.length).toBe(eventTimes.length);
+    expect(lines.length).toBe(lineTimes.length);
+
+    const byKind = new Map<string, number[]>();
+    events.forEach((event, index) => {
+      const times = byKind.get(event.kind) ?? [];
+      times.push(eventTimes[index]!);
+      byKind.set(event.kind, times);
+    });
+
+    expect(byKind.get("assistant.started")).toEqual([textStart]);
+    expect(byKind.get("assistant.text")).toEqual([textStart]);
+    expect(byKind.get("tool.started")).toEqual([toolStart]);
+    expect(byKind.get("tool.done")).toEqual([toolEnd]);
+
+    const textLineIndexes = lines
+      .map((line, index) => (line.includes("trailing partial") ? index : -1))
+      .filter((index) => index >= 0);
+    expect(textLineIndexes.length).toBeGreaterThan(0);
+    for (const index of textLineIndexes) {
+      expect(lineTimes[index]).toBe(textStart);
+    }
+  });
+});
+
+describe("live/backfill message timestamps", () => {
+  test("backfill stamps onEvent times from opencode part times", () => {
+    const messageCreated = 1_700_000_100_000;
+    const textStart = messageCreated + 2_000;
+    const toolStart = messageCreated + 4_000;
+    const toolEnd = messageCreated + 5_000;
+    const stamped: Array<{ kind: string; at: number }> = [];
+
+    const consumer = createSessionEventConsumer(SID, {
+      pushLine: () => {},
+      onEvent: (event, at) => {
+        stamped.push({ kind: event.kind, at: at ?? -1 });
+      },
+    });
+
+    consumer.backfill([
+      {
+        info: {
+          id: MID,
+          sessionID: SID,
+          role: "assistant",
+          time: { created: messageCreated, completed: toolEnd },
+          parentID: "msg_u",
+          modelID: "gpt",
+          providerID: "openai",
+          mode: "build",
+          agent: "build",
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        },
+        parts: [
+          {
+            id: "p_text",
+            sessionID: SID,
+            messageID: MID,
+            type: "text",
+            text: "hi\n",
+            time: { start: textStart, end: textStart + 1 },
+          },
+          {
+            id: "p_tool",
+            sessionID: SID,
+            messageID: MID,
+            type: "tool",
+            callID: "c1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "pwd" },
+              output: "/",
+              title: "bash",
+              metadata: {},
+              time: { start: toolStart, end: toolEnd },
+            },
+          },
+        ],
+      },
+    ]);
+
+    const byKind = new Map(stamped.map((entry) => [entry.kind, entry.at]));
+    expect(byKind.get("assistant.started")).toBe(textStart);
+    expect(byKind.get("tool.started")).toBe(toolStart);
+    expect(byKind.get("tool.done")).toBe(toolEnd);
   });
 });
