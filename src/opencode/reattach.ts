@@ -195,14 +195,14 @@ export async function reattachOpenCodeStep({
   beginStepRun(state, stepIndex, { statusMessage: "reattaching" });
   setStepSessionID(state, stepIndex, sessionID);
 
-  const pushLine = (line: string) => {
-    pushAgentLine(state, line);
-    pushStepOutputLine(state, stepIndex, line);
+  const pushLine = (line: string, at?: number) => {
+    pushAgentLine(state, line, at);
+    pushStepOutputLine(state, stepIndex, line, at);
   };
-  const pushLines = (lines: string[]) => {
+  const pushLines = (lines: string[], at?: number) => {
     if (lines.length === 0) return;
-    for (const line of lines) pushAgentLine(state, line);
-    pushStepOutputLines(state, stepIndex, lines);
+    for (const line of lines) pushAgentLine(state, line, at);
+    pushStepOutputLines(state, stepIndex, lines, at);
   };
 
   pushLine(`[looper] reattaching to session ${sessionID} (messageID=${messageID}) for ${step.name}`);
@@ -286,10 +286,10 @@ export async function reattachOpenCodeStep({
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
-    onEvent: (event) => {
+    onEvent: (event, at) => {
       clearReattachingStatus();
-      pushAgentEvent(state, event);
-      pushStepOutputEvent(state, stepIndex, event);
+      pushAgentEvent(state, event, at);
+      pushStepOutputEvent(state, stepIndex, event, at);
     },
     ...createRunnerEventController({
       state,
