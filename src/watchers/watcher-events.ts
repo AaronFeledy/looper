@@ -34,6 +34,12 @@ export type PrdStatus =
   | { readonly kind: "ok"; readonly remaining: number; readonly total: number }
   | { readonly kind: "error"; readonly message: string };
 
+export type BranchDiffStatus =
+  | { readonly kind: "hidden" }
+  | { readonly kind: "loading" }
+  | { readonly kind: "ok"; readonly additions: number; readonly deletions: number; readonly files: number }
+  | { readonly kind: "error"; readonly message: string };
+
 export type BranchWatcherEvent = {
   readonly kind: "branch-change";
   readonly branch: string;
@@ -49,4 +55,9 @@ export type PrdWatcherEvent = {
   readonly status: PrdStatus;
 };
 
-export type WatcherEvent = BranchWatcherEvent | GithubWatcherEvent | PrdWatcherEvent;
+export type BranchDiffWatcherEvent = {
+  readonly kind: "branch-diff";
+  readonly status: BranchDiffStatus;
+};
+
+export type WatcherEvent = BranchWatcherEvent | GithubWatcherEvent | PrdWatcherEvent | BranchDiffWatcherEvent;

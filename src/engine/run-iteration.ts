@@ -44,20 +44,6 @@ function fileReadMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
-function formatError(error: unknown): string {
-  if (error === undefined || error === null) return "unknown error";
-  if (error instanceof Error) return error.message;
-  if (typeof error === "object" && "message" in error) {
-    const message = error.message;
-    if (typeof message === "string") return message;
-  }
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
-
 export function promptText(step: Step): string {
   let prompt: string;
   try {
@@ -236,7 +222,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     permissionPolicy,
     questionPolicy,
     useSessionIdle,
-    vcsSummary,
     prdDir,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -293,26 +278,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       log: (line) => logStepLine(stepIdx, line),
     });
-  };
-
-  const captureStepVcsSummary = async (stepIdx: number): Promise<void> => {
-    if (vcsSummary !== true) return;
-    try {
-      const status = await client.vcs.status({ directory: repoDir });
-      if (status.error) {
-        logStepLine(stepIdx, `[looper] vcs.status failed: ${formatError(status.error)}`);
-        return;
-      }
-      const changes: VcsChange[] = (status.data ?? []).map((change) => ({
-        file: change.file,
-        additions: change.additions,
-        deletions: change.deletions,
-        status: change.status,
-      }));
-      setStepVcsSummary(state, stepIdx, changes);
-    } catch (error) {
-      logStepLine(stepIdx, `[looper] vcs.status threw: ${formatError(error)}`);
-    }
   };
 
   while (true) {
@@ -584,6 +549,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               stepName: step.name,
               sessionID: resumeSession,
               messageID: resumeInfo.messageID,
+              ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
+              ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: [...resumeInfo.looperMessageIDs] } : {}),
               ...(workDescription !== undefined ? { title: workDescription } : {}),
             });
             pendingResult = await reattachOpenCodeStep({

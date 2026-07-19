@@ -159,7 +159,6 @@ describe("loadRuntimeConfig policy and flags", () => {
       expect(cfg.questionPolicy).toBeUndefined();
       expect(cfg.prdDir).toBeUndefined();
       expect(cfg.useSessionIdle).toBe(false);
-      expect(cfg.vcsSummary).toBe(false);
       expect(cfg.validateResources).toBe(false);
     });
   });
@@ -190,7 +189,6 @@ describe("loadRuntimeConfig policy and flags", () => {
         "  edit: always",
         "questionPolicy: reject",
         "useSessionIdle: true",
-        "vcsSummary: true",
         "validateResources: true",
         "steps:",
         "  build:",
@@ -201,7 +199,6 @@ describe("loadRuntimeConfig policy and flags", () => {
         expect(cfg.permissionPolicy).toEqual({ "*": "reject", edit: "always" });
         expect(cfg.questionPolicy).toBe("reject");
         expect(cfg.useSessionIdle).toBe(true);
-        expect(cfg.vcsSummary).toBe(true);
         expect(cfg.validateResources).toBe(true);
       },
     );

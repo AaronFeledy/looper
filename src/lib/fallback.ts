@@ -27,7 +27,6 @@ export type FallbackOptions = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
-  vcsSummary?: boolean;
   prdDir?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
@@ -53,7 +52,6 @@ export async function runNonTty({
   permissionPolicy,
   questionPolicy,
   useSessionIdle,
-  vcsSummary,
   prdDir,
   contextPolicy,
   currentBranch,
@@ -95,7 +93,6 @@ export async function runNonTty({
       ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
       ...(questionPolicy !== undefined ? { questionPolicy } : {}),
       ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
-      ...(vcsSummary !== undefined ? { vcsSummary } : {}),
       ...(prdDir !== undefined ? { prdDir } : {}),
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       currentBranch,
@@ -158,7 +155,6 @@ export async function runNonTtyIterations({
   permissionPolicy,
   questionPolicy,
   useSessionIdle,
-  vcsSummary,
   prdDir,
   contextPolicy,
   currentBranch,
@@ -172,7 +168,6 @@ export async function runNonTtyIterations({
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
-  vcsSummary?: boolean;
   prdDir?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
@@ -199,7 +194,6 @@ export async function runNonTtyIterations({
     ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
-    ...(vcsSummary !== undefined ? { vcsSummary } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     hooks: {

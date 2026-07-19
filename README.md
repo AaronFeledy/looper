@@ -90,7 +90,6 @@ permissionPolicy:                   # optional global auto-reply policy for Open
   "*": ask                          # ask | always | once | reject
 questionPolicy: ask                  # optional global policy for OpenCode question prompts: ask | reject
 useSessionIdle: false                # optional: use session idle status in recovery/reattach checks
-vcsSummary: false                    # optional: capture per-step VCS snapshots for the TUI summary panel
 validateResources: false             # optional: validate configured agents exist during startup
 prd: spec/beta-1                     # optional PRD directory; relative paths resolve from the repo dir
 context: true                        # optional; see "Prompt context" below
@@ -136,6 +135,10 @@ When a permission or question is left pending (policy `ask`, or no policy), the 
 - `title` &mdash; see "Session titles" below.
 - `context` &mdash; see "Prompt context" below.
 
+Migration note: the former top-level `vcsSummary` option and Changes panel are retired in favor of the consolidated
+Diff panel. Existing YAML containing `vcsSummary` still loads because unknown top-level keys are ignored, but the key
+has no effect and should be removed.
+
 ### Prompt context
 
 Every prompt looper sends (fresh step, recovery nudge, restart, retry, background continuation) is
@@ -169,7 +172,7 @@ over the default.
 `vcsDelta` is a file list + counts, not a full diff. It includes both committed branch delta vs the
 resolved base branch and uncommitted working-tree changes, labels those groups separately, and caps at
 50 files / about 3800 context characters; it is fetched fresh immediately before every prompt send and is
-independent of `vcsSummary` per-step snapshots for the TUI panel &mdash; turning one off does not affect the other. If the VCS
+independent of the TUI `Diff` panel &mdash; turning one off does not affect the other. If the VCS
 lookup errors or hangs past its bound, looper logs one line and sends the prompt without that section
 rather than blocking or failing the step.
 
@@ -188,6 +191,20 @@ prd: spec/beta-1
 
 When configured, the TUI shows a PRD progress panel and the prompt context can include the same progress line.
 Looper polls `prd.json` every few seconds and reports parse/read errors in the panel instead of failing the run.
+
+### Branch diff
+
+Whenever the current branch differs from the branch OpenCode detects as the repository's default, the TUI shows a
+compact `Diff` panel above the PRD panel summarizing the branch's diff against that default branch: total `+additions`,
+`-deletions`, and the number of changed files. Looper's polled branch snapshot is authoritative, while the data comes
+live from OpenCode's own VCS API whenever its cached current branch agrees with that snapshot
+(`client.vcs.get` for the current/default branch and `client.vcs.diff` in branch mode): the diff uses merge-base
+semantics against the detected default branch and folds in committed, staged, unstaged, and untracked worktree changes,
+so the totals match what OpenCode reports. Only while OpenCode's cached branch lags Looper's watcher does the panel use a
+narrow read-only Git fallback with the same merge-base-to-working-tree scope. A feature branch with no changes shows
+`+0 -0 0 files`. The panel is absent
+from the layout while checked out on the default branch itself, and refreshes at startup, on branch switches, and at
+each step's begin and finish. There is nothing to configure &mdash; the default branch is whatever OpenCode detects.
 
 ### Session titles
 
@@ -235,6 +252,7 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_REPO_DIR` &mdash; override repo dir passed to OpenCode (default: `$PWD`)
 - `LOOPER_DEBUG_EVENTS=1` &mdash; verbose OpenCode event logging
 - `LOOPER_ATTACH_VALIDATION_TIMEOUT_MS` &mdash; timeout for attach-mode managed-resource validation (default: `10000`)
+- `LOOPER_BRANCH_DIFF_TIMEOUT_MS` &mdash; timeout for one live Diff-panel collection (default: `10000`)
 - `LOOPER_CONTINUATION_EXIT_GRACE_MS` &mdash; how long to wait after a step exits for a background-continuation record to appear (default: 30000)
 - `LOOPER_EVENT_WATCHDOG_POLL_MS` &mdash; event-stream watchdog poll interval (default: `15000`)
 - `LOOPER_EVENT_STALL_MS` &mdash; event-stream idle threshold before probing session status (default: `45000`)

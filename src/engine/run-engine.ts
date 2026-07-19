@@ -41,7 +41,6 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
-  readonly vcsSummary?: boolean;
   readonly prdDir?: string;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
