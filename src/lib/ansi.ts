@@ -14,6 +14,10 @@ export function stripAnsi(input: string): string {
   return input.replace(ANSI_PATTERN, '')
 }
 
+export function sanitizeTerminalText(input: string): string {
+  return stripAnsi(input).replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
+}
+
 type AnsiStyle = {
   fg?: RGBA
   bg?: RGBA

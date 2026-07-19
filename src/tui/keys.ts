@@ -5,7 +5,9 @@ import {
   dismissEscConfirm,
   enterHistoryView,
   exitHistoryView,
+  hideConfigModal,
   hideHelp,
+  hidePromptModal,
   historyMoveIteration,
   historyMoveStep,
   requestScrollIntent,
@@ -14,7 +16,9 @@ import {
   setFocusedPane,
   showHelp,
   syncSelectionToActiveStep,
+  toggleConfigModal,
   toggleFocusedPane,
+  togglePromptModal,
 } from "../lib/state.ts";
 import { tryOpenCurrentPr } from "./github-status.ts";
 
@@ -98,6 +102,23 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     const keyName = normalizeKeyName(event);
     const isEscape = keyName === "escape" || keyName === "esc";
 
+    // Help / prompt / config overlays are modal: while visible, the next keypress only closes them.
+    if (state.helpVisible) {
+      hideHelp(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+    if (state.promptModalVisible) {
+      hidePromptModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+    if (state.configModalVisible) {
+      hideConfigModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
     if (isInterruptKey(event)) {
       if (state.escConfirm !== null) dismissEscConfirm(state);
       const selectedText = renderer.getSelection()?.getSelectedText() ?? "";
@@ -113,13 +134,6 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       return;
     }
 
-    // Help is modal: while visible, the next keypress only closes it.
-    if (state.helpVisible) {
-      hideHelp(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-
     if (isEscape) {
       hooks.onEscape();
       if (typeof event.preventDefault === "function") {
@@ -130,6 +144,18 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
 
     if (keyName === "?" || event.sequence === "?") {
       showHelp(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
+    if (keyName === "v") {
+      togglePromptModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
+    if (keyName === "c") {
+      toggleConfigModal(state);
       if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }

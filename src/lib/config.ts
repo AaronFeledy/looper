@@ -68,7 +68,6 @@ type RawConfig = {
   permissionPolicy?: unknown;
   questionPolicy?: unknown;
   useSessionIdle?: unknown;
-  vcsSummary?: unknown;
   validateResources?: unknown;
   context?: unknown;
   prd?: unknown;
@@ -102,7 +101,6 @@ export type RuntimeConfig = {
   contextPolicy?: ContextPolicyOverride;
   prdDir?: string;
   useSessionIdle: boolean;
-  vcsSummary: boolean;
   validateResources: boolean;
 };
 
@@ -340,7 +338,7 @@ export function configFilePath(configDir: string): string {
   return findConfigFile(configDir) ?? join(configDir, CONFIG_FILE_NAME);
 }
 
-type ConfigFileRead = {
+export type ConfigFileSource = {
   path: string;
   content: string;
 };
@@ -349,7 +347,8 @@ function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
-function readFirstConfigFile(configDir: string): ConfigFileRead | undefined {
+/** First readable config file in `configDir` (path + raw YAML text), or undefined. */
+export function readConfigFileSource(configDir: string): ConfigFileSource | undefined {
   for (const configPath of configCandidatePaths(configDir)) {
     if (!isRegularFile(configPath)) continue;
     try {
@@ -363,7 +362,7 @@ function readFirstConfigFile(configDir: string): ConfigFileRead | undefined {
 }
 
 function loadRawConfig(configDir: string): RawConfig {
-  const configFile = readFirstConfigFile(configDir);
+  const configFile = readConfigFileSource(configDir);
   if (configFile === undefined) {
     throw new Error(`missing ${CONFIG_FILE_NAME} in ${configDir} (looked for ${CONFIG_FILE_NAMES.join(", ")}); create it with at least one step`);
   }
@@ -442,7 +441,6 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
-    vcsSummary: booleanFlagValue(rawConfig.vcsSummary, "vcsSummary", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };
 }
