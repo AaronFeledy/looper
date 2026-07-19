@@ -1,7 +1,7 @@
 import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
-import { focusPaneTabLabel, nextFocusedPane, subscribe } from "../lib/state.ts";
+import { focusPaneTabLabel, nextFocusedPane, selectedOrActiveStep, subscribe } from "../lib/state.ts";
 
 function footerContent(state: LoopState): string {
   if (state.escConfirm === "reset") {
@@ -26,6 +26,12 @@ function footerContent(state: LoopState): string {
   if (state.helpVisible) {
     return `press any key to close help`;
   }
+  if (state.promptModalVisible) {
+    return `press any key to close step prompt`;
+  }
+  if (state.configModalVisible) {
+    return `press any key to close config`;
+  }
   if (!state.started) {
     const reset = state.resumable ? "  [esc] reset" : "";
     return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step  [?] keys`;
@@ -44,7 +50,8 @@ function footerContent(state: LoopState): string {
   const restart = state.restartRequested ? "restarting step" : "[r]estart step";
   const skip = state.skipRequested ? "skipping step" : "[s]kip step";
   const history = state.history.length > 0 ? "  [h]istory" : "";
-  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  [esc] stop${history}  ${focusHint}  [?] keys`;
+  const prompt = selectedOrActiveStep(state)?.promptText ? "  [v]iew prompt" : "";
+  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  [esc] stop${history}${prompt}  ${focusHint}  [?] keys`;
 }
 
 function footerColor(state: LoopState): string {

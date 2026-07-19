@@ -120,3 +120,19 @@ describe("eventsToOutputBlocks — [looper] lines get their own block", () => {
     expect(loopers[0]!.lines).toEqual(["[looper] one", "[looper] two"]);
   });
 });
+
+describe("eventsToOutputBlocks — user messages", () => {
+  test("user text becomes a User group block", () => {
+    const events: LooperEvent[] = [
+      { kind: "user.started" },
+      { kind: "user.text", text: "plugin says hi" },
+      { kind: "assistant.started" },
+      { kind: "assistant.text", text: "assistant replies" },
+    ];
+    const blocks = eventsToOutputBlocks(events, times(events));
+    const groups = blocks.filter((b): b is Extract<OutputBlock, { kind: "group" }> => b.kind === "group");
+    expect(groups.map((g) => g.title)).toEqual(["User", "Assistant"]);
+    expect(groups[0]!.lines).toEqual(["plugin says hi"]);
+    expect(groups[1]!.lines).toEqual(["assistant replies"]);
+  });
+});

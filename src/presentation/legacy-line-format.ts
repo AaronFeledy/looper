@@ -71,6 +71,10 @@ export function formatLooperEvent(event: LooperEvent, at?: number): string[] {
       return [`${ui.red("✗ assistant error")} ${event.message}`];
     case "assistant.aborted":
       return [ui.dim(`(aborted) ${event.message}`)];
+    case "user.started":
+      return [groupHeader("User", ui.yellow, at)];
+    case "user.text":
+      return [event.text];
     case "reasoning.started":
       return [groupHeader("Reasoning", ui.magenta, at)];
     case "reasoning.text":

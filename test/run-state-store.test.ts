@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -25,11 +25,54 @@ describe("run-state store", () => {
 
   test("writes an in-flight position with session and message fields", () => {
     const store = createRunStateStore({ configDir: scratch });
+    const looperMessageIDs = ["msg_build", "msg_review"];
 
-    store.savePosition({ iteration: 3, steps: STEPS, stepIndex: 1, sessionID: "ses_review", messageID: "msg_review" });
+    store.savePosition({
+      iteration: 3,
+      steps: STEPS,
+      stepIndex: 1,
+      sessionID: "ses_review",
+      messageID: "msg_review",
+      promptText: "review prompt",
+      looperMessageIDs,
+    });
+    looperMessageIDs.push("msg_mutated");
 
-    expect(store.read()).toMatchObject({ iteration: 3, stepIndex: 1, stepName: "review", sessionID: "ses_review", messageID: "msg_review" });
-    expect(Object.keys(readRunStateJson(scratch))).toEqual(["iteration", "stepIndex", "stepName", "sessionID", "messageID", "updatedAt"]);
+    expect(store.read()).toMatchObject({
+      iteration: 3,
+      stepIndex: 1,
+      stepName: "review",
+      sessionID: "ses_review",
+      messageID: "msg_review",
+      promptText: "review prompt",
+      looperMessageIDs: ["msg_build", "msg_review"],
+    });
+    expect(Object.keys(readRunStateJson(scratch))).toEqual([
+      "iteration",
+      "stepIndex",
+      "stepName",
+      "sessionID",
+      "messageID",
+      "promptText",
+      "looperMessageIDs",
+      "updatedAt",
+    ]);
+  });
+
+  test("creates and replaces the run-state file with private permissions", () => {
+    const previousUmask = process.umask(0o000);
+    const path = join(scratch, ".looper-run.json");
+    try {
+      const store = createRunStateStore({ configDir: scratch });
+      store.savePosition({ iteration: 1, steps: STEPS, stepIndex: 0 });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+
+      chmodSync(path, 0o666);
+      store.savePosition({ iteration: 1, steps: STEPS, stepIndex: 1 });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(previousUmask);
+    }
   });
 
   test("advancing between steps drops in-flight session fields", () => {
@@ -41,6 +84,8 @@ describe("run-state store", () => {
     expect(onDisk).toMatchObject({ iteration: 2, stepIndex: 1, stepName: "review", looperRunID: "run_1" });
     expect("sessionID" in onDisk).toBe(false);
     expect("messageID" in onDisk).toBe(false);
+    expect("promptText" in onDisk).toBe(false);
+    expect("looperMessageIDs" in onDisk).toBe(false);
     expect(Object.keys(onDisk)).toEqual(["iteration", "stepIndex", "stepName", "looperRunID", "updatedAt"]);
   });
 

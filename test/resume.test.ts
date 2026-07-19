@@ -246,13 +246,21 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     } as unknown as OpencodeClient;
 
     writeIdleContinuation(repoDir, "ses_old");
-    const resume: ResumeSession = { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" };
+    const resume: ResumeSession = {
+      sessionID: "ses_old",
+      messageID: "msg_old",
+      stepName: "Build",
+      promptText: "persisted crash prompt",
+      looperMessageIDs: ["msg_old"],
+    };
     const result = await runIteration({ state, iteration: 5, client, repoDir, configDir, resume });
 
     expect(result).toBe("complete");
     expect(created).toEqual([]);
     expect(ops.some((op) => op.startsWith("prompt"))).toBe(false);
     expect(state.steps.at(-1)!.sessionID).toBe("ses_old");
+    expect(state.steps.at(-1)!.promptText).toBe("persisted crash prompt");
+    expect(state.steps.at(-1)!.looperMessageIDs).toEqual(["msg_old"]);
   });
 
   test("reattach re-persists the live session ids dropped by onStepBegin", async () => {
@@ -260,7 +268,7 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     scratch = repoDir;
     const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
     let statusReads = 0;
-    const sessionCalls: Array<{ iteration: number; index: number; stepName: string; sessionID: string; messageID: string }> = [];
+    const sessionCalls: Array<{ iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[] }> = [];
 
     const client = {
       session: {
@@ -288,7 +296,13 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     } as unknown as OpencodeClient;
 
     writeIdleContinuation(repoDir, "ses_old");
-    const resume: ResumeSession = { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" };
+    const resume: ResumeSession = {
+      sessionID: "ses_old",
+      messageID: "msg_old",
+      stepName: "Build",
+      promptText: "persisted prompt",
+      looperMessageIDs: ["msg_old"],
+    };
     const result = await runIteration({
       state,
       iteration: 5,
@@ -302,6 +316,14 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     });
 
     expect(result).toBe("complete");
-    expect(sessionCalls).toContainEqual({ iteration: 5, index: 0, stepName: "Build", sessionID: "ses_old", messageID: "msg_old" });
+    expect(sessionCalls).toContainEqual({
+      iteration: 5,
+      index: 0,
+      stepName: "Build",
+      sessionID: "ses_old",
+      messageID: "msg_old",
+      promptText: "persisted prompt",
+      looperMessageIDs: ["msg_old"],
+    });
   });
 });

@@ -22,6 +22,7 @@ import {
 } from "./lib/opencode-managed-resources.ts";
 import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
 import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
+import { lookupServerVersion } from "./lib/server-version.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import {
@@ -30,6 +31,7 @@ import {
   createStepRow,
   dismissEscConfirm,
   type EscConfirmMode,
+  hydrateResumableBootStep,
   notify,
   resetIterationNavigationState,
   resetPrdIterationBaseline,
@@ -45,17 +47,20 @@ import { createAgentStream } from "./tui/agent-stream.ts";
 import { createBootScreen, type BootScreen } from "./tui/boot-screen.ts";
 import { createFooter } from "./tui/footer.ts";
 import { createGithubStatusPanel } from "./tui/github-status.ts";
+import { createConfigOverlay } from "./tui/config-overlay.ts";
 import { createHelpOverlay } from "./tui/help-overlay.ts";
+import { createPromptOverlay } from "./tui/prompt-overlay.ts";
 import { createPendingRequestPanel } from "./tui/pending-request-panel.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
+import { createBranchDiffPanel } from "./tui/branch-diff.ts";
 import { createPrdPanel } from "./tui/prd-status.ts";
 import { createStepList, LIST_WIDTH } from "./tui/step-list.ts";
 import { createTodoPanel } from "./tui/todo-panel.ts";
-import { createVcsSummaryPanel } from "./tui/vcs-summary.ts";
 import { createWatcherEventHandler } from "./tui/watcher-events.ts";
-import { startBranchWatcher, startGithubWatcher, startPrdWatcher, type BranchWatcherHandle } from "./watchers/setup.ts";
+import { startBranchDiffWatcher, startBranchWatcher, startGithubWatcher, startPrdWatcher, type BranchWatcherHandle } from "./watchers/setup.ts";
+import type { BranchDiffWatcher } from "./watchers/branch-diff-watcher.ts";
 import type { GithubWatcher } from "./watchers/github.ts";
 import type { PrdWatcher } from "./watchers/prd.ts";
 
@@ -258,12 +263,28 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   // Make a resumable boot look like the prior run never exited: mark the
   // already-completed steps of the resume iteration as done and pre-select the
   // step we will resume on. On a clean slate, pre-select the first step so it is
-  // obvious that pressing enter starts it.
+  // obvious that pressing enter starts it. Also rehydrate in-flight checkpoint
+  // fields (promptText/session/title) onto that row so idle-TUI actions like `v`
+  // work before [g]o starts the engine.
   if (!state.started) {
     if (firstIterationResumed) {
       state.resumable = true;
       for (let i = 0; i < firstIterationStartStepIndex && i < state.steps.length; i += 1) {
         state.steps[i]!.status = "done";
+      }
+      if (state.steps.length > 0) {
+        const resumeStepIndex = Math.min(firstIterationStartStepIndex, state.steps.length - 1);
+        const resumeStep = state.steps[resumeStepIndex];
+        if (resumeStep !== undefined) {
+          hydrateResumableBootStep(resumeStep, {
+            ...(firstIterationResume?.promptText !== undefined ? { promptText: firstIterationResume.promptText } : {}),
+            ...(firstIterationResume?.sessionID !== undefined ? { sessionID: firstIterationResume.sessionID } : {}),
+            ...(firstIterationResume?.looperMessageIDs !== undefined
+              ? { looperMessageIDs: firstIterationResume.looperMessageIDs }
+              : {}),
+            ...(firstIterationTitle !== undefined ? { title: firstIterationTitle } : {}),
+          });
+        }
       }
     }
     if (state.steps.length > 0) {
@@ -283,10 +304,15 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let historyStreamer: { stop: () => void } | undefined;
   let branchWatcher: BranchWatcherHandle | undefined;
+  let branchDiffWatcher: BranchDiffWatcher | undefined;
   let githubWatcher: GithubWatcher | undefined;
   let prdWatcher: PrdWatcher | undefined;
   let exitReason: string | undefined;
-  const handleWatcherEvent = createWatcherEventHandler({ state, refreshGithub: () => githubWatcher?.refresh() });
+  const handleWatcherEvent = createWatcherEventHandler({
+    state,
+    refreshGithub: () => githubWatcher?.refresh(),
+    refreshBranchDiff: () => branchDiffWatcher?.refresh(),
+  });
 
   const finish = (exitCode: number, reason: string): number => {
     exitReason = reason;
@@ -428,6 +454,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     await autoStartIfSavedSessionRunning(client);
     throwIfBootAborted();
 
+    bootScreen.begin("Checking server health");
+    const serverVersion = await lookupServerVersion(
+      (signal) => client.global.health({ signal }),
+      bootAbort.signal,
+      DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
+    );
+
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
     historyStreamer = startHistoryStreamer({ state, client, repoDir });
 
@@ -467,7 +500,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     });
     throwIfBootAborted();
     leftColumn.add(createTodoPanel(renderer, state));
-    leftColumn.add(createVcsSummaryPanel(renderer, state));
+    leftColumn.add(createBranchDiffPanel(renderer, state));
+    branchDiffWatcher = startBranchDiffWatcher({
+      client,
+      repoDir,
+      getBranch: () => state.branch,
+      emit: handleWatcherEvent,
+    });
     prdWatcher = startPrdWatcher({
       prdDir: runtimeConfig.prdDir,
       emit: handleWatcherEvent,
@@ -475,11 +514,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     });
     bootScreen.done();
 
-    root.add(createHeader(renderer, state));
+    root.add(createHeader(renderer, state, serverVersion));
     body.add(leftColumn);
     body.add(stream);
     root.add(body);
     root.add(createHelpOverlay(renderer, state));
+    root.add(createPromptOverlay(renderer, state));
+    root.add(createConfigOverlay(renderer, state, configDir));
     root.add(createPendingRequestPanel(renderer, state));
     root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));
@@ -663,7 +704,6 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       useSessionIdle: runtimeConfig.useSessionIdle,
-      vcsSummary: runtimeConfig.vcsSummary,
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       elapsedSeconds,
       hooks: {
@@ -674,10 +714,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         onStepBegin: () => {
           branchWatcher?.refresh();
           githubWatcher?.refresh();
+          branchDiffWatcher?.refresh();
         },
         onStepFinish: () => {
           branchWatcher?.refresh();
           githubWatcher?.refresh();
+          branchDiffWatcher?.refresh();
         },
         onStepFailure: async ({ error }) => {
           state.started = false;
@@ -728,6 +770,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     historyStreamer?.stop();
     githubWatcher?.stop();
     prdWatcher?.stop();
+    branchDiffWatcher?.stop();
     branchWatcher?.stop();
     process.off("SIGINT", handleSigint);
     process.off("SIGTERM", handleSigterm);
@@ -788,7 +831,6 @@ async function main(): Promise<number> {
       ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
       ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
       useSessionIdle: runtimeConfig.useSessionIdle,
-      vcsSummary: runtimeConfig.vcsSummary,
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,

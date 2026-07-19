@@ -34,7 +34,7 @@ function tolerantRead(path: string): string | null {
 function writeFileAtomically(path: string, content: string): void {
   const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
-    writeFileSync(tempPath, content);
+    writeFileSync(tempPath, content, { mode: 0o600 });
     renameSync(tempPath, path);
   } catch (error) {
     rmSync(tempPath, { force: true });
@@ -195,12 +195,12 @@ export type StepSessionEntry = {
 /**
  * Durable, iteration-aware run pointer (`.looper-run.json`). Superset of
  * {@link ResumeStep}: also records the iteration the loop is on and, while a
- * step is in flight, the opencode `sessionID`/`messageID` so a resume
- * after a crash/exit can reattach to a still-live generation (or restart it).
+ * step is in flight, the opencode session, outcome turn, exact prompt, and
+ * Looper-owned message IDs so a resume can reattach without exposing prompts.
  *
- * `sessionID`/`messageID` are only present for an IN-PROGRESS step; once a step
- * finishes the pointer is advanced to the next step (or next iteration) WITHOUT
- * session fields, so resume never reattaches to an already-completed step.
+ * `sessionID`/`messageID`/`promptText`/`looperMessageIDs` are only present for
+ * an IN-PROGRESS step; once it finishes the pointer advances WITHOUT those
+ * fields, so resume never reattaches to an already-completed step.
  *
  * `title` is the iteration's generated work-description. It rides along with
  * the pointer (across step advances within an iteration) so a resumed run can
@@ -215,6 +215,8 @@ export type RunState = {
   stepName: string;
   sessionID?: string;
   messageID?: string;
+  promptText?: string;
+  looperMessageIDs?: string[];
   title?: string;
   looperRunID?: string;
   stepSessions?: StepSessionEntry[];
@@ -227,6 +229,8 @@ export type RunStateInput = {
   stepName: string;
   sessionID?: string;
   messageID?: string;
+  promptText?: string;
+  looperMessageIDs?: string[];
   title?: string;
   looperRunID?: string;
   stepSessions?: StepSessionEntry[];
@@ -255,6 +259,11 @@ function parseStepSessions(value: unknown): StepSessionEntry[] | undefined {
   return parsed;
 }
 
+function parseMessageIDs(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
 function parseRunState(value: unknown): RunState | null {
   if (!isRecord(value)) return null;
   const iteration = value.iteration;
@@ -267,6 +276,8 @@ function parseRunState(value: unknown): RunState | null {
   if (typeof updatedAt !== "string" || updatedAt.length === 0) return null;
   const sessionID = typeof value.sessionID === "string" && value.sessionID.length > 0 ? value.sessionID : undefined;
   const messageID = typeof value.messageID === "string" && value.messageID.length > 0 ? value.messageID : undefined;
+  const promptText = typeof value.promptText === "string" ? value.promptText : undefined;
+  const looperMessageIDs = parseMessageIDs(value.looperMessageIDs);
   const title = typeof value.title === "string" && value.title.length > 0 ? value.title : undefined;
   const looperRunID = typeof value.looperRunID === "string" && value.looperRunID.length > 0 ? value.looperRunID : undefined;
   const stepSessions = parseStepSessions(value.stepSessions);
@@ -276,6 +287,8 @@ function parseRunState(value: unknown): RunState | null {
     stepName,
     ...(sessionID !== undefined ? { sessionID } : {}),
     ...(messageID !== undefined ? { messageID } : {}),
+    ...(promptText !== undefined ? { promptText } : {}),
+    ...(looperMessageIDs !== undefined ? { looperMessageIDs } : {}),
     ...(title !== undefined ? { title } : {}),
     ...(looperRunID !== undefined ? { looperRunID } : {}),
     ...(stepSessions !== undefined ? { stepSessions } : {}),
@@ -319,9 +332,11 @@ export function writeRunState(input: RunStateInput): void {
     stepName: input.stepName,
     ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}),
     ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
+    ...(input.promptText !== undefined ? { promptText: input.promptText } : {}),
+    ...(input.looperMessageIDs !== undefined ? { looperMessageIDs: [...input.looperMessageIDs] } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}),
-    ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions } : {}),
+    ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions.map((entry) => ({ ...entry })) } : {}),
     updatedAt: new Date().toISOString(),
   };
   writeFileAtomically(runStateFilePath(), `${JSON.stringify(record, null, 2)}\n`);

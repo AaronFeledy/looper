@@ -514,7 +514,7 @@ test("reattach honors an older session-scoped active continuation record", async
     repoDir,
     step,
     sessionID: "ses_old",
-    messageID: "msg_old",
+    outcomeMessageID: "msg_old",
   });
 
   expect(result.status).toBe("waiting");
@@ -581,7 +581,7 @@ test("session-scoped continuation lookup rejects path traversal session IDs", as
     repoDir,
     step,
     sessionID: "../secret",
-    messageID: "msg_traversal",
+    outcomeMessageID: "msg_traversal",
   });
 
   expect(result.status).toBe("done");

@@ -1,7 +1,11 @@
-import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
+import { BoxRenderable, dim, fg, RenderableEvents, t, TextRenderable, type CliRenderer, type StyledText } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
+
+export const SERVER_BADGE_ID = "loop-header-badge";
+
+const BADGE_DOT_COLOR = "#a6e3a1";
 
 function formatElapsed(startedAt: number): string {
   const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
@@ -17,14 +21,18 @@ function formatElapsed(startedAt: number): string {
 
 function headerContent(state: LoopState): string {
   const branch = state.branch || "detached";
-  if (!state.started) return `Loop · waiting to start  ·  branch ${branch}`;
+  if (!state.started) return `Looper · waiting to start  ·  branch ${branch}`;
 
-  return `Loop · iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}  ·  ${formatElapsed(
+  return `Looper · iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}  ·  ${formatElapsed(
     state.iterationStartedAt,
   )}`;
 }
 
-export function createHeader(renderer: CliRenderer, state: LoopState): BoxRenderable {
+export function buildServerBadge(version: string): StyledText {
+  return t`${fg(BADGE_DOT_COLOR)("●")}${dim(` OpenCode v${version}`)}`;
+}
+
+export function createHeader(renderer: CliRenderer, state: LoopState, serverVersion?: string): BoxRenderable {
   const header = new BoxRenderable(renderer, {
     id: "loop-header",
     width: "100%",
@@ -35,7 +43,9 @@ export function createHeader(renderer: CliRenderer, state: LoopState): BoxRender
   let lastContent = headerContent(state);
   const text = new TextRenderable(renderer, {
     id: "loop-header-text",
-    width: "100%",
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
     height: 1,
     content: lastContent,
     fg: "#8bd5ff",
@@ -43,6 +53,17 @@ export function createHeader(renderer: CliRenderer, state: LoopState): BoxRender
   });
 
   header.add(text);
+
+  if (serverVersion !== undefined) {
+    const badge = new TextRenderable(renderer, {
+      id: SERVER_BADGE_ID,
+      flexShrink: 0,
+      height: 1,
+      marginRight: 1,
+      content: buildServerBadge(serverVersion),
+    });
+    header.add(badge);
+  }
 
   const update = () => {
     const nextContent = headerContent(state);

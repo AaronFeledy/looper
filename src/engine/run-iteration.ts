@@ -29,7 +29,7 @@ import {
   type StepRunResult,
   type SessionHealthState,
 } from "../lib/runner.ts";
-import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepVcsSummary, type LoopState, type LoopStep, type StepRestartReason, type VcsChange } from "../lib/state.ts";
+import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
 
@@ -42,20 +42,6 @@ const titleService: TitleService = {
 
 function fileReadMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
-}
-
-function formatError(error: unknown): string {
-  if (error === undefined || error === null) return "unknown error";
-  if (error instanceof Error) return error.message;
-  if (typeof error === "object" && "message" in error) {
-    const message = error.message;
-    if (typeof message === "string") return message;
-  }
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
 }
 
 export function promptText(step: Step): string {
@@ -121,13 +107,15 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
 export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
   onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; title?: string }) => void;
-  onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; title?: string }) => void;
+  onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[]; title?: string }) => void;
 };
 
 export type ResumeSession = {
   sessionID?: string;
   messageID?: string;
   stepName?: string;
+  promptText?: string;
+  looperMessageIDs?: string[];
 };
 
 export type RunIterationOptions = {
@@ -159,7 +147,6 @@ export type RunIterationOptions = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
-  vcsSummary?: boolean;
   prdDir?: string;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the
@@ -235,7 +222,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     permissionPolicy,
     questionPolicy,
     useSessionIdle,
-    vcsSummary,
     prdDir,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -292,26 +278,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       log: (line) => logStepLine(stepIdx, line),
     });
-  };
-
-  const captureStepVcsSummary = async (stepIdx: number): Promise<void> => {
-    if (vcsSummary !== true) return;
-    try {
-      const status = await client.vcs.status({ directory: repoDir });
-      if (status.error) {
-        logStepLine(stepIdx, `[looper] vcs.status failed: ${formatError(status.error)}`);
-        return;
-      }
-      const changes: VcsChange[] = (status.data ?? []).map((change) => ({
-        file: change.file,
-        additions: change.additions,
-        deletions: change.deletions,
-        status: change.status,
-      }));
-      setStepVcsSummary(state, stepIdx, changes);
-    } catch (error) {
-      logStepLine(stepIdx, `[looper] vcs.status threw: ${formatError(error)}`);
-    }
   };
 
   while (true) {
@@ -583,6 +549,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               stepName: step.name,
               sessionID: resumeSession,
               messageID: resumeInfo.messageID,
+              ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
+              ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: [...resumeInfo.looperMessageIDs] } : {}),
               ...(workDescription !== undefined ? { title: workDescription } : {}),
             });
             pendingResult = await reattachOpenCodeStep({
@@ -592,7 +560,9 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               repoDir,
               step,
               sessionID: resumeSession,
-              messageID: resumeInfo.messageID,
+              outcomeMessageID: resumeInfo.messageID,
+              ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
+              ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: resumeInfo.looperMessageIDs } : {}),
               timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
@@ -601,6 +571,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           } else if (resumeDecision.kind === "nudge-existing") {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
             resumeSessionID = resumeSession;
+            if (resumeInfo.promptText !== undefined) setStepPromptText(state, currentStepIndex, resumeInfo.promptText);
+            setStepLooperMessageIDs(
+              state,
+              currentStepIndex,
+              resumeInfo.looperMessageIDs ?? (resumeInfo.messageID !== undefined ? [resumeInfo.messageID] : []),
+            );
           } else if (resumeDecision.kind === "restart-fresh") {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; restarting step in a fresh session`);
           } else if (resumeDecision.kind === "fail-closed") {
@@ -660,8 +636,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ...(questionPolicy !== undefined ? { questionPolicy } : {}),
           ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
-          onSessionBound: ({ sessionID, messageID }) =>
-            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, ...(workDescription !== undefined ? { title: workDescription } : {}) }),
+          onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) =>
+            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, promptText: sentPromptText, looperMessageIDs: [...looperMessageIDs], ...(workDescription !== undefined ? { title: workDescription } : {}) }),
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
@@ -714,6 +690,17 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           // lastPromptMessageID would grade the already-completed prior turn.
           const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? lastPromptMessageID;
           if (resumedMessageID !== undefined) {
+            const activeStep = state.steps[currentStepIndex];
+            hooks?.onStepSession?.({
+              iteration,
+              index,
+              stepName: step.name,
+              sessionID: waitSessionID,
+              messageID: resumedMessageID,
+              ...(activeStep?.promptText !== undefined ? { promptText: activeStep.promptText } : {}),
+              ...(activeStep?.looperMessageIDs !== undefined ? { looperMessageIDs: [...activeStep.looperMessageIDs] } : {}),
+              ...(workDescription !== undefined ? { title: workDescription } : {}),
+            });
             const line = `[looper] session ${waitSessionID} resumed by opencode after background tasks; reattaching to stream its output`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
@@ -725,7 +712,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               repoDir,
               step,
               sessionID: waitSessionID,
-              messageID: resumedMessageID,
+              outcomeMessageID: resumedMessageID,
               timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
@@ -898,7 +885,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               repoDir,
               step,
               sessionID: priorSessionForCheck,
-              messageID: lastPromptMessageID,
+              outcomeMessageID: lastPromptMessageID,
               timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
@@ -1016,8 +1003,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
     }
-
-    if (result.status === "done") await captureStepVcsSummary(currentStepIndex);
 
     hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 

@@ -1,8 +1,13 @@
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
+
+import { branchDiffCollectionTimeoutMs } from "../config/tunables.ts";
 import { detectGithubRepo } from "../lib/github.ts";
 import { watchBranch } from "./branch.ts";
+import { collectBranchDiff } from "./branch-diff.ts";
+import { watchBranchDiff, type BranchDiffWatcher } from "./branch-diff-watcher.ts";
 import { watchGithubPr, type GithubWatcher } from "./github.ts";
 import { watchPrd, type PrdWatcher } from "./prd.ts";
-import type { BranchWatcherEvent, GithubWatcherEvent, PrdWatcherEvent } from "./watcher-events.ts";
+import type { BranchDiffWatcherEvent, BranchWatcherEvent, GithubWatcherEvent, PrdWatcherEvent } from "./watcher-events.ts";
 
 export type BranchWatcherHandle = {
   readonly refresh: () => void;
@@ -45,6 +50,20 @@ export async function startGithubWatcher(opts: {
     repoDir: opts.repoDir,
     getBranch: opts.getBranch,
     onUpdate: (status) => opts.emit({ kind: "github-status", status }),
+  });
+}
+
+export function startBranchDiffWatcher(opts: {
+  readonly client: OpencodeClient;
+  readonly repoDir: string;
+  readonly getBranch: () => string;
+  readonly emit: (event: BranchDiffWatcherEvent) => void;
+}): BranchDiffWatcher {
+  return watchBranchDiff({
+    getBranch: opts.getBranch,
+    collectionTimeoutMs: branchDiffCollectionTimeoutMs(),
+    collect: (branch, signal) => collectBranchDiff(opts.client, opts.repoDir, branch, signal),
+    onUpdate: (status) => opts.emit({ kind: "branch-diff", status }),
   });
 }
 

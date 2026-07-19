@@ -3,7 +3,7 @@ import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@o
 import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { continuationBackgroundAgent, continuationFallback, logContinuationState, setContinuationStatus, startBackgroundAgentPoller, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
@@ -162,7 +162,9 @@ export type ReattachStepOptions = {
   repoDir: string;
   step: Step;
   sessionID: string;
-  messageID: string;
+  outcomeMessageID: string;
+  promptText?: string;
+  looperMessageIDs?: readonly string[];
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
@@ -176,7 +178,9 @@ export async function reattachOpenCodeStep({
   repoDir,
   step,
   sessionID,
-  messageID,
+  outcomeMessageID,
+  promptText,
+  looperMessageIDs,
   permissionPolicy,
   questionPolicy,
   useSessionIdle,
@@ -194,6 +198,8 @@ export async function reattachOpenCodeStep({
 
   beginStepRun(state, stepIndex, { statusMessage: "reattaching" });
   setStepSessionID(state, stepIndex, sessionID);
+  if (promptText !== undefined) setStepPromptText(state, stepIndex, promptText);
+  if (looperMessageIDs !== undefined) setStepLooperMessageIDs(state, stepIndex, looperMessageIDs);
 
   const pushLine = (line: string, at?: number) => {
     pushAgentLine(state, line, at);
@@ -205,7 +211,7 @@ export async function reattachOpenCodeStep({
     pushStepOutputLines(state, stepIndex, lines, at);
   };
 
-  pushLine(`[looper] reattaching to session ${sessionID} (messageID=${messageID}) for ${step.name}`);
+  pushLine(`[looper] reattaching to session ${sessionID} (outcomeMessageID=${outcomeMessageID}) for ${step.name}`);
 
   const ctrl = new AbortController();
   let cancellationAction: "skip" | "restart" | null = null;
@@ -283,6 +289,7 @@ export async function reattachOpenCodeStep({
       notify();
     }
   };
+  const hiddenUserMessageIDs = new Set<string>(looperMessageIDs ?? activeStep.looperMessageIDs ?? []);
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
@@ -304,6 +311,7 @@ export async function reattachOpenCodeStep({
     onSessionError: (message) => {
       sessionEventError ??= new Error(`session.error: ${message}`);
     },
+    hiddenUserMessageIDs,
     ...(useSessionIdle
       ? {
           onSessionIdle: (payload) => {
@@ -407,7 +415,7 @@ export async function reattachOpenCodeStep({
     return {
       status: statusValue,
       sessionID,
-      messageID,
+      messageID: outcomeMessageID,
       ...(extras?.errorMessage !== undefined ? { errorMessage: extras.errorMessage } : {}),
     };
   };
@@ -426,9 +434,9 @@ export async function reattachOpenCodeStep({
     return finalize("failed", { errorMessage: reason });
   }
 
-  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, messageID);
+  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, outcomeMessageID);
   if (classification.kind === "done") {
-    pushLine(`[looper] reattach: assistant message ${messageID} completed cleanly`);
+    pushLine(`[looper] reattach: assistant message ${outcomeMessageID} completed cleanly`);
     let record: RunContinuationRecord | null = null;
     try {
       record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
@@ -443,7 +451,7 @@ export async function reattachOpenCodeStep({
       activeStep.finishedAt = undefined;
       state.activeStepIndex = null;
       notify();
-      return { status: "waiting", sessionID: record.sessionID, messageID };
+      return { status: "waiting", sessionID: record.sessionID, messageID: outcomeMessageID };
     }
     return finalize("done");
   }
@@ -453,8 +461,8 @@ export async function reattachOpenCodeStep({
   }
   const reason =
     classification.kind === "missing"
-      ? `reattach: no assistant message found for prompt ${messageID}`
-      : `reattach: assistant message ${messageID} still in-progress after status idle`;
+      ? `reattach: no assistant message found for prompt ${outcomeMessageID}`
+      : `reattach: assistant message ${outcomeMessageID} still in-progress after status idle`;
   pushLine(`[looper] ${reason}`);
   return finalize("failed", { errorMessage: reason });
 }

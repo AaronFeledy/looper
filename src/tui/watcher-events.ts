@@ -1,4 +1,4 @@
-import { notify, setGithubStatus, setPrdStatus, type LoopState } from "../lib/state.ts";
+import { notify, setBranchDiffStatus, setGithubStatus, setPrdStatus, type LoopState } from "../lib/state.ts";
 import type { WatcherEvent } from "../watchers/watcher-events.ts";
 
 function assertNever(event: never): never {
@@ -8,6 +8,7 @@ function assertNever(event: never): never {
 export function createWatcherEventHandler(opts: {
   readonly state: LoopState;
   readonly refreshGithub: () => void;
+  readonly refreshBranchDiff: () => void;
 }): (event: WatcherEvent) => void {
   return (event) => {
     switch (event.kind) {
@@ -16,12 +17,16 @@ export function createWatcherEventHandler(opts: {
         opts.state.branch = event.branch;
         notify();
         opts.refreshGithub();
+        opts.refreshBranchDiff();
         return;
       case "github-status":
         setGithubStatus(opts.state, event.status);
         return;
       case "prd-status":
         setPrdStatus(opts.state, event.status);
+        return;
+      case "branch-diff":
+        setBranchDiffStatus(opts.state, event.status);
         return;
       default:
         return assertNever(event);

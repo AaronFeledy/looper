@@ -91,6 +91,18 @@ export type PrdStatus =
   | { kind: "error"; message: string };
 
 /**
+ * Aggregate branch diff (committed + worktree changes) for the current branch
+ * vs OpenCode's detected default branch, sourced live from OpenCode's VCS API.
+ * `hidden` collapses the panel out of layout (on the default branch itself, or
+ * before the first resolve); `ok` carries the panel's totals.
+ */
+export type BranchDiffStatus =
+  | { kind: "hidden" }
+  | { kind: "loading" }
+  | { kind: "ok"; additions: number; deletions: number; files: number }
+  | { kind: "error"; message: string };
+
+/**
  * A live child opencode session spawned by a step's parent session (e.g. via
  * the task tool). Rendered as an indented sub-row beneath its parent step.
  * `outputLines` is empty until the user selects this row, at which point the
@@ -120,6 +132,8 @@ export type LoopStep = {
   sessionID?: string;
   /** Generated work-description from the title agent. Used as the output-box header suffix and as the session-title suffix. Reused across later steps in the same iteration. */
   title?: string;
+  promptText?: string;
+  looperMessageIDs?: string[];
   outputLines: string[];
   outputLineTimes: number[];
   outputEvents?: LooperEvent[];
@@ -128,7 +142,6 @@ export type LoopStep = {
   outputPinnedToBottom: boolean;
   backgroundAgents: BackgroundAgent[];
   restartReason?: StepRestartReason;
-  vcsSummary?: VcsChange[];
 };
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
@@ -142,6 +155,8 @@ export type HistoryStepSnapshot = {
   status: StepStatus;
   sessionID?: string;
   title?: string;
+  promptText?: string;
+  looperMessageIDs?: string[];
   restartReason?: StepRestartReason;
   startedAt?: number;
   finishedAt?: number;
@@ -198,13 +213,6 @@ export type TodoItem = {
   priority: string;
 };
 
-export type VcsChange = {
-  file: string;
-  additions: number;
-  deletions: number;
-  status: string;
-};
-
 export type EscConfirmMode = "reset" | "stop";
 
 export type LoopState = {
@@ -232,6 +240,8 @@ export type LoopState = {
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
   helpVisible: boolean;
+  promptModalVisible: boolean;
+  configModalVisible: boolean;
   resumable: boolean;
   agentLines: string[];
   agentLineTimes: number[];
@@ -242,6 +252,7 @@ export type LoopState = {
   github: GithubStatus;
   prd: PrdStatus;
   prdIterationBaseline: number | null;
+  branchDiff: BranchDiffStatus;
   history: IterationHistoryEntry[];
   historyView: HistoryView | null;
 };
@@ -374,6 +385,8 @@ export function createLoopState({
     recoveryChoice: null,
     escConfirm: null,
     helpVisible: false,
+    promptModalVisible: false,
+    configModalVisible: false,
     resumable: false,
     agentLines: [],
     agentLineTimes: [],
@@ -384,6 +397,7 @@ export function createLoopState({
     github: { kind: "loading" },
     prd: { kind: "loading" },
     prdIterationBaseline: null,
+    branchDiff: { kind: "hidden" },
     history: [],
     historyView: null,
   };
@@ -404,13 +418,6 @@ export function setTodos(state: LoopState, todos: TodoItem[]): void {
   notifyStateChange();
 }
 
-export function setStepVcsSummary(state: LoopState, stepIndex: number, changes: VcsChange[]): void {
-  const step = state.steps[stepIndex];
-  if (!step) return;
-  step.vcsSummary = changes;
-  notifyStateChange();
-}
-
 export function setGithubStatus(state: LoopState, status: GithubStatus): void {
   if (JSON.stringify(state.github) === JSON.stringify(status)) return;
   state.github = status;
@@ -427,6 +434,12 @@ export function setPrdStatus(state: LoopState, status: PrdStatus): void {
   }
   if (!changed) return;
   state.prd = status;
+  notifyStateChange();
+}
+
+export function setBranchDiffStatus(state: LoopState, status: BranchDiffStatus): void {
+  if (JSON.stringify(state.branchDiff) === JSON.stringify(status)) return;
+  state.branchDiff = status;
   notifyStateChange();
 }
 
@@ -486,16 +499,23 @@ export function toggleFocusedPane(state: LoopState): LoopPane {
 
 export function setSelectedStepIndex(state: LoopState, stepIndex: number | null): void {
   const nextStepIndex = clampStepIndex(getStepCount(state), stepIndex);
+  const rejoiningLive =
+    nextStepIndex !== null &&
+    state.activeStepIndex !== null &&
+    nextStepIndex === state.activeStepIndex;
+  const nextManual = nextStepIndex !== null && !rejoiningLive;
   if (
     state.selectedStepIndex === nextStepIndex &&
     state.selectedBackgroundSessionID === null &&
-    state.manualStepSelection === (nextStepIndex !== null)
+    state.manualStepSelection === nextManual
   ) {
+    if (rejoiningLive && pinStepOutputToBottom(state, nextStepIndex)) notifyStateChange();
     return;
   }
   state.selectedStepIndex = nextStepIndex;
   state.selectedBackgroundSessionID = null;
-  state.manualStepSelection = nextStepIndex !== null;
+  state.manualStepSelection = nextManual;
+  if (rejoiningLive) pinStepOutputToBottom(state, nextStepIndex);
   notifyStateChange();
 }
 
@@ -526,19 +546,60 @@ function currentRowIndex(state: LoopState, rows: FlatRow[]): number | null {
   return null;
 }
 
+/** Pin step output to bottom; returns true when the pin flag actually changed. */
+function pinStepOutputToBottom(state: LoopState, stepIndex: number): boolean {
+  const step = state.steps[stepIndex];
+  if (!step || step.outputPinnedToBottom) return false;
+  step.outputPinnedToBottom = true;
+  return true;
+}
+
 function applyRowSelection(state: LoopState, row: FlatRow): void {
   const nextSessionID = row.kind === "background" ? row.sessionID : null;
+  const rejoiningLive =
+    row.kind === "step" &&
+    state.activeStepIndex !== null &&
+    row.stepIndex === state.activeStepIndex;
+  const nextManual = !rejoiningLive;
   if (
     state.selectedStepIndex === row.stepIndex &&
     state.selectedBackgroundSessionID === nextSessionID &&
-    state.manualStepSelection
+    state.manualStepSelection === nextManual
   ) {
+    if (rejoiningLive && pinStepOutputToBottom(state, row.stepIndex)) notifyStateChange();
     return;
   }
   state.selectedStepIndex = row.stepIndex;
   state.selectedBackgroundSessionID = nextSessionID;
-  state.manualStepSelection = true;
+  state.manualStepSelection = nextManual;
+  if (rejoiningLive) pinStepOutputToBottom(state, row.stepIndex);
   notifyStateChange();
+}
+
+export function selectFlatRow(state: LoopState, row: FlatRow): void {
+  applyRowSelection(state, row);
+}
+
+export function selectHistoryStepAt(state: LoopState, stepIndex: number): void {
+  const view = state.historyView;
+  if (view === null) return;
+  const entry = state.history[view.entryIndex];
+  if (entry === undefined || entry.steps.length === 0) return;
+  const nextStepIndex = Math.max(0, Math.min(entry.steps.length - 1, stepIndex));
+  if (nextStepIndex === view.stepIndex) return;
+  state.historyView = freshHistoryView(state, view.entryIndex, nextStepIndex);
+  notifyStateChange();
+}
+
+export function selectStepListRow(state: LoopState, rowIndex: number): void {
+  setFocusedPane(state, "steps");
+  if (state.historyView !== null) {
+    selectHistoryStepAt(state, rowIndex);
+    return;
+  }
+  const row = flattenRows(state)[rowIndex];
+  if (row === undefined) return;
+  applyRowSelection(state, row);
 }
 
 export function insertRestartAttempt(state: LoopState, stepIndex: number, reason: StepRestartReason): number {
@@ -826,6 +887,8 @@ export function dismissEscConfirm(state: LoopState): void {
 
 export function showHelp(state: LoopState): void {
   if (state.helpVisible) return;
+  state.promptModalVisible = false;
+  state.configModalVisible = false;
   state.helpVisible = true;
   notifyStateChange();
 }
@@ -834,6 +897,79 @@ export function hideHelp(state: LoopState): void {
   if (!state.helpVisible) return;
   state.helpVisible = false;
   notifyStateChange();
+}
+
+export function setStepPromptText(state: LoopState, stepIndex: number, promptText: string): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.promptText = promptText;
+  notifyStateChange();
+}
+
+export function setStepLooperMessageIDs(state: LoopState, stepIndex: number, messageIDs: readonly string[]): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.looperMessageIDs = [...messageIDs];
+  notifyStateChange();
+}
+
+export function hydrateResumableBootStep(
+  step: LoopStep,
+  checkpoint: {
+    readonly promptText?: string;
+    readonly sessionID?: string;
+    readonly looperMessageIDs?: readonly string[];
+    readonly title?: string;
+  },
+): void {
+  if (checkpoint.promptText !== undefined) step.promptText = checkpoint.promptText;
+  if (checkpoint.sessionID !== undefined) step.sessionID = checkpoint.sessionID;
+  if (checkpoint.looperMessageIDs !== undefined) step.looperMessageIDs = [...checkpoint.looperMessageIDs];
+  if (checkpoint.title !== undefined) step.title = checkpoint.title;
+}
+
+export function selectedOrActiveStep(state: LoopState): LoopStep | null {
+  const index = state.selectedStepIndex ?? state.activeStepIndex;
+  if (index === null) return null;
+  return state.steps[index] ?? null;
+}
+
+export function showPromptModal(state: LoopState): void {
+  if (state.promptModalVisible) return;
+  state.helpVisible = false;
+  state.configModalVisible = false;
+  state.promptModalVisible = true;
+  notifyStateChange();
+}
+
+export function hidePromptModal(state: LoopState): void {
+  if (!state.promptModalVisible) return;
+  state.promptModalVisible = false;
+  notifyStateChange();
+}
+
+export function togglePromptModal(state: LoopState): void {
+  if (state.promptModalVisible) hidePromptModal(state);
+  else showPromptModal(state);
+}
+
+export function showConfigModal(state: LoopState): void {
+  if (state.configModalVisible) return;
+  state.helpVisible = false;
+  state.promptModalVisible = false;
+  state.configModalVisible = true;
+  notifyStateChange();
+}
+
+export function hideConfigModal(state: LoopState): void {
+  if (!state.configModalVisible) return;
+  state.configModalVisible = false;
+  notifyStateChange();
+}
+
+export function toggleConfigModal(state: LoopState): void {
+  if (state.configModalVisible) hideConfigModal(state);
+  else showConfigModal(state);
 }
 
 export function resetIterationNavigationState(state: LoopState): void {
@@ -1003,6 +1139,8 @@ export function snapshotIterationToHistory(state: LoopState): void {
     status: step.status,
     ...(step.sessionID !== undefined ? { sessionID: step.sessionID } : {}),
     ...(step.title !== undefined ? { title: step.title } : {}),
+    ...(step.promptText !== undefined ? { promptText: step.promptText } : {}),
+    ...(step.looperMessageIDs !== undefined ? { looperMessageIDs: [...step.looperMessageIDs] } : {}),
     ...(step.restartReason !== undefined ? { restartReason: step.restartReason } : {}),
     ...(step.startedAt !== undefined ? { startedAt: step.startedAt } : {}),
     ...(step.finishedAt !== undefined ? { finishedAt: step.finishedAt } : {}),

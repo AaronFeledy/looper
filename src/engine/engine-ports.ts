@@ -58,13 +58,15 @@ export type EngineRecoveryChoice = "restart" | "nudge" | "quit";
 export type RunIterationHooks = {
   readonly onStepBegin?: (info: { readonly step: Step; readonly index: number; readonly totalSteps: number; readonly iteration: number; readonly title?: string }) => void;
   readonly onStepFinish?: (info: { readonly step: Step; readonly index: number; readonly nextIndex: number; readonly totalSteps: number; readonly iteration: number; readonly status: StepResult; readonly title?: string }) => void;
-  readonly onStepSession?: (info: { readonly iteration: number; readonly index: number; readonly stepName: string; readonly sessionID: string; readonly messageID: string; readonly title?: string }) => void;
+  readonly onStepSession?: (info: { readonly iteration: number; readonly index: number; readonly stepName: string; readonly sessionID: string; readonly messageID: string; readonly promptText?: string; readonly looperMessageIDs?: string[]; readonly title?: string }) => void;
 };
 
 export type ResumeSession = {
   readonly sessionID?: string;
   readonly messageID?: string;
   readonly stepName?: string;
+  readonly promptText?: string;
+  readonly looperMessageIDs?: string[];
 };
 
 export type EngineStepFailure = {
@@ -118,7 +120,6 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
-  readonly vcsSummary?: boolean;
   readonly prdDir?: string;
   readonly maxIterations?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;

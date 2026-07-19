@@ -6,7 +6,9 @@ import {
   exitHistoryView,
   historyMoveIteration,
   historyMoveStep,
+  selectStepListRow,
   selectedHistoryStep,
+  setFocusedPane,
   setHistoryViewOutput,
   snapshotIterationToHistory,
   type LoopState,
@@ -40,6 +42,24 @@ describe("iteration history capture", () => {
     expect(state.history[0]!.iteration).toBe(1);
     expect(state.history[0]!.steps[0]!.sessionID).toBe("ses_a");
     expect(state.history[1]!.steps[1]!.sessionID).toBeUndefined();
+  });
+
+  test("snapshot copies prompt ownership metadata without retaining mutable arrays", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step = state.steps[0];
+    expect(step).toBeDefined();
+    if (step === undefined) return;
+    state.iteration = 1;
+    step.status = "done";
+    step.promptText = "owned prompt";
+    step.looperMessageIDs = ["msg_owned"];
+
+    snapshotIterationToHistory(state);
+    step.promptText = "mutated prompt";
+    step.looperMessageIDs.push("msg_later");
+
+    expect(state.history[0]?.steps[0]?.promptText).toBe("owned prompt");
+    expect(state.history[0]?.steps[0]?.looperMessageIDs).toEqual(["msg_owned"]);
   });
 });
 
@@ -88,5 +108,20 @@ describe("history view navigation", () => {
 
     setHistoryViewOutput(state, "0:1:ses_a2", ["stale"], [1]);
     expect(state.historyView!.lines).toEqual(["hello"]);
+  });
+
+  test("selectStepListRow jumps to an absolute history step and focuses steps", () => {
+    const state = createLoopState({ maxIterations: 10, stepNames: ["a"] });
+    seedIteration(state, 1, ["ses_a1", "ses_a2", "ses_a3"]);
+    enterHistoryView(state);
+    setFocusedPane(state, "output");
+
+    selectStepListRow(state, 2);
+    expect(state.focusedPane).toBe("steps");
+    expect(state.historyView!.stepIndex).toBe(2);
+    expect(selectedHistoryStep(state)!.step.sessionID).toBe("ses_a3");
+
+    selectStepListRow(state, 99);
+    expect(state.historyView!.stepIndex).toBe(2);
   });
 });

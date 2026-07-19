@@ -101,10 +101,12 @@ Runtime dependencies stay frozen unless this document is changed first:
 7. `watchers/` emit typed events; they never import TUI state.
 8. `main.ts` imports only `cli/bootstrap`.
 
-## Frozen external contracts
+## Backward-compatible external contracts
 
-These contracts stay byte-identical during the migration. Move code behind
-them, but do not change the visible shape.
+These contracts remain backward compatible during the migration. Existing
+fields retain their meanings, while new optional fields may be added when old
+readers can safely ignore them and new readers accept files where they are
+absent. Move code behind these contracts without requiring a schema migration.
 
 ### `.looper-run.json`
 
@@ -117,13 +119,25 @@ Authoritative run pointer under `configDir`:
   stepName: string
   sessionID?: string
   messageID?: string
+  promptText?: string
+  looperMessageIDs?: string[]
   title?: string
   looperRunID?: string
   stepSessions?: { stepIndex: number; stepName: string; sessionID: string }[]
 }
 ```
 
-`sessionID` and `messageID` exist only while a step is in flight. `title` and
+`sessionID`, `messageID`, `promptText`, and `looperMessageIDs` exist only while
+a step is in flight. `messageID` selects the user turn whose assistant result
+classifies the step outcome. Independently, `looperMessageIDs` is the complete
+ownership set used to hide only Looper-authored user turns from rendered
+output. `promptText` preserves the exact Looper prompt exposed by the prompt
+dialog; it is not reconstructed during recovery. Follow-up Looper turns append
+their IDs to the copied ownership set.
+
+Files written before `promptText` and `looperMessageIDs` were introduced remain
+valid. When those fields are absent, recovery uses `messageID` as the sole known
+Looper-owned user-message ID and does not invent a prompt. `title` and
 `stepSessions` carry within an iteration and are dropped at the iteration
 boundary. Resuming remains the default. `--fresh` clears this file.
 
@@ -209,20 +223,31 @@ Attach URL resolution remains: CLI value, `opencode.serverUrl`,
 
 The schema stays frozen:
 
+Intentional consolidation exception: the former top-level `vcsSummary` option and Changes panel are retired in favor
+of the Diff panel. The loader continues to ignore this unknown top-level key so shipped YAML remains loadable, but it
+has no effect and users should remove it. Do not restore the option or panel.
+
 1. `opencode.serverUrl`
 2. `opencode.title.agent`
 3. `opencode.title.model`
 4. `opencode.title.variant`
 5. top-level `attachUrl`, alias for `opencode.serverUrl`
 6. `recovery.snapshots`
-7. top-level `context`
-8. `steps`
+7. top-level `timeout`
+8. top-level `permissionPolicy`
+9. top-level `questionPolicy`
+10. top-level `useSessionIdle`
+11. top-level `validateResources`
+12. top-level `prd`
+13. top-level `context`
+14. `steps`
 
 Per-step fields stay: `name`, `agent`, `model`, `variant`, `prompt`, `prefix`,
-`suffix`, `title`, and `context`.
+`suffix`, `args`, `timeout`, `permissionPolicy`, `questionPolicy`, `title`, and
+`context`.
 
 Prompt context keys stay: `datetime`, `repoDir`, `loopPosition`, `timebox`,
-`vcsDelta`, and `sessionIds`.
+`vcsDelta`, `sessionIds`, and `prd`.
 
 Config file discovery remains ordered:
 

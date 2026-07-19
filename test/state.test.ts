@@ -3,19 +3,20 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   cancelPendingNotify,
   createLoopState,
+  createStepRow,
+  hydrateResumableBootStep,
   prdPassingGain,
   resetPrdIterationBaseline,
+  setBranchDiffStatus,
   setPendingPermission,
   setPrdStatus,
   setPendingQuestion,
-  setStepVcsSummary,
   setTodos,
   subscribe,
   type PendingPermission,
   type PrdStatus,
   type PendingQuestion,
   type TodoItem,
-  type VcsChange,
 } from "../src/lib/state.ts";
 
 afterEach(() => {
@@ -34,7 +35,38 @@ describe("createLoopState panel defaults", () => {
     expect(state.todos).toEqual([]);
     expect(state.prd).toEqual({ kind: "loading" });
     expect(state.prdIterationBaseline).toBeNull();
-    expect(state.steps[0]!.vcsSummary).toBeUndefined();
+    expect(state.branchDiff).toEqual({ kind: "hidden" });
+  });
+});
+
+describe("setBranchDiffStatus", () => {
+  test("stores an ok status and notifies once", async () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    setBranchDiffStatus(state, { kind: "ok", additions: 12, deletions: 3, files: 4 });
+
+    expect(state.branchDiff).toEqual({ kind: "ok", additions: 12, deletions: 3, files: 4 });
+    await flushNotify();
+    expect(calls).toBe(1);
+  });
+
+  test("suppresses notify for an identical status", async () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    setBranchDiffStatus(state, { kind: "ok", additions: 1, deletions: 1, files: 1 });
+    await flushNotify();
+    let calls = 0;
+    subscribe(() => {
+      calls += 1;
+    });
+
+    setBranchDiffStatus(state, { kind: "ok", additions: 1, deletions: 1, files: 1 });
+
+    await flushNotify();
+    expect(calls).toBe(0);
   });
 });
 
@@ -192,21 +224,41 @@ describe("setTodos", () => {
   });
 });
 
-describe("setStepVcsSummary", () => {
-  test("stores per-step changes and notifies subscribers", async () => {
-    const state = createLoopState({ maxIterations: 1, stepNames: ["a", "b"] });
-    const changes: VcsChange[] = [
-      { file: "src/lib/state.ts", additions: 10, deletions: 2, status: "modified" },
-    ];
-    let calls = 0;
-    subscribe(() => {
-      calls += 1;
+describe("hydrateResumableBootStep", () => {
+  test("copies in-flight checkpoint fields onto a step row for pre-run TUI", () => {
+    const step = createStepRow("review");
+
+    hydrateResumableBootStep(step, {
+      promptText: "persisted review prompt",
+      sessionID: "ses_review",
+      looperMessageIDs: ["msg_looper"],
+      title: "Widget export",
     });
 
-    setStepVcsSummary(state, 1, changes);
-    expect(state.steps[1]!.vcsSummary).toEqual(changes);
-    expect(state.steps[0]!.vcsSummary).toBeUndefined();
-    await flushNotify();
-    expect(calls).toBe(1);
+    expect(step.promptText).toBe("persisted review prompt");
+    expect(step.sessionID).toBe("ses_review");
+    expect(step.looperMessageIDs).toEqual(["msg_looper"]);
+    expect(step.title).toBe("Widget export");
+  });
+
+  test("leaves unset checkpoint fields undefined", () => {
+    const step = createStepRow("review");
+
+    hydrateResumableBootStep(step, { promptText: "only prompt" });
+
+    expect(step.promptText).toBe("only prompt");
+    expect(step.sessionID).toBeUndefined();
+    expect(step.looperMessageIDs).toBeUndefined();
+    expect(step.title).toBeUndefined();
+  });
+
+  test("clones looperMessageIDs so later mutation of the checkpoint array is isolated", () => {
+    const step = createStepRow("review");
+    const ids = ["msg_a"];
+
+    hydrateResumableBootStep(step, { looperMessageIDs: ids });
+    ids.push("msg_b");
+
+    expect(step.looperMessageIDs).toEqual(["msg_a"]);
   });
 });

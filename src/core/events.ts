@@ -14,6 +14,8 @@ export type LooperEvent =
   | { readonly kind: "assistant.text"; readonly text: string }
   | { readonly kind: "assistant.error"; readonly message: string }
   | { readonly kind: "assistant.aborted"; readonly message: string }
+  | { readonly kind: "user.started" }
+  | { readonly kind: "user.text"; readonly text: string }
   | { readonly kind: "reasoning.started" }
   | { readonly kind: "reasoning.text"; readonly text: string }
   | { readonly kind: "tool.started"; readonly tool: string; readonly input: Record<string, unknown> }
