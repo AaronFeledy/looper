@@ -102,11 +102,21 @@ describe("recoveryNudge prompt injection", () => {
     expect(stub.promptTexts[0]).not.toContain("Continue working to completion if you haven't already.");
   });
 
-  test("recoveryNudge with an idle resume sends the nudge to the existing session", async () => {
+  test("recoveryNudge with an idle resume preserves prompt ownership while nudging the existing session", async () => {
     const { repoDir, configDir, state } = setup();
     const created: string[] = [];
     const prompted: string[] = [];
     const promptTexts: string[] = [];
+    const sessionCalls: Array<{ iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[] }> = [];
+    const priorPrompt = "exact prior Looper prompt";
+    const pluginPrompt = "plugin/server continuation prompt";
+    let sentMessageID = "";
+    let statusCalls = 0;
+    let subscriptions = 0;
+    let releasePrompt: (() => void) | undefined;
+    const backfilled = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
 
     const client = {
       session: {
@@ -114,23 +124,51 @@ describe("recoveryNudge prompt injection", () => {
           created.push("ses_new");
           return { data: { id: "ses_new" } };
         },
-        prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
+        prompt: async (params: { sessionID: string; messageID: string; parts: { type: string; text: string }[] }) => {
           prompted.push(params.sessionID);
+          sentMessageID = params.messageID;
           promptTexts.push(params.parts.map((part) => part.text).join("\n"));
+          await backfilled;
           writeIdleContinuationRecord(repoDir, params.sessionID);
           return { data: {} };
         },
-        status: async () => ({ data: { ses_old: { type: "idle" } } }),
-        messages: async () => ({ data: [] }),
+        status: async () => {
+          statusCalls += 1;
+          return { data: { ses_old: { type: statusCalls === 1 ? "idle" : "busy" } } };
+        },
+        messages: async () => {
+          releasePrompt?.();
+          return {
+            data: [
+              {
+                info: { id: "msg_old", role: "user", time: { created: 1 } },
+                parts: [{ id: "part_old", messageID: "msg_old", sessionID: "ses_old", type: "text", text: priorPrompt, time: { start: 1, end: 2 } }],
+              },
+              {
+                info: { id: "msg_plugin", role: "user", time: { created: 3 } },
+                parts: [{ id: "part_plugin", messageID: "msg_plugin", sessionID: "ses_old", type: "text", text: pluginPrompt, time: { start: 3, end: 4 } }],
+              },
+              {
+                info: { id: "asst_new", role: "assistant", parentID: sentMessageID, time: { created: 5, completed: 6 }, tokens: { output: 1 } },
+                parts: [{ id: "part_new", messageID: "asst_new", sessionID: "ses_old", type: "text", text: "nudge complete", time: { start: 5, end: 6 } }],
+              },
+            ],
+          };
+        },
         children: async () => ({ data: [] }),
         abort: async () => ({ data: {} }),
       },
       event: {
-        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
-          stream: (async function* (): AsyncGenerator<never> {
-            await waitForAbort(options.signal);
-          })(),
-        }),
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          subscriptions += 1;
+          return {
+            stream: subscriptions === 1
+              ? (async function* (): AsyncGenerator<never> {})()
+              : (async function* (): AsyncGenerator<never> {
+                  await waitForAbort(options.signal);
+                })(),
+          };
+        },
       },
     } as unknown as OpencodeClient;
 
@@ -141,7 +179,9 @@ describe("recoveryNudge prompt injection", () => {
       repoDir,
       configDir,
       recoveryNudge: true,
-      resume: { sessionID: "ses_old", messageID: "msg_old", stepName: "Build" },
+      resume: { sessionID: "ses_old", messageID: "msg_old", stepName: "Build", promptText: priorPrompt, looperMessageIDs: ["msg_old"] },
+      contextPolicy: CONTEXT_OFF,
+      hooks: { onStepSession: (info) => sessionCalls.push(info) },
     });
 
     expect(result).toBe("complete");
@@ -150,6 +190,18 @@ describe("recoveryNudge prompt injection", () => {
     expect(promptTexts[0]).toContain("Continue working to completion if you haven't already.");
     expect(promptTexts[0]).toContain("If the work is already complete, report the result.");
     expect(promptTexts[0]).toContain("build from scratch\n");
+    expect(state.steps[0]?.outputLines.join("\n")).not.toContain(priorPrompt);
+    expect(state.steps[0]?.outputLines.join("\n")).toContain(pluginPrompt);
+    expect(state.steps[0]?.promptText).toBe(promptTexts[0]);
+    expect(sessionCalls.at(-1)).toEqual({
+      iteration: 1,
+      index: 0,
+      stepName: "Build",
+      sessionID: "ses_old",
+      messageID: sentMessageID,
+      promptText: promptTexts[0],
+      looperMessageIDs: ["msg_old", sentMessageID],
+    });
   });
 
   test("quit during resume health recovery stops without finishing the step as skipped", async () => {

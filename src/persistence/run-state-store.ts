@@ -30,6 +30,8 @@ export type RunStatePositionInput = {
   readonly stepName?: string;
   readonly sessionID?: string;
   readonly messageID?: string;
+  readonly promptText?: string;
+  readonly looperMessageIDs?: readonly string[];
   readonly title?: string;
   readonly looperRunID?: string;
   readonly stepSessions?: StepSessionEntry[];
@@ -87,9 +89,11 @@ function savePosition(input: RunStatePositionInput): void {
     stepName,
     ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}),
     ...(input.messageID !== undefined ? { messageID: input.messageID } : {}),
+    ...(input.promptText !== undefined ? { promptText: input.promptText } : {}),
+    ...(input.looperMessageIDs !== undefined ? { looperMessageIDs: [...input.looperMessageIDs] } : {}),
     ...(input.title !== undefined ? { title: input.title } : {}),
     ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}),
-    ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions } : {}),
+    ...(input.stepSessions !== undefined ? { stepSessions: [...input.stepSessions] } : {}),
   });
 }
 
@@ -118,7 +122,7 @@ function saveAdvance(input: RunStateAdvanceInput): void {
     stepName: nextStep.name,
     ...(title !== undefined ? { title } : {}),
     ...(looperRunID !== undefined ? { looperRunID } : {}),
-    ...(stepSessions !== undefined ? { stepSessions } : {}),
+    ...(stepSessions !== undefined ? { stepSessions: [...stepSessions] } : {}),
   });
 }
 

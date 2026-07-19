@@ -82,10 +82,13 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
       firstIterationStepSessions = stepSessionsForPlan(runState, startIteration);
       looperRunID = runState.looperRunID;
       if (runState.sessionID !== undefined) {
+        const looperMessageIDs = runState.looperMessageIDs ?? (runState.messageID !== undefined ? [runState.messageID] : undefined);
         firstIterationResume = {
           sessionID: runState.sessionID,
           ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
           stepName: runState.stepName,
+          ...(runState.promptText !== undefined ? { promptText: runState.promptText } : {}),
+          ...(looperMessageIDs !== undefined ? { looperMessageIDs: [...looperMessageIDs] } : {}),
         };
       }
     } else {
@@ -195,7 +198,6 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.permissionPolicy !== undefined ? { permissionPolicy: input.permissionPolicy } : {}),
         ...(input.questionPolicy !== undefined ? { questionPolicy: input.questionPolicy } : {}),
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
-        ...(input.vcsSummary !== undefined ? { vcsSummary: input.vcsSummary } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
         ...(input.contextPolicy !== undefined ? { contextPolicy: input.contextPolicy } : {}),
         ...(iteration === startIteration && firstIterationResumed ? { resumedPriorSteps: true } : {}),

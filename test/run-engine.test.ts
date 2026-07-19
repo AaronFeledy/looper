@@ -17,7 +17,7 @@ function memoryStore(initial: RunState | null = null): RunStateStore {
       const step = input.steps[input.stepIndex];
       const stepName = input.stepName ?? step?.name;
       if (stepName === undefined) return;
-      state = { iteration: input.iteration, stepIndex: input.stepIndex, stepName, updatedAt: "now", ...(input.title !== undefined ? { title: input.title } : {}), ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}), ...(input.stepSessions !== undefined ? { stepSessions: input.stepSessions } : {}), ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}), ...(input.messageID !== undefined ? { messageID: input.messageID } : {}) };
+      state = { iteration: input.iteration, stepIndex: input.stepIndex, stepName, updatedAt: "now", ...(input.title !== undefined ? { title: input.title } : {}), ...(input.looperRunID !== undefined ? { looperRunID: input.looperRunID } : {}), ...(input.stepSessions !== undefined ? { stepSessions: [...input.stepSessions] } : {}), ...(input.sessionID !== undefined ? { sessionID: input.sessionID } : {}), ...(input.messageID !== undefined ? { messageID: input.messageID } : {}), ...(input.promptText !== undefined ? { promptText: input.promptText } : {}), ...(input.looperMessageIDs !== undefined ? { looperMessageIDs: [...input.looperMessageIDs] } : {}) };
     },
     saveAdvance: (input) => {
       const first = input.steps[0];
@@ -54,14 +54,34 @@ describe("computeRunResumePlan", () => {
   });
 
   test("run-state resumes by step name with title, session, and prior step sessions", () => {
-    const store = memoryStore({ iteration: 2, stepIndex: 0, stepName: "review", sessionID: "ses", messageID: "msg", title: "work", looperRunID: "run-old", stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses-build" }], updatedAt: "now" });
+    const store = memoryStore({ iteration: 2, stepIndex: 0, stepName: "review", sessionID: "ses", messageID: "msg_plugin", promptText: "persisted prompt", looperMessageIDs: ["msg_looper"], title: "work", looperRunID: "run-old", stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses-build" }], updatedAt: "now" });
     const plan = computeRunResumePlan({ fresh: false, maxIterations: 5, steps: [{ name: "build" }, { name: "review" }], store, legacyResumeStepIndex: () => 0 });
     expect(plan.startIteration).toBe(2);
     expect(plan.firstIterationStartStepIndex).toBe(1);
-    expect(plan.firstIterationResume).toEqual({ sessionID: "ses", messageID: "msg", stepName: "review" });
+    expect(plan.firstIterationResume).toEqual({
+      sessionID: "ses",
+      messageID: "msg_plugin",
+      stepName: "review",
+      promptText: "persisted prompt",
+      looperMessageIDs: ["msg_looper"],
+    });
     expect(plan.firstIterationTitle).toBe("work");
     expect(plan.firstIterationStepSessions).toEqual([{ stepIndex: 0, stepName: "build", sessionID: "ses-build" }]);
     expect(plan.looperRunID).toBe("run-old");
+  });
+
+  test("legacy crash resume treats the persisted message as the sole known Looper-owned ID", () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 0, stepName: "build", sessionID: "ses", messageID: "msg_old", updatedAt: "now" });
+
+    const plan = computeRunResumePlan({ fresh: false, maxIterations: 5, steps: [{ name: "build" }], store, legacyResumeStepIndex: () => 0 });
+
+    expect(plan.firstIterationResume).toEqual({
+      sessionID: "ses",
+      messageID: "msg_old",
+      stepName: "build",
+      looperMessageIDs: ["msg_old"],
+    });
+    expect(plan.firstIterationResume?.promptText).toBeUndefined();
   });
 
   test("max-iterations-exceeded resets to a fresh run and asks the store to clear artifacts", () => {
@@ -85,7 +105,7 @@ describe("runEngine", () => {
         calls.push(`iteration:${iteration}`);
       },
     };
-    await runEngine({ maxIterations: 2, fresh: false, waitProvided: false, waitDuration: 0, repoDir: "/repo", configDir: "/cfg", client: {}, store, hooks, loadSteps: () => steps, currentBranch: async () => "main", createLooperRunID: () => "run-1", legacyResumeStepIndex: () => 0, runIteration: async (input) => { input.hooks?.onStepBegin?.({ step: steps[0]!, index: 0, totalSteps: 2, iteration: input.iteration, title: "title" }); input.hooks?.onStepSession?.({ iteration: input.iteration, index: 0, stepName: "build", sessionID: `ses-${input.iteration}`, messageID: `msg-${input.iteration}`, title: "title" }); input.hooks?.onStepFinish?.({ step: steps[0]!, index: 0, nextIndex: 2, totalSteps: 2, iteration: input.iteration, status: "done", title: "title" }); return "complete"; } });
+    await runEngine({ maxIterations: 2, fresh: false, waitProvided: false, waitDuration: 0, repoDir: "/repo", configDir: "/cfg", client: {}, store, hooks, loadSteps: () => steps, currentBranch: async () => "main", createLooperRunID: () => "run-1", legacyResumeStepIndex: () => 0, runIteration: async (input) => { input.hooks?.onStepBegin?.({ step: steps[0]!, index: 0, totalSteps: 2, iteration: input.iteration, title: "title" }); input.hooks?.onStepSession?.({ iteration: input.iteration, index: 0, stepName: "build", sessionID: `ses-${input.iteration}`, messageID: `msg-${input.iteration}`, promptText: "persist me", looperMessageIDs: [`msg-${input.iteration}`], title: "title" }); expect(store.read()).toMatchObject({ promptText: "persist me", looperMessageIDs: [`msg-${input.iteration}`] }); input.hooks?.onStepFinish?.({ step: steps[0]!, index: 0, nextIndex: 2, totalSteps: 2, iteration: input.iteration, status: "done", title: "title" }); expect(store.read()?.promptText).toBeUndefined(); expect(store.read()?.looperMessageIDs).toBeUndefined(); return "complete"; } });
     expect(calls).toEqual(["iteration:1", "iteration:2"]);
     expect(store.read()).toBeNull();
   });

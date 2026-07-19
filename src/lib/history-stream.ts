@@ -27,7 +27,7 @@ export function startHistoryStreamer({
 }): { stop: () => void } {
   const inflight = new Set<string>();
 
-  const fetch = async (sessionKey: string, sessionID: string): Promise<void> => {
+  const fetch = async (sessionKey: string, sessionID: string, hiddenUserMessageIDs: readonly string[]): Promise<void> => {
     if (inflight.has(sessionKey)) return;
     inflight.add(sessionKey);
     try {
@@ -36,7 +36,7 @@ export function startHistoryStreamer({
         setHistoryViewError(state, sessionKey, result.error ? formatError(result.error) : "no messages returned");
         return;
       }
-      const rendered = renderSession(result.data);
+      const rendered = renderSession(result.data, new Set(hiddenUserMessageIDs));
       setHistoryViewOutput(state, sessionKey, rendered.lines, rendered.lineTimes);
       setHistoryViewEvents(state, sessionKey, rendered.events, rendered.eventTimes);
     } catch (error) {
@@ -54,7 +54,7 @@ export function startHistoryStreamer({
     const sessionKey = historyStepSessionKey(view.entryIndex, view.stepIndex, sessionID);
     if (sessionKey === null || sessionID === undefined) return;
     if (sessionKey === view.sessionKey) return;
-    void fetch(sessionKey, sessionID);
+    void fetch(sessionKey, sessionID, [...(selected?.step.looperMessageIDs ?? [])]);
   };
 
   const unsubscribe = subscribe(sync);

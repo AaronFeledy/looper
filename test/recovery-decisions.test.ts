@@ -27,6 +27,25 @@ describe("recoveryResumeForChoice", () => {
     });
   });
 
+  test("nudge copies the persisted prompt and Looper-owned message IDs", () => {
+    // Given
+    const looperMessageIDs = ["msg_initial"];
+    const state = runState({ promptText: "exact persisted prompt", looperMessageIDs });
+
+    // When
+    const decision = recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: state });
+    looperMessageIDs.push("msg_later");
+
+    // Then
+    expect(decision).toEqual({
+      sessionID: "ses_failed",
+      messageID: "msg_failed",
+      stepName: "Build",
+      promptText: "exact persisted prompt",
+      looperMessageIDs: ["msg_initial"],
+    });
+  });
+
   test("nudge ignores stale or incomplete run state", () => {
     expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ sessionID: "ses_other" }) })).toBeUndefined();
     expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ messageID: undefined }) })).toBeUndefined();

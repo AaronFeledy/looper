@@ -2,9 +2,11 @@ import type { RecoveryChoice } from "./state.ts";
 import type { RunState } from "./state-files.ts";
 
 export type RecoveryResumeDecision = {
-  sessionID: string;
-  messageID: string;
-  stepName?: string;
+  readonly sessionID: string;
+  readonly messageID: string;
+  readonly stepName?: string;
+  readonly promptText?: string;
+  readonly looperMessageIDs?: string[];
 };
 
 export function recoveryResumeForChoice({
@@ -25,6 +27,8 @@ export function recoveryResumeForChoice({
     sessionID: failedSessionID,
     messageID: runState.messageID,
     ...(failedStepName !== undefined ? { stepName: failedStepName } : {}),
+    ...(runState.promptText !== undefined ? { promptText: runState.promptText } : {}),
+    ...(runState.looperMessageIDs !== undefined ? { looperMessageIDs: [...runState.looperMessageIDs] } : {}),
   };
 }
 

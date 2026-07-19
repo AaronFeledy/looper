@@ -41,6 +41,24 @@ describe("iteration history capture", () => {
     expect(state.history[0]!.steps[0]!.sessionID).toBe("ses_a");
     expect(state.history[1]!.steps[1]!.sessionID).toBeUndefined();
   });
+
+  test("snapshot copies prompt ownership metadata without retaining mutable arrays", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step = state.steps[0];
+    expect(step).toBeDefined();
+    if (step === undefined) return;
+    state.iteration = 1;
+    step.status = "done";
+    step.promptText = "owned prompt";
+    step.looperMessageIDs = ["msg_owned"];
+
+    snapshotIterationToHistory(state);
+    step.promptText = "mutated prompt";
+    step.looperMessageIDs.push("msg_later");
+
+    expect(state.history[0]?.steps[0]?.promptText).toBe("owned prompt");
+    expect(state.history[0]?.steps[0]?.looperMessageIDs).toEqual(["msg_owned"]);
+  });
 });
 
 describe("history view navigation", () => {

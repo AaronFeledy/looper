@@ -47,6 +47,8 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
         stepName: info.stepName,
         sessionID: info.sessionID,
         messageID: info.messageID,
+        ...(info.promptText !== undefined ? { promptText: info.promptText } : {}),
+        ...(info.looperMessageIDs !== undefined ? { looperMessageIDs: [...info.looperMessageIDs] } : {}),
         ...(input.persistTitles && info.title !== undefined ? { title: info.title } : {}),
         looperRunID: input.looperRunID,
         stepSessions,

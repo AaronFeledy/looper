@@ -321,7 +321,7 @@ describe("onFirstAssistantContent", () => {
     expect(fired).toBe(1);
   });
 
-  test('skips user messages entirely', async () => {
+  test('does not treat visible user messages as first assistant content', async () => {
     let fired = 0;
     const userMessage: Event = {
       type: "message.updated",
@@ -336,6 +336,132 @@ describe("onFirstAssistantContent", () => {
       onFirstAssistantContent: () => { fired += 1; },
     });
     expect(fired).toBe(0);
+  });
+});
+
+describe("user message visibility", () => {
+  test("prints plugin user messages as User sections", async () => {
+    const events: Array<{ kind: string; text?: string }> = [];
+    const userMessage: Event = {
+      type: "message.updated",
+      properties: { info: { id: "msg_user", role: "user", sessionID: SID, time: { created: 1_700_000_000_000 } } },
+    } as unknown as Event;
+    const userPart: Event = {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "p_user",
+          sessionID: SID,
+          messageID: "msg_user",
+          type: "text",
+          text: "plugin injected\nsecond line",
+          time: { start: 1_700_000_000_000, end: 1_700_000_000_100 },
+        },
+      },
+    } as unknown as Event;
+    await consumeSessionEvents(makeStream([userMessage, userPart]), SID, {
+      pushLine: () => {},
+      onEvent: (event) => {
+        if (event.kind === "user.started" || event.kind === "user.text") events.push(event);
+      },
+    });
+    expect(events).toEqual([
+      { kind: "user.started" },
+      { kind: "user.text", text: "plugin injected" },
+      { kind: "user.text", text: "second line" },
+    ]);
+  });
+
+  test("hides looper prompt message IDs while still printing later user messages", async () => {
+    const events: Array<{ kind: string; text?: string }> = [];
+    const hidden = new Set<string>(["msg_looper"]);
+    const stream = makeStream([
+      {
+        type: "message.updated",
+        properties: { info: { id: "msg_looper", role: "user", sessionID: SID, time: { created: 1 } } },
+      } as unknown as Event,
+      {
+        type: "message.part.updated",
+        properties: {
+          part: { id: "p_looper", sessionID: SID, messageID: "msg_looper", type: "text", text: "looper prompt", time: { end: 2 } },
+        },
+      } as unknown as Event,
+      {
+        type: "message.updated",
+        properties: { info: { id: "msg_plugin", role: "user", sessionID: SID, time: { created: 3 } } },
+      } as unknown as Event,
+      {
+        type: "message.part.updated",
+        properties: {
+          part: { id: "p_plugin", sessionID: SID, messageID: "msg_plugin", type: "text", text: "plugin turn", time: { end: 4 } },
+        },
+      } as unknown as Event,
+    ]);
+    await consumeSessionEvents(stream, SID, {
+      pushLine: () => {},
+      hiddenUserMessageIDs: hidden,
+      onEvent: (event) => {
+        if (event.kind === "user.started" || event.kind === "user.text") events.push(event);
+      },
+    });
+    expect(events).toEqual([
+      { kind: "user.started" },
+      { kind: "user.text", text: "plugin turn" },
+    ]);
+  });
+
+  test("offline rendering is unfiltered by default so plugin user turns stay visible", () => {
+    const rendered = renderSession([
+      {
+        info: { id: "msg_plugin", role: "user", time: { created: 1 } } as never,
+        parts: [{ id: "p_plugin", messageID: "msg_plugin", type: "text", text: "plugin continuation" } as never],
+      },
+    ]);
+
+    expect(rendered.events).toEqual([
+      { kind: "user.started" },
+      { kind: "user.text", text: "plugin continuation" },
+    ]);
+  });
+
+  test("offline rendering hides multiple explicit Looper-owned user message IDs", () => {
+    const rendered = renderSession(
+      [
+        {
+          info: { id: "msg_looper_1", role: "user", time: { created: 1 } } as never,
+          parts: [{ id: "p_looper_1", messageID: "msg_looper_1", type: "text", text: "first prompt" } as never],
+        },
+        {
+          info: { id: "msg_plugin", role: "user", time: { created: 2 } } as never,
+          parts: [{ id: "p_plugin", messageID: "msg_plugin", type: "text", text: "plugin continuation" } as never],
+        },
+        {
+          info: { id: "msg_looper_2", role: "user", time: { created: 3 } } as never,
+          parts: [{ id: "p_looper_2", messageID: "msg_looper_2", type: "text", text: "second prompt" } as never],
+        },
+      ],
+      new Set(["msg_looper_1", "msg_looper_2"]),
+    );
+
+    expect(rendered.events).toEqual([
+      { kind: "user.started" },
+      { kind: "user.text", text: "plugin continuation" },
+    ]);
+  });
+
+  test("offline rendering does not flush unterminated hidden user text", () => {
+    const rendered = renderSession(
+      [
+        {
+          info: { id: "msg_looper", role: "user", time: { created: 1 } } as never,
+          parts: [{ id: "p_looper", messageID: "msg_looper", type: "text", text: "unterminated hidden prompt" } as never],
+        },
+      ],
+      new Set(["msg_looper"]),
+    );
+
+    expect(rendered.events).toEqual([]);
+    expect(rendered.lines).toEqual([]);
   });
 });
 

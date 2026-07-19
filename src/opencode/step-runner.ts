@@ -2,7 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
@@ -28,7 +28,7 @@ export type RunOpenCodeStepOptions = {
   step: Step;
   sessionID?: string;
   onFirstAssistantContent?: () => void;
-  onSessionBound?: (info: { sessionID: string; messageID: string }) => void;
+  onSessionBound?: (info: { sessionID: string; messageID: string; promptText: string; looperMessageIDs: string[] }) => void;
   timeoutMsOverride?: number;
   sessionMetadata?: LooperSessionMetadataInput;
   permissionPolicy?: PermissionPolicy;
@@ -157,15 +157,17 @@ export async function runOpenCodeStep({
     }
     pushLine(`[looper] session=${sid}`);
     const boundSessionID = sid;
+    const hiddenUserMessageIDs = new Set<string>(activeStep.looperMessageIDs ?? []);
+    setStepPromptText(state, stepIndex, prompt);
 
-	  const consumer = createSessionEventConsumer(boundSessionID, {
-	    pushLine,
-	    pushLines,
-	    onEvent: (event, at) => {
-	      pushAgentEvent(state, event, at);
-	      pushStepOutputEvent(state, stepIndex, event, at);
-	    },
-	    ...createRunnerEventController({
+    const consumer = createSessionEventConsumer(boundSessionID, {
+      pushLine,
+      pushLines,
+      onEvent: (event, at) => {
+        pushAgentEvent(state, event, at);
+        pushStepOutputEvent(state, stepIndex, event, at);
+      },
+      ...createRunnerEventController({
         state,
         client,
         repoDir,
@@ -178,6 +180,7 @@ export async function runOpenCodeStep({
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
+      hiddenUserMessageIDs,
       ...(onFirstAssistantContent ? { onFirstAssistantContent } : {}),
     });
 
@@ -205,8 +208,11 @@ export async function runOpenCodeStep({
     const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
+    hiddenUserMessageIDs.add(messageID);
+    const looperMessageIDs = [...hiddenUserMessageIDs];
+    setStepLooperMessageIDs(state, stepIndex, looperMessageIDs);
     eventStream.setSentMessageID(messageID);
-    onSessionBound?.({ sessionID: sid, messageID });
+    onSessionBound?.({ sessionID: sid, messageID, promptText: prompt, looperMessageIDs: [...looperMessageIDs] });
     pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant !== undefined ? ` variant=${variant}` : ""} messageID=${messageID})`);
     const result = await client.session.prompt(
       {

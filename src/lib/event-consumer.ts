@@ -2,6 +2,7 @@ import type { Event, Message, Part } from "@opencode-ai/sdk/v2";
 
 import type { LooperEvent } from "../core/events.ts";
 import { formatLooperEvent } from "../presentation/legacy-line-format.ts";
+import { orderMessagesForRender } from "./omo-internal-user.ts";
 
 type PermissionAskedProperties = Extract<Event, { type: "permission.asked" }>["properties"];
 type QuestionAskedProperties = Extract<Event, { type: "question.asked" }>["properties"];
@@ -40,10 +41,18 @@ export type EventConsumerCallbacks = {
   onQuestionRejected?: (payload: QuestionRejectedPayload) => void;
   onSessionIdle?: (payload: SessionIdlePayload) => void;
   onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
+  /**
+   * User message IDs that should not be printed (e.g. looper's own step prompt).
+   * Mutable: callers may add IDs after the consumer is constructed (prompt is
+   * sent after the event stream starts).
+   */
+  hiddenUserMessageIDs?: Set<string>;
 };
 
+type TextPartKind = "text" | "reasoning" | "user";
+
 type TextPartState = {
-  kind: "text" | "reasoning";
+  kind: TextPartKind;
   buffer: string;
   flushed: number;
   headerPrinted: boolean;
@@ -142,12 +151,16 @@ function createLineEmitter(options: LineEmitterOptions): EmitLooperEvent {
   };
 }
 
-function textStartedEvent(kind: "text" | "reasoning"): LooperEvent {
-  return kind === "reasoning" ? { kind: "reasoning.started" } : { kind: "assistant.started" };
+function textStartedEvent(kind: TextPartKind): LooperEvent {
+  if (kind === "reasoning") return { kind: "reasoning.started" };
+  if (kind === "user") return { kind: "user.started" };
+  return { kind: "assistant.started" };
 }
 
-function textChunkEvent(kind: "text" | "reasoning", text: string): LooperEvent {
-  return kind === "reasoning" ? { kind: "reasoning.text", text } : { kind: "assistant.text", text };
+function textChunkEvent(kind: TextPartKind, text: string): LooperEvent {
+  if (kind === "reasoning") return { kind: "reasoning.text", text };
+  if (kind === "user") return { kind: "user.text", text };
+  return { kind: "assistant.text", text };
 }
 
 function printTextHeader(state: TextPartState, emit: EmitLooperEvent): void {
@@ -176,7 +189,7 @@ function flushRemaining(state: TextPartState, emit: EmitLooperEvent): void {
 
 type TextPartInput = {
   readonly partID: string;
-  readonly kind: "text" | "reasoning";
+  readonly kind: TextPartKind;
   readonly fullText: string;
   readonly startedAt?: number;
 };
@@ -198,7 +211,19 @@ function handlePartUpdate(
   part: Part,
   emit: EmitLooperEvent,
   messageCreated: number = Date.now(),
+  role: "assistant" | "user" = "assistant",
 ): void {
+  if (role === "user") {
+    if (part.type !== "text") return;
+    const startedAt = partStartAt(part, messageCreated);
+    syncTextLikePart(parts, { partID: part.id, kind: "user", fullText: part.text, startedAt }, emit);
+    if (part.time?.end !== undefined) {
+      const state = parts.get(part.id);
+      if (state && state.kind === "user") flushRemaining(state, emit);
+    }
+    return;
+  }
+
   switch (part.type) {
     case "step-start": {
       if (parts.has(part.id)) return;
@@ -286,7 +311,7 @@ function handlePartUpdate(
 function handlePartDelta(parts: Map<string, PartState>, delta: PendingPartDelta, emit: EmitLooperEvent): void {
   const state = parts.get(delta.partID);
   if (!state) return;
-  if (state.kind !== "text" && state.kind !== "reasoning") return;
+  if (state.kind !== "text" && state.kind !== "reasoning" && state.kind !== "user") return;
   if (delta.field !== "text") return;
   state.buffer += delta.delta;
   flushNewlines(state, emit);
@@ -329,6 +354,7 @@ export function createSessionEventConsumer(
 
   const roleForPart = (messageID: string): "user" | "assistant" | undefined => messageRoles.get(messageID);
   const createdForMessage = (messageID: string): number => messageCreatedById.get(messageID) ?? Date.now();
+  const isHiddenUserMessage = (messageID: string): boolean => callbacks.hiddenUserMessageIDs?.has(messageID) === true;
 
   const emitForPart = (part: Part, messageCreated: number): EmitLooperEvent => {
     const start = partStartAt(part, messageCreated);
@@ -362,29 +388,33 @@ export function createSessionEventConsumer(
     callbacks.onSessionError?.(message);
   };
 
-  const replayPendingAssistantParts = (messageID: string): void => {
-    if (roleForPart(messageID) !== "assistant") return;
+  const dropPendingParts = (messageID: string): void => {
+    pendingPartUpdates.delete(messageID);
+    pendingPartDeltas.delete(messageID);
+  };
+
+  const replayPendingParts = (messageID: string, role: "assistant" | "user"): void => {
+    if (role === "user" && isHiddenUserMessage(messageID)) {
+      dropPendingParts(messageID);
+      return;
+    }
     const messageCreated = createdForMessage(messageID);
     const updates = pendingPartUpdates.get(messageID) ?? [];
     for (const part of updates) {
-      handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated);
-      if (part.type === "text") fireFirstContent();
+      handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated, role);
+      if (role === "assistant" && part.type === "text") fireFirstContent();
     }
     pendingPartUpdates.delete(messageID);
 
     const deltas = pendingPartDeltas.get(messageID) ?? [];
     for (const delta of deltas) {
       const state = parts.get(delta.partID);
-      stamp = (state && (state.kind === "text" || state.kind === "reasoning") ? state.startedAt : undefined) ?? messageCreated;
+      stamp =
+        (state && (state.kind === "text" || state.kind === "reasoning" || state.kind === "user") ? state.startedAt : undefined) ??
+        messageCreated;
       handlePartDelta(parts, delta, emit);
-      if (delta.field === "text") fireFirstContent();
+      if (role === "assistant" && delta.field === "text") fireFirstContent();
     }
-    pendingPartDeltas.delete(messageID);
-  };
-
-  const dropPendingUserParts = (messageID: string): void => {
-    if (roleForPart(messageID) !== "user") return;
-    pendingPartUpdates.delete(messageID);
     pendingPartDeltas.delete(messageID);
   };
 
@@ -402,42 +432,47 @@ export function createSessionEventConsumer(
       case "message.updated": {
         rememberMessage(event.properties.info);
         printAssistantMessageError(event.properties.info);
-        replayPendingAssistantParts(event.properties.info.id);
-        dropPendingUserParts(event.properties.info.id);
+        const role = event.properties.info.role;
+        if (role === "assistant") replayPendingParts(event.properties.info.id, "assistant");
+        else if (role === "user") replayPendingParts(event.properties.info.id, "user");
         break;
       }
       case "message.part.updated": {
         const part = event.properties.part;
         partMessages.set(part.id, part.messageID);
         const role = roleForPart(part.messageID);
-        if (role === "user") break;
+        if (role === "user" && isHiddenUserMessage(part.messageID)) break;
         if (role === undefined) {
           const pending = pendingPartUpdates.get(part.messageID) ?? [];
           pending.push(part);
           pendingPartUpdates.set(part.messageID, pending);
           break;
         }
+        if (role !== "assistant" && role !== "user") break;
         const messageCreated = createdForMessage(part.messageID);
-        handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated);
-        if (part.type === "text") fireFirstContent();
+        handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated, role);
+        if (role === "assistant" && part.type === "text") fireFirstContent();
         break;
       }
       case "message.part.delta": {
         const messageID = event.properties.messageID;
         partMessages.set(event.properties.partID, messageID);
         const role = roleForPart(messageID);
-        if (role === "user") break;
+        if (role === "user" && isHiddenUserMessage(messageID)) break;
         if (role === undefined) {
           const pending = pendingPartDeltas.get(messageID) ?? [];
           pending.push({ partID: event.properties.partID, field: event.properties.field, delta: event.properties.delta });
           pendingPartDeltas.set(messageID, pending);
           break;
         }
+        if (role !== "assistant" && role !== "user") break;
         const messageCreated = createdForMessage(messageID);
         const state = parts.get(event.properties.partID);
-        stamp = (state && (state.kind === "text" || state.kind === "reasoning") ? state.startedAt : undefined) ?? messageCreated;
+        stamp =
+          (state && (state.kind === "text" || state.kind === "reasoning" || state.kind === "user") ? state.startedAt : undefined) ??
+          messageCreated;
         handlePartDelta(parts, { partID: event.properties.partID, field: event.properties.field, delta: event.properties.delta }, emit);
-        if (event.properties.field === "text") fireFirstContent();
+        if (role === "assistant" && event.properties.field === "text") fireFirstContent();
         break;
       }
       case "message.part.removed":
@@ -504,28 +539,28 @@ export function createSessionEventConsumer(
       for await (const event of stream) handleEvent(event);
     },
     backfill: (messages: { info: Message; parts: Part[] }[]): void => {
-      for (const entry of messages) {
+      for (const entry of orderMessagesForRender(messages)) {
         const info = entry.info;
         rememberMessage(info);
         printAssistantMessageError(info);
-        if (info.role !== "assistant") {
-          dropPendingUserParts(info.id);
+        if (info.role === "user" && isHiddenUserMessage(info.id)) {
+          dropPendingParts(info.id);
           continue;
         }
         const messageCreated = createdForMessage(info.id);
         for (const part of entry.parts) {
           partMessages.set(part.id, part.messageID);
-          handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated);
-          if (part.type === "text") fireFirstContent();
+          handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated, info.role);
+          if (info.role === "assistant" && part.type === "text") fireFirstContent();
         }
-        replayPendingAssistantParts(info.id);
+        replayPendingParts(info.id, info.role);
       }
     },
     flush: (): void => {
       for (const [partID, state] of parts) {
-        if (state.kind !== "text" && state.kind !== "reasoning") continue;
+        if (state.kind !== "text" && state.kind !== "reasoning" && state.kind !== "user") continue;
         const messageID = partMessages.get(partID);
-        if (messageID && roleForPart(messageID) === "user") continue;
+        if (messageID !== undefined && roleForPart(messageID) === "user" && isHiddenUserMessage(messageID)) continue;
         stamp = state.startedAt ?? (messageID !== undefined ? createdForMessage(messageID) : Date.now());
         flushRemaining(state, emit);
       }
@@ -593,7 +628,10 @@ export type SessionRender = {
   readonly lineTimes: number[];
 };
 
-export function renderSession(messages: { info: Message; parts: Part[] }[]): SessionRender {
+export function renderSession(
+  messages: { info: Message; parts: Part[] }[],
+  hiddenUserMessageIDs: ReadonlySet<string> = new Set<string>(),
+): SessionRender {
   const events: LooperEvent[] = [];
   const eventTimes: number[] = [];
   const lines: string[] = [];
@@ -610,8 +648,9 @@ export function renderSession(messages: { info: Message; parts: Part[] }[]): Ses
     }
   };
 
-  for (const entry of messages) {
-    if (entry.info.role !== "assistant") continue;
+  for (const entry of orderMessagesForRender(messages)) {
+    if (entry.info.role !== "assistant" && entry.info.role !== "user") continue;
+    if (entry.info.role === "user" && hiddenUserMessageIDs.has(entry.info.id)) continue;
     const messageCreated = messageCreatedAt(entry.info);
     for (const part of entry.parts) {
       const start = partStartAt(part, messageCreated);
@@ -628,12 +667,13 @@ export function renderSession(messages: { info: Message; parts: Part[] }[]): Ses
           emit(event, delivery);
         },
         messageCreated,
+        entry.info.role,
       );
     }
   }
 
   for (const state of partsMap.values()) {
-    if (state.kind !== "text" && state.kind !== "reasoning") continue;
+    if (state.kind !== "text" && state.kind !== "reasoning" && state.kind !== "user") continue;
     stamp = state.startedAt ?? Date.now();
     flushRemaining(state, emit);
   }

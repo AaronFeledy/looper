@@ -16,6 +16,7 @@ type LooperBlock = Extract<OutputBlock, { kind: "looper" }>;
 type ToolBlock = Extract<OutputBlock, { kind: "tool" }>;
 
 const ASSISTANT_COLORS = { borderColor: "#89dceb", contentColor: "#cdd6f4" } as const;
+const USER_COLORS = { borderColor: "#f9e2af", contentColor: "#f9e2af" } as const;
 
 function assertNever(value: never): never {
   throw new Error(`Unexpected LooperEvent: ${JSON.stringify(value)}`);
@@ -135,7 +136,25 @@ export function eventsToOutputBlocks(events: readonly LooperEvent[], times: read
         flushTool();
         flushReasoning();
         flushLines();
-        if (currentGroup === undefined) currentGroup = { kind: "group", title: "Assistant", ...ASSISTANT_COLORS, lines: [], firstSeenAt };
+        if (currentGroup === undefined || currentGroup.title !== "Assistant") {
+          flushGroup();
+          currentGroup = { kind: "group", title: "Assistant", ...ASSISTANT_COLORS, lines: [], firstSeenAt };
+        }
+        currentGroup.lines.push(event.text);
+        return;
+      case "user.started":
+        closeStructured();
+        flushLines();
+        currentGroup = { kind: "group", title: "User", ...USER_COLORS, lines: [], firstSeenAt };
+        return;
+      case "user.text":
+        flushTool();
+        flushReasoning();
+        flushLines();
+        if (currentGroup === undefined || currentGroup.title !== "User") {
+          flushGroup();
+          currentGroup = { kind: "group", title: "User", ...USER_COLORS, lines: [], firstSeenAt };
+        }
         currentGroup.lines.push(event.text);
         return;
       case "reasoning.started":

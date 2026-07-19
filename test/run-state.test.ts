@@ -30,7 +30,17 @@ describe("run-state file", () => {
   });
 
   test("round-trips an in-progress pointer with session + message", () => {
-    writeRunState({ iteration: 3, stepIndex: 1, stepName: "review", sessionID: "ses_x", messageID: "msg_y" });
+    const looperMessageIDs = ["msg_x", "msg_y"];
+    writeRunState({
+      iteration: 3,
+      stepIndex: 1,
+      stepName: "review",
+      sessionID: "ses_x",
+      messageID: "msg_y",
+      promptText: "review this change",
+      looperMessageIDs,
+    });
+    looperMessageIDs.push("msg_mutated");
     const read = readRunState();
     expect(read).not.toBeNull();
     expect(read!.iteration).toBe(3);
@@ -38,6 +48,8 @@ describe("run-state file", () => {
     expect(read!.stepName).toBe("review");
     expect(read!.sessionID).toBe("ses_x");
     expect(read!.messageID).toBe("msg_y");
+    expect(read!.promptText).toBe("review this change");
+    expect(read!.looperMessageIDs).toEqual(["msg_x", "msg_y"]);
     expect(typeof read!.updatedAt).toBe("string");
   });
 
@@ -50,6 +62,8 @@ describe("run-state file", () => {
     const onDisk = JSON.parse(readFileSync(join(scratch, ".looper-run.json"), "utf8"));
     expect("sessionID" in onDisk).toBe(false);
     expect("messageID" in onDisk).toBe(false);
+    expect("promptText" in onDisk).toBe(false);
+    expect("looperMessageIDs" in onDisk).toBe(false);
   });
 
   test("round-trips the iteration title so a resumed run can re-apply it", () => {
@@ -121,6 +135,31 @@ describe("run-state file", () => {
     const read = readRunState();
     expect(read).not.toBeNull();
     expect(read!.stepSessions).toBeUndefined();
+    expect(read!.promptText).toBeUndefined();
+    expect(read!.looperMessageIDs).toBeUndefined();
+  });
+
+  test("drops invalid prompt ownership metadata while preserving legacy fields", () => {
+    writeFileSync(
+      join(scratch, ".looper-run.json"),
+      JSON.stringify({
+        iteration: 1,
+        stepIndex: 0,
+        stepName: "build",
+        sessionID: "ses_old",
+        messageID: "msg_old",
+        promptText: 42,
+        looperMessageIDs: ["msg_valid", "", 7],
+        updatedAt: "t",
+      }),
+    );
+
+    expect(readRunState()).toMatchObject({
+      sessionID: "ses_old",
+      messageID: "msg_old",
+      looperMessageIDs: ["msg_valid"],
+    });
+    expect(readRunState()?.promptText).toBeUndefined();
   });
 
   test("omits stepSessions from the on-disk JSON when not provided", () => {

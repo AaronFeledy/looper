@@ -378,6 +378,92 @@ describe("runIteration reattach policy propagation", () => {
     expect(replyCalls).toEqual([{ requestID: "per_resume_edit", reply: "always", directory: repoDir }]);
   });
 
+  test("re-persists plugin continuation outcome ID with unchanged Looper prompt ownership before reattach", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-iter-continuation-resume-repo-"));
+    configDir = mkdtempSync(join(tmpdir(), "looper-iter-continuation-resume-config-"));
+    const promptPath = join(configDir, "prompt.txt");
+    writeFileSync(promptPath, "continue safely\n");
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n`);
+    initStatePaths({ configDir });
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const continuationPath = join(continuationDir, `${SID}.json`);
+    const writeContinuationState = (state: "active" | "idle"): void => {
+      const updatedAt = new Date().toISOString();
+      writeFileSync(
+        continuationPath,
+        JSON.stringify({ sessionID: SID, updatedAt, sources: { "background-task": { state, updatedAt } } }),
+      );
+    };
+    writeContinuationState("active");
+
+    const pluginMessageID = "msg_plugin_continuation";
+    let looperMessageID = "";
+    let sentPromptText = "";
+    let messagesCalls = 0;
+    const sessionCalls: Array<{
+      iteration: number;
+      index: number;
+      stepName: string;
+      sessionID: string;
+      messageID: string;
+      promptText?: string;
+      looperMessageIDs?: string[];
+    }> = [];
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string; parts: Array<{ type: "text"; text: string }> }) => {
+          looperMessageID = params.messageID;
+          sentPromptText = params.parts[0]?.text ?? "";
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: messagesCalls >= 2 ? "idle" : "busy" } } }),
+        messages: async () => {
+          messagesCalls += 1;
+          if (messagesCalls === 1) {
+            setTimeout(() => writeContinuationState("idle"), 0);
+            return { data: [assistantDone(looperMessageID)] };
+          }
+          return {
+            data: [
+              { info: { id: looperMessageID, role: "user", time: { created: 1 } }, parts: [] },
+              { info: { id: pluginMessageID, role: "user", time: { created: 2 } }, parts: [] },
+              assistantDone(pluginMessageID),
+            ],
+          };
+        },
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client,
+      repoDir,
+      configDir,
+      hooks: { onStepSession: (info) => sessionCalls.push(info) },
+    });
+
+    expect(result).toBe("complete");
+    expect(sessionCalls).toContainEqual({
+      iteration: 1,
+      index: 0,
+      stepName: "Build",
+      sessionID: SID,
+      messageID: pluginMessageID,
+      promptText: sentPromptText,
+      looperMessageIDs: [looperMessageID],
+    });
+    expect(sessionCalls.find((call) => call.messageID === pluginMessageID)?.looperMessageIDs).not.toContain(pluginMessageID);
+  }, 10000);
+
   test("does not start a fresh retry when the tracked assistant turn remains in-progress after the reattach cap", async () => {
     // Given
     repoDir = mkdtempSync(join(tmpdir(), "looper-iter-reattach-cap-repo-"));
@@ -725,11 +811,60 @@ describe("runOpenCodeStep event stream recovery", () => {
       repoDir,
       step,
       sessionID: SID,
-      messageID: MID,
+      outcomeMessageID: MID,
     });
 
     expect(result.status).toBe("failed");
     expect(result.errorMessage).toContain("completed without assistant output");
+  });
+
+  test("reattach classifies a plugin continuation without hiding its user turn", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-plugin-continuation-"));
+    writeIdleContinuationRecord(repoDir, SID);
+    const pluginMessageID = "msg_plugin_continuation";
+    const looperMessageID = "msg_looper_prompt";
+
+    const client = {
+      session: {
+        abort: async () => ({ data: {} }),
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({
+          data: [
+            {
+              info: { id: looperMessageID, role: "user", time: { created: 1 } },
+              parts: [{ id: "prt_looper", messageID: looperMessageID, type: "text", text: "hidden Looper prompt" }],
+            },
+            {
+              info: { id: pluginMessageID, role: "user", time: { created: 2 } },
+              parts: [{ id: "prt_plugin", messageID: pluginMessageID, type: "text", text: "visible plugin continuation" }],
+            },
+            assistantDone(pluginMessageID),
+          ],
+        }),
+        children: async () => ({ data: [] }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await reattachOpenCodeStep({
+      state,
+      stepIndex: 0,
+      client,
+      repoDir,
+      step,
+      sessionID: SID,
+      outcomeMessageID: pluginMessageID,
+      looperMessageIDs: [looperMessageID],
+    });
+
+    expect(result.status).toBe("done");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("hidden Looper prompt"))).toBe(false);
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("visible plugin continuation"))).toBe(true);
   });
 
   test("reattach backfill is bounded when messages hangs during teardown", async () => {
@@ -772,7 +907,7 @@ describe("runOpenCodeStep event stream recovery", () => {
         repoDir,
         step,
         sessionID: SID,
-        messageID: MID,
+        outcomeMessageID: MID,
       });
 
       expect(result.status).toBe("done");
@@ -822,7 +957,7 @@ describe("runOpenCodeStep event stream recovery", () => {
       repoDir,
       step,
       sessionID: SID,
-      messageID: MID,
+      outcomeMessageID: MID,
     });
 
     expect(result.status).toBe("restart");
@@ -880,7 +1015,7 @@ describe("runOpenCodeStep event stream recovery", () => {
       repoDir,
       step,
       sessionID: SID,
-      messageID: MID,
+      outcomeMessageID: MID,
     });
 
     expect(result.status).toBe("done");
@@ -929,7 +1064,7 @@ describe("runOpenCodeStep event stream recovery", () => {
       repoDir,
       step,
       sessionID: SID,
-      messageID: MID,
+      outcomeMessageID: MID,
     });
 
     expect(result.status).toBe("done");
@@ -1102,7 +1237,7 @@ describe("reattachOpenCodeStep session.idle hints", () => {
       repoDir,
       step,
       sessionID: SID,
-      messageID: MID,
+      outcomeMessageID: MID,
       ...(params.useSessionIdle !== undefined ? { useSessionIdle: params.useSessionIdle } : {}),
     });
 
