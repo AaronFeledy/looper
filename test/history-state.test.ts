@@ -6,7 +6,9 @@ import {
   exitHistoryView,
   historyMoveIteration,
   historyMoveStep,
+  selectStepListRow,
   selectedHistoryStep,
+  setFocusedPane,
   setHistoryViewOutput,
   snapshotIterationToHistory,
   type LoopState,
@@ -106,5 +108,20 @@ describe("history view navigation", () => {
 
     setHistoryViewOutput(state, "0:1:ses_a2", ["stale"], [1]);
     expect(state.historyView!.lines).toEqual(["hello"]);
+  });
+
+  test("selectStepListRow jumps to an absolute history step and focuses steps", () => {
+    const state = createLoopState({ maxIterations: 10, stepNames: ["a"] });
+    seedIteration(state, 1, ["ses_a1", "ses_a2", "ses_a3"]);
+    enterHistoryView(state);
+    setFocusedPane(state, "output");
+
+    selectStepListRow(state, 2);
+    expect(state.focusedPane).toBe("steps");
+    expect(state.historyView!.stepIndex).toBe(2);
+    expect(selectedHistoryStep(state)!.step.sessionID).toBe("ses_a3");
+
+    selectStepListRow(state, 99);
+    expect(state.historyView!.stepIndex).toBe(2);
   });
 });

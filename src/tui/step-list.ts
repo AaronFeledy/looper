@@ -1,7 +1,7 @@
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { BackgroundAgent, FlatRow, HistoryStepSnapshot, LoopState, LoopStep, StepStatus } from "../lib/state.ts";
-import { backgroundAgentLabel, flattenRows, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, flattenRows, selectStepListRow, subscribe } from "../lib/state.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const LIST_WIDTH = 28;
@@ -189,6 +189,13 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
         bg: "transparent",
         attributes: TextAttributes.NONE,
         truncate: true,
+        selectable: false,
+        onMouseUp(event) {
+          if (event.type !== "up" || event.button !== 0) return;
+          const index = rowRenderables.indexOf(row);
+          if (index < 0) return;
+          selectStepListRow(state, index);
+        },
       });
       rowRenderables.push(row);
       list.add(row);

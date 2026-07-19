@@ -12,7 +12,14 @@ import type { BackgroundAgent, HistoryView, LoopState, LoopStep, ScrollIntent } 
 import { ansiToStyledText } from "../lib/ansi.ts";
 import { backgroundAgentLabel, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 import { eventsToOutputBlocks, type OutputBlock } from "../presentation/tui/stream-blocks.ts";
+import {
+  FOLLOW_INDICATOR,
+  followIndicatorColor,
+  pinAfterUserScroll,
+} from "../lib/output-follow.ts";
 import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
+
+const FOLLOW_PULSE_MS = 80;
 
 type SelectedOutput = {
   step: LoopStep | null;
@@ -269,11 +276,10 @@ function outputTitle(state: LoopState, selectedOutput: SelectedOutput): string {
   return `${stepLabel} · bg: ${backgroundAgentLabel(selectedOutput.backgroundAgent)}`;
 }
 
-/** Pixels from the bottom within which we still treat the view as "at bottom" for follow mode. */
-const BOTTOM_SLACK = 2;
-
 export function createAgentStream(renderer: CliRenderer, state: LoopState): ScrollBoxRenderable {
   const initialOutput = resolveSelectedOutput(state);
+  const initialPin =
+    (initialOutput.history ?? initialOutput.backgroundAgent ?? initialOutput.step)?.outputPinnedToBottom ?? true;
   const stream = new ScrollBoxRenderable(renderer, {
     id: "loop-agent-stream",
     width: "100%",
@@ -301,6 +307,29 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
       minHeight: "auto",
     },
   });
+
+  let pulsePhaseMs = 0;
+  const followIndicator = new TextRenderable(renderer, {
+    id: "loop-agent-follow-indicator",
+    position: "absolute",
+    // Sit on the bottom border under the scrollbar (one column right of former bottomTitle).
+    right: 0,
+    bottom: -1,
+    width: 1,
+    height: 1,
+    content: FOLLOW_INDICATOR,
+    fg: followIndicatorColor(initialPin, 0),
+    zIndex: 100,
+    selectable: false,
+  });
+  // ScrollBox.add routes into content; BoxRenderable.add keeps this as fixed chrome.
+  BoxRenderable.prototype.add.call(stream, followIndicator);
+
+  const applyFollowIndicator = (pinnedToBottom: boolean): void => {
+    if (followIndicator.isDestroyed) return;
+    followIndicator.fg = followIndicatorColor(pinnedToBottom, pulsePhaseMs);
+    renderer.requestRender();
+  };
 
   let outputRenderables: OutputRenderable[] = [];
 
@@ -345,8 +374,10 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   let selectedBackgroundSessionID = initialOutput.backgroundAgent?.sessionID ?? null;
   let selectedHistoryKey = historyKeyOf(initialOutput);
   let renderedOutputKey: string | undefined;
-  let pinToBottom = (initialOutput.history ?? initialOutput.backgroundAgent ?? initialOutput.step)?.outputPinnedToBottom ?? true;
+  let pinToBottom = initialPin;
   let syncingStateScroll = false;
+  // OpenTUI fires scrollbar "change" on programmatic scrollTop writes too; gate those out.
+  let applyingProgrammaticScroll = false;
 
   const outputKey = (output: SelectedOutput): string => {
     let lengthHash = 0;
@@ -368,10 +399,28 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
   const maxScrollTop = (): number => Math.max(0, stream.scrollHeight - stream.viewport.height);
 
+  const setStreamScrollTop = (value: number): void => {
+    if (stream.scrollTop === value) return;
+    applyingProgrammaticScroll = true;
+    try {
+      stream.scrollTop = value;
+    } finally {
+      applyingProgrammaticScroll = false;
+    }
+  };
+
   const persistSelectedScroll = (scrollTop: number, pinnedToBottom: boolean): void => {
     const target = selectedScrollTarget();
     if (target === null) return;
-    if (target.outputScrollTop === scrollTop && target.outputPinnedToBottom === pinnedToBottom) return;
+    const pinChanged = target.outputPinnedToBottom !== pinnedToBottom;
+    if (target.outputScrollTop === scrollTop && !pinChanged) return;
+
+    // Scroll-only updates: mutate the bookmark without notify (avoids full stream rebuild per wheel tick).
+    if (!pinChanged) {
+      target.outputScrollTop = Math.max(0, scrollTop);
+      return;
+    }
+
     if (selectedOutput.history !== null) {
       syncingStateScroll = true;
       setHistoryViewScroll(state, scrollTop, pinnedToBottom);
@@ -392,43 +441,99 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     syncingStateScroll = false;
   };
 
-  const syncPinFromScrollPosition = (): void => {
-    const max = maxScrollTop();
-    pinToBottom = max <= 0 || stream.scrollTop >= max - BOTTOM_SLACK;
-    persistSelectedScroll(stream.scrollTop, pinToBottom);
+  const contentIsLaidOutAndFits = (): boolean => {
+    // scrollHeight 0 with no viewport measure is a pre-layout race, not "fits in view".
+    return stream.viewport.height > 0 && stream.scrollHeight > 0 && stream.scrollHeight <= stream.viewport.height;
   };
 
   const scrollToBottomIfPinned = (): void => {
     if (!pinToBottom) return;
     const max = maxScrollTop();
-    if (max <= 0) return;
-    if (stream.scrollTop !== max) stream.scrollTop = max;
+    if (max <= 0) {
+      setStreamScrollTop(0);
+      persistSelectedScroll(0, true);
+      return;
+    }
+    setStreamScrollTop(max);
     persistSelectedScroll(max, true);
   };
 
   const restoreSelectedScroll = (): void => {
     const max = maxScrollTop();
     if (max <= 0) {
-      if (stream.scrollTop !== 0) stream.scrollTop = 0;
+      setStreamScrollTop(0);
+      if (pinToBottom) {
+        persistSelectedScroll(0, true);
+        return;
+      }
+      // Unpinned content that truly fits the viewport is at the bottom; re-pin so follow resumes.
+      // Do not re-pin during pre-layout races where height is still unmeasured.
+      if (contentIsLaidOutAndFits()) {
+        pinToBottom = true;
+        persistSelectedScroll(0, true);
+        applyFollowIndicator(true);
+      } else {
+        persistSelectedScroll(0, false);
+      }
       return;
     }
     const target = selectedScrollTarget();
     const desiredScrollTop = pinToBottom ? max : Math.max(0, Math.min(target?.outputScrollTop ?? 0, max));
-    if (stream.scrollTop !== desiredScrollTop) stream.scrollTop = desiredScrollTop;
-    persistSelectedScroll(desiredScrollTop, pinToBottom || desiredScrollTop >= max - BOTTOM_SLACK);
+    setStreamScrollTop(desiredScrollTop);
+    persistSelectedScroll(desiredScrollTop, pinToBottom);
+  };
+
+  const toggleFollow = (): void => {
+    if (pinToBottom) {
+      pinToBottom = false;
+      persistSelectedScroll(stream.scrollTop, false);
+      applyFollowIndicator(false);
+      return;
+    }
+    pinToBottom = true;
+    const max = maxScrollTop();
+    setStreamScrollTop(max);
+    persistSelectedScroll(max, true);
+    applyFollowIndicator(true);
+  };
+
+  followIndicator.onMouseUp = (event) => {
+    if (event.type !== "up" || event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    toggleFollow();
   };
 
   const onVerticalScrollChange = (): void => {
-    syncPinFromScrollPosition();
+    if (applyingProgrammaticScroll) return;
+    const nextPin = pinAfterUserScroll(stream.scrollTop, maxScrollTop());
+    const pinChanged = nextPin !== pinToBottom;
+    pinToBottom = nextPin;
+    persistSelectedScroll(stream.scrollTop, pinToBottom);
+    if (pinChanged) applyFollowIndicator(pinToBottom);
   };
 
-  const onLayoutReflow = (): void => {
+  const applyFollowScroll = (): void => {
+    if (stream.isDestroyed) return;
     if (pinToBottom) scrollToBottomIfPinned();
     else restoreSelectedScroll();
   };
 
+  // Follow must run after OpenTUI measures content height. ScrollBox updates scrollSize
+  // in onSizeChange via recalculateBarProps; microtask/nextTick alone race that layout.
+  const previousContentSizeChange = stream.content.onSizeChange;
+  stream.content.onSizeChange = () => {
+    previousContentSizeChange?.call(stream.content);
+    applyFollowScroll();
+  };
+  const previousViewportSizeChange = stream.viewport.onSizeChange;
+  stream.viewport.onSizeChange = () => {
+    previousViewportSizeChange?.call(stream.viewport);
+    applyFollowScroll();
+  };
+
   stream.verticalScrollBar.on("change", onVerticalScrollChange);
-  stream.content.on(LayoutEvents.LAYOUT_CHANGED, onLayoutReflow);
+  stream.content.on(LayoutEvents.LAYOUT_CHANGED, applyFollowScroll);
 
   const intentApplies = (intent: ScrollIntent): boolean =>
     selectedOutput.history !== null || intent.stepIndex === selectedStepIndex;
@@ -448,26 +553,39 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     else if (intent.direction === "up") next -= 1;
     else if (intent.direction === "down") next += 1;
     next = Math.max(0, Math.min(next, max));
-    pinToBottom = max <= 0 || next >= max - BOTTOM_SLACK;
-    if (stream.scrollTop !== next) stream.scrollTop = next;
+    const nextPin = pinAfterUserScroll(next, max);
+    const pinChanged = nextPin !== pinToBottom;
+    pinToBottom = nextPin;
+    setStreamScrollTop(next);
     persistSelectedScroll(next, pinToBottom);
+    if (pinChanged) applyFollowIndicator(pinToBottom);
     consumeScrollIntent(state, intent.seq);
+  };
+
+  const scheduleFollowScroll = (hasIntent: boolean): void => {
+    const run = (): void => {
+      if (stream.isDestroyed) return;
+      if (hasIntent || (state.scrollIntent !== null && intentApplies(state.scrollIntent))) {
+        applyScrollIntent();
+        return;
+      }
+      applyFollowScroll();
+    };
+    queueMicrotask(run);
+    process.nextTick(run);
   };
 
   const rebuild = () => {
     const nextSelectedOutput = resolveSelectedOutput(state);
     const nextBackgroundSessionID = nextSelectedOutput.backgroundAgent?.sessionID ?? null;
     const nextHistoryKey = historyKeyOf(nextSelectedOutput);
-    const stepChanged =
-      nextSelectedOutput.stepIndex !== selectedStepIndex ||
-      nextBackgroundSessionID !== selectedBackgroundSessionID ||
-      nextHistoryKey !== selectedHistoryKey;
     selectedOutput = nextSelectedOutput;
     selectedStepIndex = nextSelectedOutput.stepIndex;
     selectedBackgroundSessionID = nextBackgroundSessionID;
     selectedHistoryKey = nextHistoryKey;
     pinToBottom = (selectedOutput.history ?? selectedOutput.backgroundAgent ?? selectedOutput.step)?.outputPinnedToBottom ?? pinToBottom;
     stream.title = outputTitle(state, selectedOutput);
+    applyFollowIndicator(pinToBottom);
     const nextOutputKey = outputKey(selectedOutput);
     if (nextOutputKey !== renderedOutputKey) {
       renderedOutputKey = nextOutputKey;
@@ -476,24 +594,23 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     renderer.requestRender();
     if (syncingStateScroll) return;
     const hasIntent = state.scrollIntent !== null && intentApplies(state.scrollIntent);
-    queueMicrotask(() => {
-      if (hasIntent) applyScrollIntent();
-      else if (stepChanged || !pinToBottom) restoreSelectedScroll();
-      else scrollToBottomIfPinned();
-    });
-    process.nextTick(() => {
-      if (state.scrollIntent !== null && intentApplies(state.scrollIntent)) applyScrollIntent();
-      else if (stepChanged || !pinToBottom) restoreSelectedScroll();
-      else scrollToBottomIfPinned();
-    });
+    scheduleFollowScroll(hasIntent);
   };
 
   const unsubscribe = subscribe(rebuild);
+  const pulseTimer = setInterval(() => {
+    if (!pinToBottom) return;
+    pulsePhaseMs = (pulsePhaseMs + FOLLOW_PULSE_MS) % 2400;
+    applyFollowIndicator(true);
+  }, FOLLOW_PULSE_MS);
   rebuild();
 
   stream.on(RenderableEvents.DESTROYED, () => {
+    clearInterval(pulseTimer);
     stream.verticalScrollBar.off("change", onVerticalScrollChange);
-    stream.content.off(LayoutEvents.LAYOUT_CHANGED, onLayoutReflow);
+    stream.content.off(LayoutEvents.LAYOUT_CHANGED, applyFollowScroll);
+    stream.content.onSizeChange = previousContentSizeChange;
+    stream.viewport.onSizeChange = previousViewportSizeChange;
     unsubscribe();
   });
 

@@ -9,6 +9,8 @@ import {
   pushBackgroundAgentLines,
   selectNextStep,
   selectPreviousStep,
+  selectStepListRow,
+  setFocusedPane,
   syncStepBackgroundAgents,
 } from "../src/lib/state.ts";
 import { formatRow } from "../src/tui/step-list.ts";
@@ -109,6 +111,31 @@ describe("selectNext/Previous traversal", () => {
   });
 });
 
+describe("selectStepListRow", () => {
+  test("selects a live flat row by index and focuses steps", () => {
+    const s = state(["build", "review"]);
+    syncStepBackgroundAgents(s, 0, [{ sessionID: "ses_a", startedAt: 1 }]);
+    setFocusedPane(s, "output");
+
+    selectStepListRow(s, 1);
+    expect(s.focusedPane).toBe("steps");
+    expect(s.selectedStepIndex).toBe(0);
+    expect(s.selectedBackgroundSessionID).toBe("ses_a");
+    expect(s.manualStepSelection).toBe(true);
+
+    selectStepListRow(s, 2);
+    expect(s.selectedStepIndex).toBe(1);
+    expect(s.selectedBackgroundSessionID).toBeNull();
+  });
+
+  test("ignores out-of-range live row indexes", () => {
+    const s = state(["build"]);
+    selectStepListRow(s, 5);
+    expect(s.selectedStepIndex).toBeNull();
+    expect(s.manualStepSelection).toBe(false);
+  });
+});
+
 describe("clearBackgroundAgentBuffer", () => {
   test("drops accumulated lines but leaves the agent itself", () => {
     const s = state(["build"]);
@@ -140,11 +167,11 @@ describe("formatRow", () => {
 });
 
 describe("renderSessionMessages", () => {
-  test("emits assistant text lines and skips user messages", () => {
+  test("emits both user and assistant text lines", () => {
     const lines = renderSessionMessages([
       {
         info: { id: "msg_u", role: "user" } as never,
-        parts: [{ id: "p1", type: "text", text: "ignored user prompt" } as never],
+        parts: [{ id: "p1", type: "text", text: "plugin user prompt", time: { end: 1 } } as never],
       },
       {
         info: { id: "msg_a", role: "assistant" } as never,
@@ -152,8 +179,8 @@ describe("renderSessionMessages", () => {
       },
     ]);
     const joined = lines.join("\n");
+    expect(joined).toContain("plugin user prompt");
     expect(joined).toContain("hello");
     expect(joined).toContain("world");
-    expect(joined).not.toContain("ignored user prompt");
   });
 });
