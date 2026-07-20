@@ -5,6 +5,7 @@ import type { StepSessionEntry } from "../lib/state-files.ts";
 import type { RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { EngineFrontendHooks, EngineRunIteration, RunEngineOptions, RunEngineResult, RunStateStore } from "./engine-ports.ts";
 import { buildEngineStepHooks } from "./run-engine-step-hooks.ts";
+import type { AdjudicationConfig } from "./adjudication-routing.ts";
 
 export type RunResumePlan = {
   readonly startIteration: number;
@@ -42,6 +43,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
+  readonly adjudication?: AdjudicationConfig;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
   readonly initialPlan?: RunResumePlan;
@@ -198,6 +200,9 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.questionPolicy !== undefined ? { questionPolicy: input.questionPolicy } : {}),
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
+        ...(input.adjudication !== undefined
+          ? { adjudication: { ...input.adjudication, writeStop: input.store.writeStop } }
+          : {}),
         ...(input.contextPolicy !== undefined ? { contextPolicy: input.contextPolicy } : {}),
         ...(iteration === startIteration && firstIterationResumed ? { resumedPriorSteps: true } : {}),
         ...(persistTitles && iteration === startIteration && firstIterationTitle !== undefined ? { initialWorkDescription: firstIterationTitle } : {}),

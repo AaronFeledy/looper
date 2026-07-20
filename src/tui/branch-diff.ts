@@ -53,7 +53,6 @@ export function createBranchDiffPanel(renderer: CliRenderer, state: LoopState): 
     id: "loop-branch-diff",
     width: LIST_WIDTH,
     flexShrink: 0,
-    marginTop: 1,
     border: true,
     borderStyle: "rounded",
     borderColor: "#45475a",

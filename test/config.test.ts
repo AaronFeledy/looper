@@ -5,12 +5,14 @@ import { join } from "node:path";
 
 import {
   assertPromptFilesExist,
+  loadAdjudicateStep,
   loadRuntimeConfig,
   loadSteps,
   resolveContextPolicy,
   resolvePermissionAction,
   type PermissionAction,
 } from "../src/lib/config.ts";
+import { prdFlipThreshold } from "../src/config/tunables.ts";
 
 function withConfigDir(contents: string, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "looper-config-"));
@@ -19,6 +21,18 @@ function withConfigDir(contents: string, run: (dir: string) => void): void {
     run(dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function withPrdFlipThresholdEnv(value: string | undefined, run: () => void): void {
+  const original = process.env["LOOPER_PRD_FLIP_THRESHOLD"];
+  try {
+    if (value === undefined) delete process.env["LOOPER_PRD_FLIP_THRESHOLD"];
+    else process.env["LOOPER_PRD_FLIP_THRESHOLD"] = value;
+    run();
+  } finally {
+    if (original === undefined) delete process.env["LOOPER_PRD_FLIP_THRESHOLD"];
+    else process.env["LOOPER_PRD_FLIP_THRESHOLD"] = original;
   }
 }
 
@@ -151,6 +165,78 @@ describe("loadSteps config parsing", () => {
   });
 });
 
+describe("adjudicate config parsing", () => {
+  test("parses every step field and resolves prompt paths relative to the config directory", () => {
+    withConfigDir(
+      [
+        "adjudicate:",
+        "  name: Final Decision",
+        "  agent: build",
+        "  variant: low",
+        "  model: openai/gpt-5.5",
+        "  prompt: prompts/adjudicate.md",
+        "  prefix: before",
+        "  suffix: after",
+        "  args: [one, two]",
+        "  timeout: 30m",
+        "  title: branch",
+        "  permissionPolicy:",
+        "    edit: always",
+        "  questionPolicy: reject",
+        "  context:",
+        "    prd: false",
+        "steps:",
+        "  build:",
+        "    prompt: build.md",
+      ].join("\n"),
+      (dir) => {
+        expect(loadAdjudicateStep(dir)).toEqual({
+          name: "Final Decision",
+          agent: "build",
+          variant: "low",
+          model: "openai/gpt-5.5",
+          prompt: join(dir, "prompts/adjudicate.md"),
+          prefix: "before",
+          suffix: "after",
+          args: ["one", "two"],
+          timeoutMs: 30 * 60 * 1000,
+          title: "branch",
+          permissionPolicy: { edit: "always" },
+          questionPolicy: "reject",
+          contextPolicy: { prd: false },
+        });
+      },
+    );
+  });
+
+  test("defaults the step name to adjudicate", () => {
+    withConfigDir("adjudicate:\n  prompt: adjudicate.md\nsteps:\n  build:\n    prompt: build.md\n", (dir) => {
+      expect(loadAdjudicateStep(dir)?.name).toBe("adjudicate");
+    });
+  });
+
+  test("returns undefined when adjudicate is absent", () => {
+    withConfigDir("steps:\n  build:\n    prompt: build.md\n", (dir) => {
+      expect(loadAdjudicateStep(dir)).toBeUndefined();
+    });
+  });
+
+  test("keeps adjudicate out of the ordered steps array", () => {
+    withConfigDir(
+      "adjudicate:\n  prompt: adjudicate.md\nsteps:\n  build:\n    prompt: build.md\n  review:\n    prompt: review.md\n",
+      (dir) => {
+        expect(loadSteps(dir).map((step) => step.name)).toEqual(["Build", "Review"]);
+      },
+    );
+  });
+
+  test("rejects a malformed adjudicate block in step-mapping style", () => {
+    withConfigDir("adjudicate: nope\nsteps:\n  build:\n    prompt: build.md\n", (dir) => {
+      expect(() => loadAdjudicateStep(dir)).toThrow(/adjudicate must be a mapping/);
+    });
+  });
+});
+
 describe("loadRuntimeConfig policy and flags", () => {
   test("defaults preserve legacy behavior when keys are absent", () => {
     withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
@@ -178,6 +264,18 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects an empty prd directory", () => {
     withConfigDir("prd: \"\"\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/prd cannot be empty/);
+    });
+  });
+
+  test("parses a positive prdFlipThreshold", () => {
+    withConfigDir("prdFlipThreshold: 4\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).prdFlipThreshold).toBe(4);
+    });
+  });
+
+  test("rejects a non-positive prdFlipThreshold", () => {
+    withConfigDir("prdFlipThreshold: 0\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/prdFlipThreshold must be an integer >= 1/);
     });
   });
 
@@ -216,6 +314,26 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects invalid questionPolicy", () => {
     withConfigDir("questionPolicy: always\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/questionPolicy/);
+    });
+  });
+});
+
+describe("prdFlipThreshold", () => {
+  test("uses the default when env and config are absent", () => {
+    withPrdFlipThresholdEnv(undefined, () => {
+      expect(prdFlipThreshold()).toBe(2);
+    });
+  });
+
+  test("uses the YAML config value when env is absent", () => {
+    withPrdFlipThresholdEnv(undefined, () => {
+      expect(prdFlipThreshold(4)).toBe(4);
+    });
+  });
+
+  test("prefers the environment value over the YAML config value", () => {
+    withPrdFlipThresholdEnv("6", () => {
+      expect(prdFlipThreshold(4)).toBe(6);
     });
   });
 });

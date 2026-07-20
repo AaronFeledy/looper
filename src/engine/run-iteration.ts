@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS, inheritedRenameDelayMs } from "../config/tunables.ts";
-import { loadSteps, resolveContextPolicy, type ContextPolicy, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
+import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
@@ -32,6 +32,14 @@ import {
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
+import {
+  decideRouting,
+  insertAdjudicationRow,
+  recordStepTransitions,
+  snapshotPrd,
+  withAdjudicationReason,
+  type AdjudicationRuntime,
+} from "./adjudication-routing.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -108,6 +116,7 @@ export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
   onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; title?: string }) => void;
   onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[]; title?: string }) => void;
+  onAdjudicationRoute?: (info: { iteration: number; totalSteps: number }) => void;
 };
 
 export type ResumeSession = {
@@ -148,6 +157,7 @@ export type RunIterationOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   prdDir?: string;
+  adjudication?: AdjudicationRuntime;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the
    * `<looper-context>` prompt block (see prompt-context.ts). Falls back to
@@ -223,6 +233,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     questionPolicy,
     useSessionIdle,
     prdDir,
+    adjudication,
     maxIterations,
     contextPolicy: globalContextPolicy,
     resumedStepSessions,
@@ -247,6 +258,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   let recoveryNudgePending = recoveryNudge;
   let workDescription: string | undefined = initialWorkDescription;
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
+  let pendingAdjudicateStep: LoadedStep | undefined;
+  let initialRoutingChecked = false;
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -288,10 +301,54 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       startStepIndexApplied = true;
     }
 
-    if (index >= steps.length) break;
+    if (!initialRoutingChecked) {
+      initialRoutingChecked = true;
+      const initialRouting = decideRouting(adjudication);
+      if (initialRouting.kind !== "continue") {
+        const resumedSessionID = pendingResume?.sessionID;
+        if (resumedSessionID !== undefined) {
+          const resumedStepName = pendingResume?.stepName ?? steps[index]?.name ?? "resumed step";
+          if (!(await stopPriorSession(resumedSessionID, index))) {
+            throw new StepFailureError(
+              `could not confirm session ${resumedSessionID} stopped; deferring adjudication to avoid overlapping opencode generations`,
+              { stepName: resumedStepName, sessionID: resumedSessionID },
+            );
+          }
+          pendingResume = undefined;
+        }
+        // A prior run may have crashed mid-adjudication after dispatching the
+        // adjudicator prompt. Confirm that recorded session is stopped before
+        // launching a fresh adjudicator so the two generations can't overlap.
+        const orphanedAdjudicator = adjudication?.store.readSession();
+        if (orphanedAdjudicator != null) {
+          const adjName = initialRouting.kind === "adjudicate" ? initialRouting.step.name : "adjudicate";
+          if (!(await stopPriorSession(orphanedAdjudicator.sessionID, index))) {
+            throw new StepFailureError(
+              `could not confirm adjudicator session ${orphanedAdjudicator.sessionID} stopped; deferring adjudication to avoid overlapping opencode generations`,
+              { stepName: adjName, sessionID: orphanedAdjudicator.sessionID },
+            );
+          }
+          adjudication?.store.clearSession();
+        }
+        syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
+        const firstRemainingRow = state.steps.length - (steps.length - index);
+        markRemainingSkipped(state, firstRemainingRow);
+        hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
+        if (initialRouting.kind === "stop") {
+          adjudication?.writeStop(initialRouting.reason);
+          adjudication?.store.clearMarker();
+          break;
+        }
+        pendingAdjudicateStep = initialRouting.step;
+        insertAdjudicationRow(state, initialRouting.step.name);
+      }
+    }
 
-    syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
-    let currentStepIndex = state.steps.length - (steps.length - index);
+    const adjudicating = pendingAdjudicateStep !== undefined;
+    if (!adjudicating && index >= steps.length) break;
+
+    if (!adjudicating) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
+    let currentStepIndex = adjudicating ? state.steps.length - 1 : state.steps.length - (steps.length - index);
 
     if (stopFileExists() || state.quitting) {
       markRemainingSkipped(state, currentStepIndex);
@@ -305,15 +362,20 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       break;
     }
 
-    hooks?.onStepBegin?.({ step: steps[index]!, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
-
-    const step = steps[index]!;
+    const configuredStep = steps[index];
+    if (pendingAdjudicateStep === undefined && configuredStep === undefined) break;
+    const step = pendingAdjudicateStep ?? configuredStep;
+    if (step === undefined) break;
+    const executionIndex = adjudicating ? steps.length : index;
+    const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+    if (!adjudicating) hooks?.onStepBegin?.({ step, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
+    const prdBefore = snapshotPrd(adjudication, prdDir);
     const stepSessionMetadata = looperRunID === undefined
       ? undefined
       : {
           looperRunID,
           iteration,
-          stepIndex: index,
+          stepIndex: executionIndex,
           stepName: step.name,
           configDir,
           repoDir,
@@ -543,16 +605,18 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             // from .looper-run.json, and reattach never hits runOpenCodeStep's
             // onSessionBound; re-persist them so a crash mid-reattach can still
             // reattach instead of starting a fresh overlapping generation.
-            hooks?.onStepSession?.({
-              iteration,
-              index,
-              stepName: step.name,
-              sessionID: resumeSession,
-              messageID: resumeInfo.messageID,
-              ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
-              ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: [...resumeInfo.looperMessageIDs] } : {}),
-              ...(workDescription !== undefined ? { title: workDescription } : {}),
-            });
+            if (!adjudicating) {
+              hooks?.onStepSession?.({
+                iteration,
+                index: executionIndex,
+                stepName: step.name,
+                sessionID: resumeSession,
+                messageID: resumeInfo.messageID,
+                ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
+                ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: [...resumeInfo.looperMessageIDs] } : {}),
+                ...(workDescription !== undefined ? { title: workDescription } : {}),
+              });
+            }
             pendingResult = await reattachOpenCodeStep({
               state,
               stepIndex: currentStepIndex,
@@ -615,18 +679,21 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           iteration,
           maxIterations: maxIterations ?? state.maxIterations,
           stepName: step.name,
-          stepIndex: index,
-          totalSteps: steps.length,
+          stepIndex: executionIndex,
+          totalSteps: executionTotalSteps,
           priorSteps,
           timeoutMs: budgetMs,
           ...(prd !== undefined ? { prd } : {}),
           ...(vcs !== undefined ? { vcs } : {}),
         };
         const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
+        const stepBasePrompt = adjudicating
+          ? withAdjudicationReason(promptText(step), adjudication?.store.readMarker() ?? null)
+          : promptText(step);
         result = await runOpenCodeStep({
           state,
           stepIndex: currentStepIndex,
-          prompt: withLooperContext(contextBlock, resumePrompt ?? promptText(step)),
+          prompt: withLooperContext(contextBlock, resumePrompt ?? stepBasePrompt),
           client,
           repoDir,
           step,
@@ -636,8 +703,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ...(questionPolicy !== undefined ? { questionPolicy } : {}),
           ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
-          onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) =>
-            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, promptText: sentPromptText, looperMessageIDs: [...looperMessageIDs], ...(workDescription !== undefined ? { title: workDescription } : {}) }),
+          onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) => {
+            if (adjudicating) {
+              adjudication?.store.writeSession({ sessionID, messageID });
+              return;
+            }
+            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, promptText: sentPromptText, looperMessageIDs: [...looperMessageIDs], ...(workDescription !== undefined ? { title: workDescription } : {}) });
+          },
           ...(titleCoordinator
             ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
             : usingInheritedTitle
@@ -691,16 +763,18 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? lastPromptMessageID;
           if (resumedMessageID !== undefined) {
             const activeStep = state.steps[currentStepIndex];
-            hooks?.onStepSession?.({
-              iteration,
-              index,
-              stepName: step.name,
-              sessionID: waitSessionID,
-              messageID: resumedMessageID,
-              ...(activeStep?.promptText !== undefined ? { promptText: activeStep.promptText } : {}),
-              ...(activeStep?.looperMessageIDs !== undefined ? { looperMessageIDs: [...activeStep.looperMessageIDs] } : {}),
-              ...(workDescription !== undefined ? { title: workDescription } : {}),
-            });
+            if (!adjudicating) {
+              hooks?.onStepSession?.({
+                iteration,
+                index,
+                stepName: step.name,
+                sessionID: waitSessionID,
+                messageID: resumedMessageID,
+                ...(activeStep?.promptText !== undefined ? { promptText: activeStep.promptText } : {}),
+                ...(activeStep?.looperMessageIDs !== undefined ? { looperMessageIDs: [...activeStep.looperMessageIDs] } : {}),
+                ...(workDescription !== undefined ? { title: workDescription } : {}),
+              });
+            }
             const line = `[looper] session ${waitSessionID} resumed by opencode after background tasks; reattaching to stream its output`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
@@ -955,7 +1029,42 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       break;
     }
 
-    if (result.status === "failed") {
+    const prdAfter = snapshotPrd(adjudication, prdDir);
+    if (adjudication !== undefined) {
+      recordStepTransitions({
+        adjudication,
+        before: prdBefore,
+        after: prdAfter,
+        iteration,
+        stepName: step.name,
+        detect: !adjudicating,
+      });
+    }
+
+    const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
+    if (!adjudicating && routing.kind !== "continue" && result.status !== "done") {
+      const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
+      if (!(await stopPriorSession(terminalSessionID, currentStepIndex)) && terminalSessionID !== undefined) {
+        titleCoordinator?.cancel();
+        cancelInheritedTitleTimer();
+        throw new StepFailureError(
+          `could not confirm session ${terminalSessionID} stopped; deferring adjudication to avoid overlapping opencode generations`,
+          { stepName: step.name, sessionID: terminalSessionID },
+        );
+      }
+    }
+    if (routing.kind !== "continue") hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
+    if (routing.kind === "stop") {
+      markRemainingSkipped(state, currentStepIndex + 1);
+      adjudication?.writeStop(routing.reason);
+      adjudication?.store.clearMarker();
+    } else if (routing.kind === "adjudicate") {
+      markRemainingSkipped(state, currentStepIndex + 1);
+      pendingAdjudicateStep = routing.step;
+      insertAdjudicationRow(state, routing.step.name);
+    }
+
+    if (result.status === "failed" && routing.kind === "continue" && !adjudicating) {
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
       const stopRequested = state.quitting || stopFileExists();
@@ -1004,7 +1113,36 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       cancelInheritedTitleTimer();
     }
 
-    hooks?.onStepFinish?.({ step, index, nextIndex: index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
+    if (adjudicating) {
+      pendingAdjudicateStep = undefined;
+      if (result.status === "done") {
+        // Only a completed adjudication resolves the conflict: advance the
+        // history watermark so the resolved flips no longer count toward
+        // detection, then drop the durable adjudication signals.
+        adjudication?.store.markAdjudicated();
+        adjudication?.store.clearMarker();
+        adjudication?.store.clearSession();
+        break;
+      }
+      // Fail closed: keep the marker so the next iteration / resume re-routes
+      // to adjudication rather than treating a failed adjudicator as resolved.
+      // Confirm its session is stopped first so a retry can't overlap it.
+      titleCoordinator?.cancel();
+      cancelInheritedTitleTimer();
+      const adjSessionID = state.steps[currentStepIndex]?.sessionID;
+      if (await stopPriorSession(adjSessionID, currentStepIndex)) adjudication?.store.clearSession();
+      if (state.quitting || stopFileExists()) {
+        markRemainingSkipped(state, currentStepIndex);
+        break;
+      }
+      throw new StepFailureError(
+        `adjudicate step failed: ${lastErrorMessage ?? "adjudicator did not complete"}`,
+        { stepName: step.name, ...(adjSessionID !== undefined ? { sessionID: adjSessionID } : {}) },
+      );
+    }
+
+    const routed = routing.kind !== "continue";
+    hooks?.onStepFinish?.({ step, index, nextIndex: routed ? steps.length : index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
 
     const finishedSessionID = state.steps[currentStepIndex]?.sessionID;
     completedLogicalSteps.push({
@@ -1016,7 +1154,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
 
     completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
 
-    index += 1;
+    index = routed ? steps.length : index + 1;
   }
 
   return state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()

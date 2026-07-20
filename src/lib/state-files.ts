@@ -14,7 +14,7 @@ function logStateDiagnostic(message: string): void {
   if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] state-files: ${message}`);
 }
 
-function tolerantRm(path: string): void {
+export function tolerantRm(path: string): void {
   try {
     rmSync(path);
   } catch (error) {
@@ -22,7 +22,7 @@ function tolerantRm(path: string): void {
   }
 }
 
-function tolerantRead(path: string): string | null {
+export function tolerantRead(path: string): string | null {
   try {
     return readFileSync(path, "utf8");
   } catch (error) {
@@ -31,7 +31,7 @@ function tolerantRead(path: string): string | null {
   }
 }
 
-function writeFileAtomically(path: string, content: string): void {
+export function writeFileAtomically(path: string, content: string): void {
   const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
   try {
     writeFileSync(tempPath, content, { mode: 0o600 });
@@ -48,7 +48,7 @@ export function initStatePaths(opts: { configDir: string }): void {
   configDir = opts.configDir;
 }
 
-function requireConfigDir(): string {
+export function requireConfigDir(): string {
   if (configDir === undefined) {
     throw new Error("looper state paths not initialized; call initStatePaths({ configDir }) first");
   }
@@ -103,7 +103,7 @@ export function clearResumeStepFile() {
   tolerantRm(resumeStepFilePath());
 }
 
-function regularFileExists(path: string): boolean {
+export function regularFileExists(path: string): boolean {
   try {
     return statSync(path).isFile();
   } catch (error) {
