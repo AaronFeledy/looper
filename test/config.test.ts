@@ -76,6 +76,60 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("parses every gate condition and setsPhase", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      branch: story",
+        "      prdPasses: true",
+        "      phase: reviewed",
+        "      script: test -f ready",
+        "    setsPhase: verified",
+      ].join("\n"),
+      (dir) => {
+        expect(loadSteps(dir)[0]).toMatchObject({
+          gate: {
+            branch: "story",
+            prdPasses: true,
+            phase: "reviewed",
+            script: "test -f ready",
+          },
+          setsPhase: "verified",
+        });
+      },
+    );
+  });
+
+  test.each([
+    ["gate is not a mapping", "    gate: story", /steps\.build\.gate must be a mapping/],
+    ["gate has an unknown key", "    gate:\n      bogus: true", /steps\.build\.gate\.bogus is not a valid gate key/],
+    ["branch is invalid", "    gate:\n      branch: release", /steps\.build\.gate\.branch must be \"story\" or \"main\"/],
+    ["prdPasses is false", "    gate:\n      prdPasses: false", /steps\.build\.gate\.prdPasses must be true/],
+    ["phase is invalid", "    gate:\n      phase: shipped", /steps\.build\.gate\.phase must be one of:/],
+    ["script is not a string", "    gate:\n      script: 42", /steps\.build\.gate\.script must be a string/],
+    ["script is empty", '    gate:\n      script: ""', /steps\.build\.gate\.script cannot be empty/],
+  ])("rejects an invalid gate when %s", (_description, gateYaml, expected) => {
+    withConfigDir(`steps:\n  build:\n    prompt: hi\n${gateYaml}\n`, (dir) => {
+      expect(() => loadSteps(dir)).toThrow(expected);
+    });
+  });
+
+  test("rejects an invalid setsPhase", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    setsPhase: shipped\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.setsPhase must be one of:/);
+    });
+  });
+
+  test("continues to ignore unknown step keys", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    futureGateFeature: enabled\n", (dir) => {
+      expect(loadSteps(dir)).toHaveLength(1);
+    });
+  });
+
   test("parses variant string, null disable, and rejects empty string", () => {
     withConfigDir(
       [
@@ -185,6 +239,9 @@ describe("adjudicate config parsing", () => {
         "  questionPolicy: reject",
         "  context:",
         "    prd: false",
+        "  gate:",
+        "    branch: main",
+        "  setsPhase: merged",
         "steps:",
         "  build:",
         "    prompt: build.md",
@@ -204,6 +261,8 @@ describe("adjudicate config parsing", () => {
           permissionPolicy: { edit: "always" },
           questionPolicy: "reject",
           contextPolicy: { prd: false },
+          gate: { branch: "main" },
+          setsPhase: "merged",
         });
       },
     );
@@ -283,6 +342,12 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects an empty prd directory", () => {
     withConfigDir("prd: \"\"\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/prd cannot be empty/);
+    });
+  });
+
+  test.each(["prdPasses: true", "phase: reviewed"])("rejects a %s gate without prd, naming the step", (gateEntry) => {
+    withConfigDir(`steps:\n  build-release:\n    prompt: hi\n    gate:\n      ${gateEntry}\n`, (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd:/);
     });
   });
 
