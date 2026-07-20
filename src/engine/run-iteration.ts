@@ -7,8 +7,8 @@ import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, t
 import { readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
-import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForFailure, nextActionForOrphanedBackgroundNudge, shouldEvaluatePriorSessionForReattach } from "../core/retry-policy.ts";
-import { createStepAttemptState } from "../core/step-attempt.ts";
+import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
+import { createStepAttemptState, decideAfterFailurePolicy, decideAfterPriorEvaluation, decideAfterPriorHealth, type PriorHealthDecision } from "../core/step-attempt.ts";
 import type { TitleService } from "./engine-ports.ts";
 import { TitleCoordinator, titleModeFor } from "./title-coordinator.ts";
 import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
@@ -881,12 +881,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (result.status === "failed") {
         const errReason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
         const stopRequested = state.quitting || stopFileExists();
-        const failureDecision = nextActionForFailure({
-          failureRetryCount: attempt.failureRetryCount,
-          suppressFailureRetry: attempt.suppressFailureRetry,
-          ...(attempt.suppressReason !== undefined ? { suppressReason: attempt.suppressReason } : {}),
-          stopRequested,
-        });
+        const failureDecision = decideAfterFailurePolicy(attempt, { stopRequested });
 
         if (failureDecision.kind === "fail") {
           const skipReason = failureDecision.reason;
@@ -926,26 +921,20 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               messageID: attempt.lastPromptMessageID,
             });
           }
-          const shouldReattach =
-            ev.pending ||
-            ev.classification.kind === "done" ||
-            ev.classification.kind === "in-progress";
-          if (shouldReattach) {
-            if (!shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: attempt.lastPromptMessageID, reattachCount: attempt.reattachCount })) {
-              const reason = ev.pending
-                ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`
-                : ev.classification.kind === "in-progress"
-                  ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`
-                  : `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
-              result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, reason);
-              break;
-            }
+          const priorEvaluationDecision = decideAfterPriorEvaluation(attempt, {
+            evaluation: ev,
+            reattachAllowed: {
+              sessionID: priorSessionForCheck,
+              messageID: attempt.lastPromptMessageID,
+            },
+          });
+          if (priorEvaluationDecision.kind === "leave-session-alone") {
+            result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, priorEvaluationDecision.reason);
+            break;
+          }
+          if (priorEvaluationDecision.kind === "reattach") {
             attempt.reattachCount += 1;
-            const why = ev.pending
-              ? "session still busy on opencode side"
-              : ev.classification.kind === "done"
-                ? "assistant message completed server-side despite client error"
-                : "assistant message still in-progress";
+            const why = priorEvaluationDecision.why;
             pushAgentLine(state, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pendingResult = await reattachOpenCodeStep({
@@ -963,8 +952,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             });
             continue;
           }
-          if (ev.classification.kind === "failed" || ev.classification.kind === "empty") {
-            attempt.lastErrorMessage = ev.classification.errorMessage;
+          if (priorEvaluationDecision.kind === "classify-failure") {
+            attempt.lastErrorMessage = priorEvaluationDecision.errorMessage;
           }
         }
 
@@ -974,21 +963,26 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         if (priorSessionID !== undefined) {
           let pending: SessionHealthState = await sessionPendingState(client, repoDir, priorSessionID);
           if (pending === "unknown") pending = await waitForRecoverableHealth(priorSessionID, currentStepIndex);
-          if (pending === "stopped") {
-            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
-            continue;
-          }
-          if (pending === "unknown") {
-            result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
-            break;
-          }
-          if (pending !== "idle") {
+          let priorHealthDecision: PriorHealthDecision;
+          if (pending === "pending") {
             const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting before retrying in a fresh session`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
+            const stopConfirmed = await stopPriorSession(priorSessionID, currentStepIndex);
+            priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending, stopConfirmed });
+          } else {
+            priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending });
           }
-          if (pending !== "idle" && !(await stopPriorSession(priorSessionID, currentStepIndex))) {
+          if (priorHealthDecision.kind === "interrupted-health-wait") {
+            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
+            continue;
+          }
+          if (priorHealthDecision.kind === "leave-session-alone") {
+            result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
+            break;
+          }
+          if (priorHealthDecision.kind === "fail-closed") {
             result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "retrying in a fresh session");
             break;
           }
