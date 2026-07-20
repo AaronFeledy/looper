@@ -17,7 +17,7 @@ type Scratch = { readonly repoDir: string; readonly configDir: string; readonly 
 
 const scratchDirs: string[] = [];
 
-async function setup(setsPhase?: string): Promise<Scratch> {
+async function setup(setsPhase?: string, title?: string): Promise<Scratch> {
   const repoDir = join(import.meta.dir, ".tmp", `story-phase-${crypto.randomUUID()}`);
   const configDir = join(repoDir, ".looper");
   const prdDir = join(repoDir, "spec");
@@ -26,7 +26,7 @@ async function setup(setsPhase?: string): Promise<Scratch> {
   writeFileSync(join(configDir, "build.md"), "build the story\n");
   writeFileSync(
     join(configDir, "looper.yaml"),
-    ["prd: ../../spec", "steps:", "  build:", "    prompt: build.md", ...(setsPhase === undefined ? [] : [`    setsPhase: ${setsPhase}`])].join("\n") + "\n",
+    ["prd: ../../spec", "steps:", "  build:", "    prompt: build.md", ...(setsPhase === undefined ? [] : [`    setsPhase: ${setsPhase}`]), ...(title === undefined ? [] : [`    title: ${title}`])].join("\n") + "\n",
   );
   writePrd(prdDir, true);
   await $`git init -q -b us-074-story-state`.cwd(repoDir).quiet();
@@ -47,8 +47,9 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   });
 }
 
-function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { readonly client: OpencodeClient; readonly prompts: string[] } {
+function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { readonly client: OpencodeClient; readonly prompts: string[]; readonly titleUpdates: string[] } {
   const prompts: string[] = [];
+  const titleUpdates: string[] = [];
   const client = {
     session: {
       create: async () => ({ data: { id: "ses_build" } }),
@@ -66,6 +67,10 @@ function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { read
       messages: async () => ({ data: [] }),
       children: async () => ({ data: [] }),
       abort: async () => ({ data: {} }),
+      update: async ({ title }: { title: string }) => {
+        titleUpdates.push(title);
+        return { data: {} };
+      },
     },
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
@@ -73,7 +78,7 @@ function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { read
       }),
     },
   } as unknown as OpencodeClient;
-  return { client, prompts };
+  return { client, prompts, titleUpdates };
 }
 
 function adjudication() {
@@ -182,5 +187,23 @@ describe("runIteration story phase wiring", () => {
     expect(state.steps[0]?.status).toBe("failed");
     expect(state.agentLines.some((line) => line.includes("[looper] story phase write failed for US-074:"))).toBe(true);
     expect(state.steps[0]?.outputLines.some((line) => line.includes("[looper] story phase write failed for US-074:"))).toBe(true);
+  });
+
+  test("story-state write failure cancels branch-title coordination", async () => {
+    // Given a phase-writing step with branch-title coordination and an unwritable state target.
+    const scratch = await setup("reviewed", "branch");
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    state.branch = "us-074-story-state";
+    const stub = clientFor(scratch.repoDir, () => mkdirSync(join(scratch.configDir, ".looper-story-state.json")));
+
+    // When phase persistence fails and the branch changes after the rejection.
+    const run = runIteration({ state, iteration: 1, client: stub.client, ...scratch });
+    const error = await run.then<unknown>(() => undefined, (caught) => caught);
+    state.branch = "us-075-next-story";
+    await Bun.sleep(600);
+
+    // Then the rejected step's branch poll cannot apply a late title.
+    expect(error).toBeInstanceOf(StepFailureError);
+    expect(stub.titleUpdates).toEqual([]);
   });
 });
