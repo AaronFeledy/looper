@@ -65,6 +65,7 @@ import type { GithubWatcher } from "./watchers/github.ts";
 import type { PrdWatcher } from "./watchers/prd.ts";
 import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
+import { createStoryStateStore } from "./persistence/story-state-store.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
@@ -180,6 +181,7 @@ function configuredStepAgents(steps: readonly Step[]): string[] {
 async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
+  const storyStateStore = createStoryStateStore({ configDir });
   const steps = loadSteps(configDir);
   if (options.start) runStateStore.clearStopFiles();
   if (options.fresh) {
@@ -187,6 +189,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     adjudicationStore.clearHistory();
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
+    storyStateStore.clear();
   }
   let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
 
@@ -615,6 +618,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         adjudicationStore.clearHistory();
         adjudicationStore.clearMarker();
         adjudicationStore.clearSession();
+        storyStateStore.clear();
       }
       if (!state.started) {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {

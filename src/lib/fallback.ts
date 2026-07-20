@@ -17,6 +17,7 @@ import { divider, label, ui } from "./fallback-ui.ts";
 import { createAdjudicationStore, type AdjudicationStore } from "../persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
+import { createStoryStateStore } from "../persistence/story-state-store.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -65,12 +66,14 @@ export async function runNonTty({
 }: FallbackOptions): Promise<void> {
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
+  const storyStateStore = createStoryStateStore({ configDir });
   runStateStore.clearStopFiles();
   if (options.fresh) {
     runStateStore.clearRunArtifacts();
     adjudicationStore.clearHistory();
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
+    storyStateStore.clear();
   }
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
