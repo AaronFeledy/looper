@@ -34,6 +34,7 @@ import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAtt
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
 import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
+import { comparePhase } from "../lib/story-state-files.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
 import {
   decideRouting,
@@ -269,6 +270,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
   let pendingAdjudicateStep: LoadedStep | undefined;
   let initialRoutingChecked = false;
+  const storyState = createStoryStateStore({ configDir });
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -377,6 +379,30 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (step === undefined) break;
     const executionIndex = adjudicating ? steps.length : index;
     const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+    const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
+    const needsStoryFacts = !adjudicating && (
+      step.gate !== undefined ||
+      stepContextPolicy.story ||
+      step.setsPhase !== undefined ||
+      (adjudication !== undefined && prdDir !== undefined)
+    );
+    const branch = needsStoryFacts ? await currentGitBranch(repoDir) : undefined;
+    const storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
+    const passesByStory = !adjudicating && prdDir !== undefined && (step.gate !== undefined || stepContextPolicy.story)
+      ? readPrdPasses(prdDir)
+      : undefined;
+    const passes = storyId === undefined ? undefined : passesByStory?.[storyId];
+    const phase = storyId === undefined || (!stepContextPolicy.story && step.gate === undefined && step.setsPhase === undefined)
+      ? undefined
+      : storyState.readPhase(storyId);
+    const storyFacts: ContextInput["story"] = branch === undefined
+      ? undefined
+      : {
+          branch,
+          ...(storyId !== undefined ? { storyId } : {}),
+          ...(passes !== undefined ? { passes } : {}),
+          ...(phase !== undefined ? { phase } : {}),
+        };
 
     const finalizeLogicalStep = (input: {
       readonly status: StepResult;
@@ -411,11 +437,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     };
 
     if (!adjudicating && step.gate !== undefined) {
-      const branch = await currentGitBranch(repoDir);
-      const storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
-      const passesByStory = prdDir === undefined ? undefined : readPrdPasses(prdDir);
-      const passes = storyId === undefined ? undefined : passesByStory?.[storyId];
-      const phase = storyId === undefined ? undefined : createStoryStateStore({ configDir }).readPhase(storyId);
       const scriptResult = step.gate.script === undefined
         ? undefined
         : await runGateScript(step.gate.script, {
@@ -738,7 +759,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = pendingResult;
         pendingResult = undefined;
       } else {
-        const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
         const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
           name: entry.name,
           status: entry.status,
@@ -761,6 +781,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           timeoutMs: budgetMs,
           ...(prd !== undefined ? { prd } : {}),
           ...(vcs !== undefined ? { vcs } : {}),
+          ...(stepContextPolicy.story && storyFacts !== undefined ? { story: storyFacts } : {}),
         };
         const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
         const stepBasePrompt = adjudicating
@@ -1114,6 +1135,27 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         stepName: step.name,
         detect: !adjudicating,
       });
+    }
+
+    const passesFlippedToFalse = storyId !== undefined && prdBefore?.[storyId] === true && prdAfter?.[storyId] === false;
+    try {
+      if (result.status === "done" && step.setsPhase !== undefined && storyId !== undefined && !passesFlippedToFalse) {
+        const currentPhase = storyState.readPhase(storyId);
+        if (currentPhase === undefined || comparePhase(currentPhase, step.setsPhase) < 0) {
+          storyState.writePhase(storyId, step.setsPhase);
+        }
+      }
+      if (passesFlippedToFalse && storyId !== undefined) {
+        storyState.writePhase(storyId, "building");
+        logStepLine(currentStepIndex, `[looper] auto-demoted ${storyId} story phase to building after passes flipped true to false`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const sessionID = state.steps[currentStepIndex]?.sessionID;
+      throw new StepFailureError(
+        `could not persist story phase for ${storyId ?? "current branch"}: ${message}`,
+        { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },
+      );
     }
 
     const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
