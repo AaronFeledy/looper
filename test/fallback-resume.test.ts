@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 
+import * as orchestrator from "../src/lib/orchestrator.ts";
 import { computeNonTtyResumePlan, runNonTtyIterations } from "../src/lib/fallback.ts";
 import { initStatePaths, readRunState, writeRunState } from "../src/lib/state-files.ts";
 
@@ -184,8 +185,40 @@ function makeClient(opts: { repoDir: string; sessionIDs: string[] }): { client: 
 describe("runNonTtyIterations resume wiring", () => {
   let scratch: string | undefined;
   afterEach(() => {
+    mock.restore();
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
     scratch = undefined;
+  });
+
+  test("passes a custom story id pattern through the non-TTY iteration path", async () => {
+    // Given a non-TTY run configured with a custom story id pattern.
+    const { repoDir, configDir } = setupScratch(["build"]);
+    scratch = repoDir;
+    const { client } = makeClient({ repoDir, sessionIDs: [] });
+    let receivedPattern: string | undefined;
+    spyOn(orchestrator, "runIteration").mockImplementation(async (input) => {
+      receivedPattern = input.storyIdPattern;
+      return "complete";
+    });
+    const priorExitCode = process.exitCode ?? 0;
+
+    // When one non-TTY iteration runs.
+    try {
+      await runNonTtyIterations({
+        options: { attach: false, configDir, fresh: false, init: false, maxIterations: 1, start: true, waitProvided: false, waitDuration: 0 },
+        repoDir,
+        configDir,
+        client,
+        recoverySnapshots: false,
+        storyIdPattern: "^story/([a-z]+-[0-9]+)$",
+        currentBranch: async () => "story/us-074",
+      });
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+
+    // Then RunIterationOptions receives the configured pattern unchanged.
+    expect(receivedPattern).toBe("^story/([a-z]+-[0-9]+)$");
   });
 
   test(

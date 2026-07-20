@@ -73,6 +73,7 @@ type RawConfig = {
   context?: unknown;
   prd?: unknown;
   prdFlipThreshold?: unknown;
+  storyIdPattern?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -103,6 +104,7 @@ export type RuntimeConfig = {
   contextPolicy?: ContextPolicyOverride;
   prdDir?: string;
   prdFlipThreshold?: number;
+  storyIdPattern?: string;
   useSessionIdle: boolean;
   validateResources: boolean;
 };
@@ -456,6 +458,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
   const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
+  const storyIdPattern = optionalNonEmptyStringValue(rawConfig.storyIdPattern, "storyIdPattern");
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -465,6 +468,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
+    ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };

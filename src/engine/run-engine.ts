@@ -43,6 +43,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
+  readonly storyIdPattern?: string;
   readonly adjudication?: AdjudicationConfig;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
@@ -200,6 +201,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.questionPolicy !== undefined ? { questionPolicy: input.questionPolicy } : {}),
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
+        ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
         ...(input.adjudication !== undefined
           ? { adjudication: { ...input.adjudication, writeStop: input.store.writeStop } }
           : {}),

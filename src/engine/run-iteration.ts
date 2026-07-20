@@ -157,6 +157,7 @@ export type RunIterationOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   prdDir?: string;
+  storyIdPattern?: string;
   adjudication?: AdjudicationRuntime;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the

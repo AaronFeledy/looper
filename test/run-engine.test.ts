@@ -95,6 +95,36 @@ describe("computeRunResumePlan", () => {
 });
 
 describe("runEngine", () => {
+  test("passes a custom story id pattern to the TTY iteration path", async () => {
+    // Given a run engine configured with a custom story id pattern.
+    let receivedPattern: string | undefined;
+
+    // When one iteration runs through the shared TTY engine path.
+    await runEngine({
+      maxIterations: 1,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: {},
+      store: memoryStore(),
+      hooks: { createIterationState: () => ({}) },
+      loadSteps: () => [{ name: "build", prompt: "build.md" }],
+      currentBranch: async () => "story/us-074",
+      createLooperRunID: () => "run",
+      legacyResumeStepIndex: () => 0,
+      storyIdPattern: "^story/([a-z]+-[0-9]+)$",
+      runIteration: async (input) => {
+        receivedPattern = input.storyIdPattern;
+        return "complete";
+      },
+    });
+
+    // Then RunIterationOptions receives the configured pattern unchanged.
+    expect(receivedPattern).toBe("^story/([a-z]+-[0-9]+)$");
+  });
+
   test("persists session bind, step advance, and drops title/stepSessions at iteration boundary", async () => {
     const store = memoryStore();
     const calls: string[] = [];

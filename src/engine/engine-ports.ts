@@ -123,6 +123,7 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
+  readonly storyIdPattern?: string;
   readonly adjudication?: AdjudicationRuntime;
   readonly maxIterations?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;

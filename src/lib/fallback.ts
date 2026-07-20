@@ -32,6 +32,7 @@ export type FallbackOptions = {
   useSessionIdle?: boolean;
   prdDir?: string;
   prdFlipThreshold?: number;
+  storyIdPattern?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 };
@@ -58,6 +59,7 @@ export async function runNonTty({
   useSessionIdle,
   prdDir,
   prdFlipThreshold: configuredPrdFlipThreshold,
+  storyIdPattern,
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
@@ -106,6 +108,7 @@ export async function runNonTty({
       ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
       ...(prdDir !== undefined ? { prdDir } : {}),
       ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
+      ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
       adjudicationStore,
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       currentBranch,
@@ -170,6 +173,7 @@ export async function runNonTtyIterations({
   useSessionIdle,
   prdDir,
   configuredPrdFlipThreshold,
+  storyIdPattern,
   adjudicationStore,
   contextPolicy,
   currentBranch,
@@ -185,6 +189,7 @@ export async function runNonTtyIterations({
   useSessionIdle?: boolean;
   prdDir?: string;
   configuredPrdFlipThreshold?: number;
+  storyIdPattern?: string;
   adjudicationStore?: AdjudicationStore;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
@@ -216,6 +221,7 @@ export async function runNonTtyIterations({
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
+    ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     adjudication,
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     hooks: createFallbackEngineHooks(currentBranch),

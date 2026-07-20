@@ -244,8 +244,27 @@ describe("loadRuntimeConfig policy and flags", () => {
       expect(cfg.permissionPolicy).toBeUndefined();
       expect(cfg.questionPolicy).toBeUndefined();
       expect(cfg.prdDir).toBeUndefined();
+      expect(cfg.storyIdPattern).toBeUndefined();
       expect(cfg.useSessionIdle).toBe(false);
       expect(cfg.validateResources).toBe(false);
+    });
+  });
+
+  test("parses a top-level storyIdPattern", () => {
+    withConfigDir("storyIdPattern: '^story/([a-z]+-[0-9]+)$'\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).storyIdPattern).toBe("^story/([a-z]+-[0-9]+)$");
+    });
+  });
+
+  test("rejects an empty storyIdPattern", () => {
+    withConfigDir('storyIdPattern: ""\nsteps:\n  build:\n    prompt: hi\n', (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/storyIdPattern cannot be empty/);
+    });
+  });
+
+  test("rejects a non-string storyIdPattern", () => {
+    withConfigDir("storyIdPattern: 74\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/storyIdPattern must be a string/);
     });
   });
 
