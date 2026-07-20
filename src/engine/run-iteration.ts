@@ -1152,6 +1152,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const sessionID = state.steps[currentStepIndex]?.sessionID;
+      failStepRow(state, currentStepIndex, "failed");
+      logStepLine(currentStepIndex, `[looper] story phase write failed for ${storyId ?? "current branch"}: ${message}`);
       throw new StepFailureError(
         `could not persist story phase for ${storyId ?? "current branch"}: ${message}`,
         { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },

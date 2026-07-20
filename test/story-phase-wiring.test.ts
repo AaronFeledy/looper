@@ -159,6 +159,7 @@ describe("runIteration story phase wiring", () => {
     // Given a phase-writing step whose state target cannot be atomically replaced.
     const scratch = await setup("reviewed");
     const store = createRunStateStore({ configDir: scratch.configDir });
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
 
     // When the engine reaches phase persistence.
     const error = await (async (): Promise<unknown> => {
@@ -167,7 +168,7 @@ describe("runIteration story phase wiring", () => {
           client: clientFor(scratch.repoDir, () => mkdirSync(join(scratch.configDir, ".looper-story-state.json"))).client, store,
           loadSteps: () => [{ name: "Build", prompt: join(scratch.configDir, "build.md"), setsPhase: "reviewed" }],
           currentBranch: async () => "us-074-story-state", createLooperRunID: () => "run-phase-failure", legacyResumeStepIndex: () => 0,
-          hooks: { createIterationState: () => createLoopState({ maxIterations: 1, stepNames: ["Build"] }) }, runIteration });
+          hooks: { createIterationState: () => state }, runIteration });
         return undefined;
       } catch (caught) {
         return caught;
@@ -178,5 +179,8 @@ describe("runIteration story phase wiring", () => {
     expect(error).toBeInstanceOf(StepFailureError);
     expect(readRunState()?.stepName).toBe("Build");
     expect(JSON.parse(readFileSync(join(scratch.configDir, ".looper-run.json"), "utf8"))["stepIndex"]).toBe(0);
+    expect(state.steps[0]?.status).toBe("failed");
+    expect(state.agentLines.some((line) => line.includes("[looper] story phase write failed for US-074:"))).toBe(true);
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("[looper] story phase write failed for US-074:"))).toBe(true);
   });
 });
