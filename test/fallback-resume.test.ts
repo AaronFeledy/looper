@@ -70,6 +70,24 @@ describe("computeNonTtyResumePlan", () => {
     expect(plan.iterationStepSessions).toEqual([]);
   });
 
+  test("an old run-state fixture without newer optional fields still loads", () => {
+    // Given a persisted run-state written by an older Looper release.
+    const { repoDir, configDir } = setupScratch(["build", "review"]);
+    scratch = repoDir;
+    writeFileSync(
+      join(configDir, ".looper-run.json"),
+      JSON.stringify({ iteration: 2, stepIndex: 1, stepName: "review", sessionID: "ses_old", updatedAt: "2025-01-01T00:00:00.000Z" }),
+    );
+
+    // When the current resume planner reads it.
+    const plan = computeNonTtyResumePlan(configDir, { fresh: false, maxIterations: 5 });
+
+    // Then it preserves the old in-flight session without requiring newer fields.
+    expect(plan.firstStartStepIndex).toBe(1);
+    expect(plan.firstIterationResume).toEqual({ sessionID: "ses_old", stepName: "review" });
+    expect(plan.iterationStepSessions).toEqual([]);
+  });
+
   test("--fresh ignores persisted run-state entirely", () => {
     const { repoDir, configDir } = setupScratch(["build", "review"]);
     scratch = repoDir;

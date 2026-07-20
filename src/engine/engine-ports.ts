@@ -2,6 +2,7 @@ import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { ContextPolicy, PermissionPolicy, QuestionPolicy, RecoverySnapshotsConfig, TitleGenConfig } from "../lib/config.ts";
 import type { Step, StepResult } from "../lib/runner.ts";
+import type { StepCompletionKind } from "./run-iteration.ts";
 import type { LooperSessionMetadataInput } from "../lib/session-metadata.ts";
 import type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
@@ -58,7 +59,7 @@ export type EngineRecoveryChoice = "restart" | "nudge" | "quit";
 
 export type RunIterationHooks = {
   readonly onStepBegin?: (info: { readonly step: Step; readonly index: number; readonly totalSteps: number; readonly iteration: number; readonly title?: string }) => void;
-  readonly onStepFinish?: (info: { readonly step: Step; readonly index: number; readonly nextIndex: number; readonly totalSteps: number; readonly iteration: number; readonly status: StepResult; readonly title?: string }) => void;
+  readonly onStepFinish?: (info: { readonly step: Step; readonly index: number; readonly nextIndex: number; readonly totalSteps: number; readonly iteration: number; readonly status: StepResult; readonly completionKind: StepCompletionKind; readonly title?: string }) => void;
   readonly onStepSession?: (info: { readonly iteration: number; readonly index: number; readonly stepName: string; readonly sessionID: string; readonly messageID: string; readonly promptText?: string; readonly looperMessageIDs?: string[]; readonly title?: string }) => void;
   readonly onAdjudicationRoute?: (info: { readonly iteration: number; readonly totalSteps: number }) => void;
 };

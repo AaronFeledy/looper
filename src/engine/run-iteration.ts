@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { DEFAULT_STEP_TIMEOUT_MS, inheritedRenameDelayMs } from "../config/tunables.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, gateScriptTimeoutMs, inheritedRenameDelayMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
@@ -33,14 +33,18 @@ import {
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
+import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
+import { createStoryStateStore } from "../persistence/story-state-store.ts";
 import {
   decideRouting,
   insertAdjudicationRow,
+  readPrdPasses,
   recordStepTransitions,
   snapshotPrd,
   withAdjudicationReason,
   type AdjudicationRuntime,
 } from "./adjudication-routing.ts";
+import { evaluateGate, runGateScript } from "./step-gate.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -113,9 +117,11 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
   notify();
 }
 
+export type StepCompletionKind = "done" | "gate-skip" | "runtime-skip";
+
 export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
-  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; title?: string }) => void;
+  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; completionKind: StepCompletionKind; title?: string }) => void;
   onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[]; title?: string }) => void;
   onAdjudicationRoute?: (info: { iteration: number; totalSteps: number }) => void;
 };
@@ -235,6 +241,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     questionPolicy,
     useSessionIdle,
     prdDir,
+    storyIdPattern,
     adjudication,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -370,6 +377,84 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (step === undefined) break;
     const executionIndex = adjudicating ? steps.length : index;
     const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+
+    const finalizeLogicalStep = (input: {
+      readonly status: StepResult;
+      readonly completionKind: StepCompletionKind;
+      readonly nextIndex: number;
+      readonly rowIndex: number;
+      readonly recordPriorStep: boolean;
+    }): void => {
+      hooks?.onStepFinish?.({
+        step,
+        index,
+        nextIndex: input.nextIndex,
+        totalSteps: steps.length,
+        iteration,
+        status: input.status,
+        completionKind: input.completionKind,
+        ...(workDescription !== undefined ? { title: workDescription } : {}),
+      });
+
+      if (input.recordPriorStep) {
+        const finishedSessionID = state.steps[input.rowIndex]?.sessionID;
+        completedLogicalSteps.push({
+          stepIndex: index,
+          name: step.name,
+          status: input.status,
+          ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+        });
+      }
+
+      completed.splice(0, completed.length, ...state.steps.slice(0, input.rowIndex + 1).map((row) => ({ ...row })));
+      index = input.nextIndex;
+    };
+
+    if (!adjudicating && step.gate !== undefined) {
+      const branch = await currentGitBranch(repoDir);
+      const storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
+      const passesByStory = prdDir === undefined ? undefined : readPrdPasses(prdDir);
+      const passes = storyId === undefined ? undefined : passesByStory?.[storyId];
+      const phase = storyId === undefined ? undefined : createStoryStateStore({ configDir }).readPhase(storyId);
+      const scriptResult = step.gate.script === undefined
+        ? undefined
+        : await runGateScript(step.gate.script, {
+            repoDir,
+            ...(branch !== undefined ? { branch } : {}),
+            ...(storyId !== undefined ? { storyId } : {}),
+            timeoutMs: gateScriptTimeoutMs(),
+          });
+      const gateDecision = evaluateGate({
+        gate: step.gate,
+        branch,
+        storyId,
+        passes,
+        phase,
+        ...(scriptResult !== undefined ? { scriptResult } : {}),
+      });
+      if (!gateDecision.pass) {
+        const resumedSessionID = pendingResume?.sessionID;
+        if (resumedSessionID !== undefined && !(await stopPriorSession(resumedSessionID, currentStepIndex))) {
+          throw new StepFailureError(
+            `could not confirm session ${resumedSessionID} stopped; not gate-skipping ${step.name} to avoid overlapping opencode generations`,
+            { stepName: step.name, sessionID: resumedSessionID },
+          );
+        }
+        pendingResume = undefined;
+        recoveryNudgePending = false;
+        failStepRow(state, currentStepIndex, "skipped");
+        logStepLine(currentStepIndex, `[looper] gate skipped ${step.name}: ${gateDecision.reason}`);
+        finalizeLogicalStep({
+          status: "skipped",
+          completionKind: "gate-skip",
+          nextIndex: index + 1,
+          rowIndex: currentStepIndex,
+          recordPriorStep: false,
+        });
+        continue;
+      }
+    }
+
     if (!adjudicating) hooks?.onStepBegin?.({ step, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
     const prdBefore = snapshotPrd(adjudication, prdDir);
     const stepSessionMetadata = looperRunID === undefined
@@ -1132,19 +1217,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     }
 
     const routed = routing.kind !== "continue";
-    hooks?.onStepFinish?.({ step, index, nextIndex: routed ? steps.length : index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
-
-    const finishedSessionID = state.steps[currentStepIndex]?.sessionID;
-    completedLogicalSteps.push({
-      stepIndex: index,
-      name: step.name,
+    finalizeLogicalStep({
       status: result.status,
-      ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+      completionKind: result.status === "done" ? "done" : "runtime-skip",
+      nextIndex: routed ? steps.length : index + 1,
+      rowIndex: currentStepIndex,
+      recordPriorStep: true,
     });
-
-    completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
-
-    index = routed ? steps.length : index + 1;
   }
 
   return state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()
