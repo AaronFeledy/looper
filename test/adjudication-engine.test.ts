@@ -233,7 +233,7 @@ describe("PRD adjudication routing", () => {
     createAdjudicationStore({ configDir: scratch.configDir }).writeMarker("fallback route");
     const stub = clientFor(scratch.repoDir, () => createRunStateStore({ configDir: scratch.configDir }).writeStop("adjudication complete"));
 
-    await runNonTtyIterations({ options: { attach: false, fresh: false, init: false, start: true, maxIterations: 1, waitProvided: false, waitDuration: 0 }, ...scratch, client: stub.client, recoverySnapshots: false, currentBranch: async () => "main" });
+    await runNonTtyIterations({ options: { attach: false, command: { kind: "run" }, fresh: false, start: true, maxIterations: 1, waitProvided: false, waitDuration: 0 }, ...scratch, client: stub.client, recoverySnapshots: false, currentBranch: async () => "main" });
 
     expect(stub.prompts).toHaveLength(1);
     expect(stub.prompts[0]).toContain("resolve the PRD conflict");

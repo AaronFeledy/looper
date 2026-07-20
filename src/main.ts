@@ -5,7 +5,7 @@ import { BoxRenderable, createCliRenderer, type CliRenderer } from "@opentui/cor
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { join, resolve } from "node:path";
 
-import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
+import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl, usage, UsageError } from "./lib/args.ts";
 import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
 import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadAdjudicateStep, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
@@ -66,6 +66,7 @@ import type { PrdWatcher } from "./watchers/prd.ts";
 import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 import { createStoryStateStore } from "./persistence/story-state-store.ts";
+import { handleSignal } from "./lib/signal.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
@@ -816,20 +817,40 @@ async function main(): Promise<number> {
       process.stdout.write(error.message);
       return 0;
     }
+    if (error instanceof UsageError) {
+      process.stderr.write(`error: ${error.message}\n\n${usage()}`);
+      return 2;
+    }
     throw error;
   }
 
   configDir = resolveConfigDir(options.configDir);
 
-  if (options.init) {
-    const result = scaffoldConfigDir({ configDir, repoDir });
-    if (result.kind === "already-initialized") {
-      process.stdout.write(`Already initialized: ${result.configPath}\n`);
+  switch (options.command.kind) {
+    case "init": {
+      const result = scaffoldConfigDir({ configDir, repoDir });
+      if (result.kind === "already-initialized") {
+        process.stdout.write(`Already initialized: ${result.configPath}\n`);
+        return 0;
+      }
+      for (const file of result.files) process.stdout.write(`created ${file}\n`);
+      process.stdout.write(`\nEdit the prompts, then run \`looper\` (or \`looper --start\`) from ${repoDir}.\n`);
       return 0;
     }
-    for (const file of result.files) process.stdout.write(`created ${file}\n`);
-    process.stdout.write(`\nEdit the prompts, then run \`looper\` (or \`looper --start\`) from ${repoDir}.\n`);
-    return 0;
+    case "signal":
+      ensureConfigDir();
+      try {
+        process.stdout.write(`${await handleSignal({ command: options.command.signal, configDir, repoDir })}\n`);
+        return 0;
+      } catch (error) {
+        if (error instanceof UsageError) {
+          process.stderr.write(`error: ${error.message}\n\n${usage()}`);
+          return 2;
+        }
+        throw error;
+      }
+    case "run":
+      break;
   }
 
   ensureConfigDir();
