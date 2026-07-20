@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { CONTEXT_KEYS, DEFAULT_CONTEXT_POLICY, type ContextKey } from "../src/lib/config.ts";
 import {
   buildLooperContext,
   withLooperContext,
@@ -19,6 +20,7 @@ const ALL_ON: ContextPolicy = {
   prd: true,
   vcsDelta: true,
   sessionIds: true,
+  story: true,
 };
 
 const ALL_OFF: ContextPolicy = {
@@ -29,7 +31,19 @@ const ALL_OFF: ContextPolicy = {
   prd: false,
   vcsDelta: false,
   sessionIds: false,
+  story: false,
 };
+
+const CONTEXT_MARKERS = {
+  datetime: "Datetime:",
+  repoDir: "Repo dir:",
+  loopPosition: "Loop position:",
+  timebox: "This step is aborted after",
+  vcsDelta: "VCS delta",
+  sessionIds: "Opencode sessions from earlier steps this iteration:",
+  prd: "PRD:",
+  story: "story:",
+} satisfies Record<ContextKey, string>;
 
 function baseInput(overrides: Partial<ContextInput> = {}): ContextInput {
   return {
@@ -47,6 +61,45 @@ function baseInput(overrides: Partial<ContextInput> = {}): ContextInput {
 }
 
 describe("buildLooperContext", () => {
+  test("keeps context keys, defaults, and all-on rendered sections in sync", () => {
+    const input = baseInput({
+      prd: { remaining: 13, total: 41 },
+      priorSteps: [{ name: "build", status: "done", sessionID: "ses_build1" }],
+      vcs: { branch: "feature/US-007", changes: [] },
+      story: { branch: "feature/US-007", storyId: "US-007", passes: true, phase: "verified" },
+    });
+
+    const block = buildLooperContext(DEFAULT_CONTEXT_POLICY, input);
+
+    expect(Object.keys(DEFAULT_CONTEXT_POLICY).length).toBe(CONTEXT_KEYS.length);
+    for (const key of CONTEXT_KEYS) expect(block).toContain(CONTEXT_MARKERS[key]);
+  });
+
+  test("renders all known story facts", () => {
+    const input = baseInput({
+      story: { branch: "feature/US-007", storyId: "US-007", passes: false, phase: "reviewed" },
+    });
+
+    const block = buildLooperContext(ALL_ON, input);
+
+    expect(block).toContain("story:\n  branch: feature/US-007\n  storyId: US-007\n  passes: false\n  phase: reviewed");
+  });
+
+  test("renders only known story facts when optional facts are unavailable", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({ story: { branch: "feature/US-007" } }));
+
+    expect(block).toContain("story:\n  branch: feature/US-007");
+    expect(block).not.toContain("storyId:");
+    expect(block).not.toContain("passes:");
+    expect(block).not.toContain("phase:");
+  });
+
+  test("omits the story section when no branch is available", () => {
+    const input = baseInput({ story: { storyId: "US-007", passes: true, phase: "verified" } });
+
+    expect(buildLooperContext(ALL_ON, input)).not.toContain("story:");
+  });
+
   test("renders all sections when policy is all-on and data is present", () => {
     const input = baseInput({
       prd: { remaining: 13, total: 41 },
@@ -112,6 +165,7 @@ describe("buildLooperContext", () => {
       const input = baseInput({
         priorSteps: [{ name: "build", status: "done", sessionID: "ses_1" }],
         vcs: { branch: "main", changes: [{ file: "a.ts", additions: 1, deletions: 0, status: "modified" }] },
+        story: { branch: "feature/US-007", storyId: "US-007", passes: true, phase: "verified" },
       });
       const block = buildLooperContext(policy, input);
 
@@ -136,6 +190,9 @@ describe("buildLooperContext", () => {
           break;
         case "sessionIds":
           expect(block).not.toContain("Opencode sessions from earlier steps this iteration:");
+          break;
+        case "story":
+          expect(block).not.toContain("story:");
           break;
       }
     });

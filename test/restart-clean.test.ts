@@ -16,7 +16,7 @@ import { createLoopState, type LoopState } from "../src/lib/state.ts";
  * defaults on). Disabling it keeps the equality assertions focused on
  * restart wiring instead of also pinning unrelated context-block formatting.
  */
-const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false };
+const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false, story: false };
 
 function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
   const dir = join(repoDir, ".omo", "run-continuation");

@@ -1,0 +1,22 @@
+Todo 7: Story facts section in looper-context
+
+TDD
+- Baseline: `bun test test/prompt-context.test.ts test/config.test.ts` exited 0 before changes.
+- Red: `bun test test/prompt-context.test.ts --bail` failed because `DEFAULT_CONTEXT_POLICY` and the story context implementation were absent.
+- Green: `bun test test/prompt-context.test.ts test/config.test.ts` -> 93 pass, 0 fail, 164 assertions.
+
+Verification
+- LSP diagnostics: no diagnostics in all changed TypeScript files.
+- `bun run typecheck` -> passed (`tsc -p .`).
+- `bun test` -> 869 pass, 0 fail, 2032 assertions across 81 files.
+
+Coverage
+- All eight context keys are synchronized across `ContextPolicy`, `CONTEXT_KEYS`, and `DEFAULT_CONTEXT_POLICY`.
+- The all-on sync test proves every `CONTEXT_KEYS` entry has rendered output.
+- Story facts render all known fields, omit unavailable optional fields, and omit the whole block without a branch.
+- The table-driven policy toggle includes `story`; config parsing accepts per-step `context.story: false`.
+- Existing context output is unchanged when no story facts are supplied.
+
+Scope
+- No run-iteration wiring or story-state internals were changed.
+- Unrelated concurrent work in `src/config/tunables.ts`, `src/engine/step-gate.ts`, and `test/step-gate.test.ts` was left untouched and excluded from this commit.

@@ -20,6 +20,7 @@ const CONTEXT_OFF: ContextPolicy = {
   vcsDelta: false,
   sessionIds: false,
   prd: false,
+  story: false,
 };
 
 type TestMessage = {

@@ -14,7 +14,7 @@ export type QuestionPolicy = "ask" | "reject";
 // Keys of the `<looper-context>` prompt-injection block (see prompt-context.ts),
 // each individually toggleable via `context:` config. Kept in sync manually;
 // this list IS the config-side source of truth for valid keys.
-export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd"] as const;
+export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd", "story"] as const;
 export type ContextKey = (typeof CONTEXT_KEYS)[number];
 export type ContextPolicy = Record<ContextKey, boolean>;
 type ContextPolicyOverride = Partial<ContextPolicy>;
@@ -290,7 +290,7 @@ export function resolvePermissionAction(
   return "ask";
 }
 
-const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   datetime: true,
   repoDir: true,
   loopPosition: true,
@@ -298,6 +298,7 @@ const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   vcsDelta: true,
   sessionIds: true,
   prd: true,
+  story: true,
 };
 
 export function resolveContextPolicy(

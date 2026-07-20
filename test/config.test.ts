@@ -437,6 +437,7 @@ describe("context policy config parsing", () => {
         vcsDelta: true,
         sessionIds: true,
         prd: true,
+        story: true,
       });
     });
   });
@@ -456,6 +457,7 @@ describe("context policy config parsing", () => {
           vcsDelta: false,
           sessionIds: false,
           prd: false,
+          story: true,
         });
       },
     );
@@ -485,7 +487,20 @@ describe("context policy config parsing", () => {
           vcsDelta: true,
           sessionIds: true,
           prd: true,
+          story: true,
         });
+      },
+    );
+  });
+
+  test("per-step story context override disables the story section policy", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context:", "      story: false"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+
+        expect(resolveContextPolicy(steps[0]!, cfg).story).toBe(false);
       },
     );
   });
@@ -501,6 +516,7 @@ describe("context policy config parsing", () => {
         vcsDelta: false,
         sessionIds: false,
         prd: false,
+        story: false,
       });
       const steps = loadSteps(dir);
       expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
@@ -511,6 +527,7 @@ describe("context policy config parsing", () => {
         vcsDelta: false,
         sessionIds: false,
         prd: false,
+        story: false,
       });
     });
   });
@@ -529,6 +546,7 @@ describe("context policy config parsing", () => {
           vcsDelta: false,
           sessionIds: false,
           prd: false,
+          story: false,
         });
       },
     );
