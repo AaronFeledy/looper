@@ -5,6 +5,7 @@ import type { Step, StepResult } from "../lib/runner.ts";
 import type { LooperSessionMetadataInput } from "../lib/session-metadata.ts";
 import type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
+import type { AdjudicationRuntime } from "./adjudication-routing.ts";
 
 export type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 
@@ -59,6 +60,7 @@ export type RunIterationHooks = {
   readonly onStepBegin?: (info: { readonly step: Step; readonly index: number; readonly totalSteps: number; readonly iteration: number; readonly title?: string }) => void;
   readonly onStepFinish?: (info: { readonly step: Step; readonly index: number; readonly nextIndex: number; readonly totalSteps: number; readonly iteration: number; readonly status: StepResult; readonly title?: string }) => void;
   readonly onStepSession?: (info: { readonly iteration: number; readonly index: number; readonly stepName: string; readonly sessionID: string; readonly messageID: string; readonly promptText?: string; readonly looperMessageIDs?: string[]; readonly title?: string }) => void;
+  readonly onAdjudicationRoute?: (info: { readonly iteration: number; readonly totalSteps: number }) => void;
 };
 
 export type ResumeSession = {
@@ -121,6 +123,7 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly questionPolicy?: QuestionPolicy;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
+  readonly adjudication?: AdjudicationRuntime;
   readonly maxIterations?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly resumedStepSessions?: StepSessionEntry[];

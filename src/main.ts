@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUrl } from "./lib/args.ts";
 import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
-import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadAdjudicateStep, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { runNonTty } from "./lib/fallback.ts";
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
@@ -63,6 +63,8 @@ import { startBranchDiffWatcher, startBranchWatcher, startGithubWatcher, startPr
 import type { BranchDiffWatcher } from "./watchers/branch-diff-watcher.ts";
 import type { GithubWatcher } from "./watchers/github.ts";
 import type { PrdWatcher } from "./watchers/prd.ts";
+import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
+import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
@@ -74,13 +76,13 @@ const CONFIG_DIR_CANDIDATES = [
   join(repoDir, ".looper"),
   join(repoDir, ".local", "looper"),
   join(repoDir, ".local", ".looper"),
-];
+] as const;
 
 function resolveConfigDir(override: string | undefined): string {
   if (override !== undefined) return resolve(override);
   if (process.env.LOOPER_CONFIG_DIR) return resolve(process.env.LOOPER_CONFIG_DIR);
   const existing = CONFIG_DIR_CANDIDATES.find((candidate) => findConfigFile(candidate) !== undefined);
-  return existing ?? CONFIG_DIR_CANDIDATES[0]!;
+  return existing ?? CONFIG_DIR_CANDIDATES[0];
 }
 
 let configDir: string;
@@ -100,7 +102,8 @@ function ensureConfigExists(): void {
 
 function ensureConfigValid(): void {
   try {
-    assertPromptFilesExist(loadSteps(configDir));
+    const adjudicateStep = loadAdjudicateStep(configDir);
+    assertPromptFilesExist(adjudicateStep === undefined ? loadSteps(configDir) : [...loadSteps(configDir), adjudicateStep]);
     loadRuntimeConfig(configDir, repoDir);
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -176,9 +179,15 @@ function configuredStepAgents(steps: readonly Step[]): string[] {
 
 async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const runStateStore = createRunStateStore({ configDir });
+  const adjudicationStore = createAdjudicationStore({ configDir });
   const steps = loadSteps(configDir);
   if (options.start) runStateStore.clearStopFiles();
-  if (options.fresh) runStateStore.clearRunArtifacts();
+  if (options.fresh) {
+    runStateStore.clearRunArtifacts();
+    adjudicationStore.clearHistory();
+    adjudicationStore.clearMarker();
+    adjudicationStore.clearSession();
+  }
   let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
 
   const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name) });
@@ -269,9 +278,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   if (!state.started) {
     if (firstIterationResumed) {
       state.resumable = true;
-      for (let i = 0; i < firstIterationStartStepIndex && i < state.steps.length; i += 1) {
-        state.steps[i]!.status = "done";
-      }
+      for (const step of state.steps.slice(0, firstIterationStartStepIndex)) step.status = "done";
       if (state.steps.length > 0) {
         const resumeStepIndex = Math.min(firstIterationStartStepIndex, state.steps.length - 1);
         const resumeStep = state.steps[resumeStepIndex];
@@ -345,12 +352,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       try {
         cleanupBootInterrupt?.();
         cleanupKeys?.();
-      } catch (error) {
+      } catch (error) { // no-excuse-ok: catch -- force-kill cleanup must not block the hard exit
         ignoreForceKillCleanupError(error);
       }
       try {
         renderer?.destroy();
-      } catch (error) {
+      } catch (error) { // no-excuse-ok: catch -- force-kill cleanup must not block the hard exit
         ignoreForceKillCleanupError(error);
       }
       void server?.close();
@@ -491,6 +498,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       flexDirection: "column",
     });
     leftColumn.add(stepList);
+    leftColumn.add(createBranchDiffPanel(renderer, state));
     bootScreen.begin("Detecting GitHub repository");
     githubWatcher = await startGithubWatcher({
       repoDir,
@@ -500,7 +508,6 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     });
     throwIfBootAborted();
     leftColumn.add(createTodoPanel(renderer, state));
-    leftColumn.add(createBranchDiffPanel(renderer, state));
     branchDiffWatcher = startBranchDiffWatcher({
       client,
       repoDir,
@@ -550,6 +557,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     };
     const resetToFreshSlate = () => {
       runStateStore.clearRunArtifacts();
+      adjudicationStore.clearHistory();
+      adjudicationStore.clearMarker();
+      adjudicationStore.clearSession();
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
@@ -600,7 +610,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       disarmEscConfirm();
       state.resumable = false;
       runStateStore.clearStopFiles();
-      if (options.fresh) runStateStore.clearRunArtifacts();
+      if (options.fresh) {
+        runStateStore.clearRunArtifacts();
+        adjudicationStore.clearHistory();
+        adjudicationStore.clearMarker();
+        adjudicationStore.clearSession();
+      }
       if (!state.started) {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {
           firstIterationStartStepIndex = state.selectedStepIndex;
@@ -703,6 +718,11 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
+      adjudication: createAdjudicationConfig({
+        configDir,
+        store: adjudicationStore,
+        ...(runtimeConfig.prdFlipThreshold !== undefined ? { configuredThreshold: runtimeConfig.prdFlipThreshold } : {}),
+      }),
       useSessionIdle: runtimeConfig.useSessionIdle,
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       elapsedSeconds,
@@ -833,6 +853,7 @@ async function main(): Promise<number> {
       useSessionIdle: runtimeConfig.useSessionIdle,
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
+      ...(runtimeConfig.prdFlipThreshold !== undefined ? { prdFlipThreshold: runtimeConfig.prdFlipThreshold } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });

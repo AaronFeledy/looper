@@ -60,6 +60,7 @@ type RawStep = {
 };
 
 type RawConfig = {
+  adjudicate?: unknown;
   opencode?: unknown;
   attachUrl?: unknown;
   timeout?: unknown;
@@ -71,6 +72,7 @@ type RawConfig = {
   validateResources?: unknown;
   context?: unknown;
   prd?: unknown;
+  prdFlipThreshold?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -100,6 +102,7 @@ export type RuntimeConfig = {
   questionPolicy?: QuestionPolicy;
   contextPolicy?: ContextPolicyOverride;
   prdDir?: string;
+  prdFlipThreshold?: number;
   useSessionIdle: boolean;
   validateResources: boolean;
 };
@@ -285,6 +288,36 @@ function promptPath(configDir: string, prompt: string, label: string): string {
   return isAbsolute(prompt) ? prompt : resolve(configDir, prompt);
 }
 
+type ConfiguredStepInput = {
+  configDir: string;
+  rawStep: unknown;
+  label: string;
+  defaultName: string;
+  rootTimeoutMs: number;
+};
+
+function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
+  if (!input.rawStep || typeof input.rawStep !== "object" || Array.isArray(input.rawStep)) {
+    throw new Error(`${input.label} must be a mapping`);
+  }
+  const rawStep = input.rawStep as RawStep;
+  return {
+    name: stringValue(rawStep.name, `${input.label}.name`, input.defaultName),
+    agent: optionalNonEmptyStringValue(rawStep.agent, `${input.label}.agent`),
+    model: optionalModelValue(rawStep.model, `${input.label}.model`),
+    variant: optionalVariantValue(rawStep.variant, `${input.label}.variant`),
+    prompt: promptPath(input.configDir, stringValue(rawStep.prompt, `${input.label}.prompt`), input.label),
+    prefix: stringValue(rawStep.prefix, `${input.label}.prefix`) || undefined,
+    suffix: stringValue(rawStep.suffix, `${input.label}.suffix`) || undefined,
+    args: argsValue(rawStep.args, `${input.label}.args`),
+    timeoutMs: rawStep.timeout === undefined || rawStep.timeout === null ? input.rootTimeoutMs : timeoutValue(rawStep.timeout, `${input.label}.timeout`),
+    title: titleValue(rawStep.title, `${input.label}.title`),
+    permissionPolicy: parsePermissionPolicy(rawStep.permissionPolicy, `${input.label}.permissionPolicy`),
+    questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `${input.label}.questionPolicy`),
+    contextPolicy: parseContextPolicy(rawStep.context, `${input.label}.context`),
+  };
+}
+
 function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedStep[] {
   if (!rawConfig.steps || typeof rawConfig.steps !== "object" || Array.isArray(rawConfig.steps)) {
     throw new Error(`${CONFIG_FILE_NAME} must define a mapping at steps:`);
@@ -292,27 +325,9 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedSt
 
   const rootTimeoutMs = timeoutValue(rawConfig.timeout, "timeout");
 
-  return Object.entries(rawConfig.steps as Record<string, RawStep>).map(([key, rawStep]) => {
-    if (!rawStep || typeof rawStep !== "object" || Array.isArray(rawStep)) {
-      throw new Error(`steps.${key} must be a mapping`);
-    }
-
-    return {
-      name: stringValue(rawStep.name, `steps.${key}.name`, titleFromKey(key)),
-      agent: optionalNonEmptyStringValue(rawStep.agent, `steps.${key}.agent`),
-      model: optionalModelValue(rawStep.model, `steps.${key}.model`),
-      variant: optionalVariantValue(rawStep.variant, `steps.${key}.variant`),
-      prompt: promptPath(configDir, stringValue(rawStep.prompt, `steps.${key}.prompt`), `steps.${key}`),
-      prefix: stringValue(rawStep.prefix, `steps.${key}.prefix`) || undefined,
-      suffix: stringValue(rawStep.suffix, `steps.${key}.suffix`) || undefined,
-      args: argsValue(rawStep.args, `steps.${key}.args`),
-      timeoutMs: rawStep.timeout === undefined || rawStep.timeout === null ? rootTimeoutMs : timeoutValue(rawStep.timeout, `steps.${key}.timeout`),
-      title: titleValue(rawStep.title, `steps.${key}.title`),
-      permissionPolicy: parsePermissionPolicy(rawStep.permissionPolicy, `steps.${key}.permissionPolicy`),
-      questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `steps.${key}.questionPolicy`),
-      contextPolicy: parseContextPolicy(rawStep.context, `steps.${key}.context`),
-    };
-  });
+  return Object.entries(rawConfig.steps as Record<string, RawStep>).map(([key, rawStep]) =>
+    parseConfiguredStep({ configDir, rawStep, label: `steps.${key}`, defaultName: titleFromKey(key), rootTimeoutMs }),
+  );
 }
 
 /** Absolute paths of every candidate config file in `configDir`, in resolution order. */
@@ -413,6 +428,14 @@ function parseRecoveryConfig(value: unknown): RuntimeConfig["recovery"] {
   return { snapshots: parseRecoverySnapshots(raw.snapshots) };
 }
 
+function optionalPositiveIntegerValue(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${label} must be an integer >= 1`);
+  }
+  return value;
+}
+
 export function loadRuntimeConfig(configDir: string, repoDir: string = process.cwd()): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
@@ -432,6 +455,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   const contextPolicy = parseContextPolicy(rawConfig.context, "context");
   const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
   const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
+  const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -440,6 +464,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
+    ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };
@@ -457,4 +482,16 @@ export function loadSteps(configDir: string): LoadedStep[] {
   const steps = parseConfiguredSteps(configDir, rawConfig);
   if (steps.length === 0) throw new Error(`${CONFIG_FILE_NAME} must define at least one step`);
   return steps;
+}
+
+export function loadAdjudicateStep(configDir: string): LoadedStep | undefined {
+  const rawConfig = loadRawConfig(configDir);
+  if (rawConfig.adjudicate === undefined) return undefined;
+  return parseConfiguredStep({
+    configDir,
+    rawStep: rawConfig.adjudicate,
+    label: "adjudicate",
+    defaultName: "adjudicate",
+    rootTimeoutMs: timeoutValue(rawConfig.timeout, "timeout"),
+  });
 }

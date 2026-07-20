@@ -55,6 +55,16 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
       });
       input.frontendHooks.onStepSession?.(info);
     },
+    onAdjudicationRoute: ({ iteration }) => {
+      const latestSteps = input.loadSteps();
+      input.store.saveNextResumeStep(latestSteps, latestSteps.length);
+      input.store.saveAdvance({
+        iteration,
+        steps: latestSteps,
+        nextIndex: latestSteps.length,
+        looperRunID: input.looperRunID,
+      });
+    },
     onStepFinish: (info) => {
       const stepSessions = input.getStepSessions();
       if (info.status === "done") {

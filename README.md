@@ -70,7 +70,10 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-stop         # written when a step decides to stop the loop
     ├── .looper-stop-after-iteration
     ├── .looper-resume-step.json   # legacy step-only checkpoint
-    └── .looper-run.json           # resume pointer: iteration + step (+ live session while a step runs)
+    ├── .looper-run.json           # resume pointer: iteration + step (+ live session while a step runs)
+    ├── .looper-adjudicate         # written when PRD oscillation is detected; routes to the adjudicate step
+    ├── .looper-adjudicate-session.json  # in-flight adjudicator session, reconciled on resume
+    └── .looper-prd-history.json   # per-story PRD passes transition log (+ adjudicated watermark); cleared only on --fresh
 ```
 
 `looper.yml` / `looper.yaml` shape:
@@ -191,6 +194,30 @@ prd: spec/beta-1
 
 When configured, the TUI shows a PRD progress panel and the prompt context can include the same progress line.
 Looper polls `prd.json` every few seconds and reports parse/read errors in the panel instead of failing the run.
+
+### Adjudication
+
+If a user story's `passes` flag flips from `true` to `false` and back repeatedly (`prdFlipThreshold`
+times, default 2), that's two steps enforcing contradictory readings of the PRD contract. Looper
+detects this and routes to a dedicated adjudicate step with authority to amend the PRD contract itself,
+instead of looping the same two steps forever.
+
+Configure it with an optional top-level `adjudicate:` block, using the same fields as a `steps:` entry:
+
+```yaml
+adjudicate:
+  agent: build
+  prompt: adjudicate.md
+```
+
+`adjudicate:` is never part of the regular `steps:` sequence; it only runs when oscillation is detected
+(or an agent writes `.looper-adjudicate` itself), as a one-off step inserted after the remaining steps in
+that iteration are skipped. The adjudicator's prompt is prefixed with the detected oscillation trail. Only
+a completed adjudication resolves the conflict: it clears the marker and advances a watermark so the
+resolved flips no longer count toward detection (the full trail is retained for forensics). A failed
+adjudicator keeps the marker and re-routes next iteration rather than being treated as resolved. If no
+`adjudicate:` step is configured, looper stops the run instead and explains why in the stop file. Override
+the flip threshold with `prdFlipThreshold:` or the `LOOPER_PRD_FLIP_THRESHOLD` environment variable.
 
 ### Branch diff
 

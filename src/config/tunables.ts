@@ -26,6 +26,11 @@ export function staleBusyResumeThresholdMs(): number {
   return positiveIntegerEnv("LOOPER_STALE_BUSY_RESUME_MS", DEFAULT_STEP_TIMEOUT_MS);
 }
 
+export function prdFlipThreshold(configValue?: number): number {
+  // Precedence: environment override, then looper.yaml, then the built-in default.
+  return positiveIntegerEnv("LOOPER_PRD_FLIP_THRESHOLD", configValue ?? 2);
+}
+
 export function stopSessionConfirmTimeoutMs(): number {
   return positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", STOP_SESSION_CONFIRM_TIMEOUT_MS);
 }
