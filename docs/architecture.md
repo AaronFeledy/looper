@@ -416,7 +416,17 @@ Prompt context keys stay: `datetime`, `repoDir`, `loopPosition`, `timebox`,
 `vcsDelta`, `sessionIds`, `prd`, and `story`. `story` renders whatever of
 `branch`, `storyId`, `passes`, `phase` looper could derive; each field is
 omitted individually when unknown, and the whole block is omitted when no
-branch is derivable.
+branch is derivable. When top-level `prd:` is configured, `prd` renders a
+structured block containing `dir`, `index`, and `progress` paths plus fresh
+`passing`, `total`, and `remaining` counts when `prd.json` is readable. Paths
+inside the repo are repo-relative; external paths remain absolute. Read errors
+omit only the counts, and `context.prd: false` suppresses the whole block.
+
+Gate scripts receive `LOOPER_BRANCH`, `LOOPER_STORY_ID`, `LOOPER_PRD_DIR`,
+`LOOPER_PRD_INDEX`, and `LOOPER_PRD_PROGRESS` overlaid on the inherited process
+environment. Unavailable values are empty strings. PRD values use the same
+derived paths shown in prompt context, so in-repository values resolve against
+the gate script's repo-dir working directory and external values remain absolute.
 
 Config file discovery remains ordered:
 

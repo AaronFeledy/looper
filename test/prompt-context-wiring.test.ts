@@ -416,10 +416,10 @@ describe("runIteration <looper-context> prompt injection", () => {
     expect(stub.promptTexts[0]).toContain("This step is aborted after");
   });
 
-  test("prdDir injects a fresh PRD progress line into the step context", async () => {
+  test("prdDir injects structured PRD paths and fresh counts into the step context", async () => {
     const { repoDir, configDir } = setupScratch([{ key: "build" }]);
     scratchDirs.push(repoDir);
-    const prdDir = join(repoDir, "spec");
+    const prdDir = join(repoDir, "spec", "beta-1");
     mkdirSync(prdDir, { recursive: true });
     writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ passes: true }, { passes: false }, {}] }));
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
@@ -428,10 +428,18 @@ describe("runIteration <looper-context> prompt injection", () => {
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir });
 
     expect(result).toBe("complete");
-    expect(stub.promptTexts[0]).toContain("PRD: 1 of 3 user stories passing (2 remaining)");
+    expect(stub.promptTexts[0]).toContain([
+      "prd:",
+      "  dir: spec/beta-1",
+      "  index: spec/beta-1/prd.json",
+      "  progress: spec/beta-1/progress.txt",
+      "  passing: 1",
+      "  total: 3",
+      "  remaining: 2",
+    ].join("\n"));
   });
 
-  test("contextPolicy prd false omits the PRD line even when prdDir is readable", async () => {
+  test("contextPolicy prd false omits the PRD block even when prdDir is readable", async () => {
     const { repoDir, configDir } = setupScratch([{ key: "build" }]);
     scratchDirs.push(repoDir);
     const prdDir = join(repoDir, "spec");
@@ -443,10 +451,10 @@ describe("runIteration <looper-context> prompt injection", () => {
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir, contextPolicy: { prd: false } });
 
     expect(result).toBe("complete");
-    expect(stub.promptTexts[0]).not.toContain("PRD:");
+    expect(stub.promptTexts[0]).not.toContain("prd:");
   });
 
-  test("invalid prd.json silently omits the PRD line", async () => {
+  test("invalid prd.json omits only the count while retaining PRD paths", async () => {
     const { repoDir, configDir } = setupScratch([{ key: "build" }]);
     scratchDirs.push(repoDir);
     const prdDir = join(repoDir, "spec");
@@ -458,7 +466,10 @@ describe("runIteration <looper-context> prompt injection", () => {
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, prdDir });
 
     expect(result).toBe("complete");
-    expect(stub.promptTexts[0]).not.toContain("PRD:");
+    expect(stub.promptTexts[0]).toContain("prd:\n  dir: spec\n  index: spec/prd.json\n  progress: spec/progress.txt");
+    expect(stub.promptTexts[0]).not.toContain("  passing:");
+    expect(stub.promptTexts[0]).not.toContain("  total:");
+    expect(stub.promptTexts[0]).not.toContain("  remaining:");
   });
 });
 
