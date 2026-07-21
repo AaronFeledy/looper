@@ -33,7 +33,9 @@ Runtime dependencies stay frozen unless this document is changed first:
 2. `src/cli/`
    Args, bootstrap, and runtime lifecycle. Bootstrap resolves `configDir`,
    starts or attaches the server, constructs services, and selects TTY or
-   non-TTY presentation.
+   non-TTY presentation. Today this lives partly in `src/lib/args.ts`
+   (`parseArgs`, including the `init` and `signal <kind>` commands) and
+   `src/main.ts`.
 
 3. `src/config/`
    `looper.yaml` loading, step schema, `tunables.ts`, and config types.
@@ -41,30 +43,57 @@ Runtime dependencies stay frozen unless this document is changed first:
 
 4. `src/core/`
    Pure logic: step-machine, resume-policy, retry-policy, prompt-builders,
-   prompt-context, `events.ts`, run-types, and `backoff.ts`. `events.ts`
-   defines the structured `LooperEvent` union. No SDK, no OpenTUI, no fs, no
-   `process.env`.
+   prompt-context, `events.ts`, run-types, `backoff.ts`, `session-types.ts`,
+   and `step-attempt.ts`. `events.ts` defines the structured `LooperEvent`
+   union. `session-types.ts` owns the pure session-decision shapes
+   `AssistantClassification`, `SessionPendingState`, `SessionHealthState`, and
+   `PriorSessionEvaluation` (no SDK). `step-attempt.ts` groups the per-step
+   retry/reattach/resume-nudge mutable state plus the pure decision functions
+   (`decideAfterFailurePolicy`, `decideAfterPriorEvaluation`,
+   `decideAfterPriorHealth`) that compose `retry-policy.ts` and
+   `resume-policy.ts`, importing those shapes only from `session-types.ts`.
+   No SDK, no OpenTUI, no fs, no `process.env`.
 
 5. `src/engine/`
    Run orchestration independent of UI and SDK details. Contains
-   `run-engine.ts`, `run-iteration.ts`, `title-coordinator.ts`, and
-   `engine-ports.ts`. `run-iteration.ts` is the relocated orchestrator core.
-   `run-engine.ts` is one engine shared by TTY and non-TTY:
-   resume plan, run-state advancement, stop handling, `runIteration`
-   invocation, and session binding. `engine-ports.ts` defines engine-facing
-   ports including `RunStateStore` and `TitleService`.
+   `run-engine.ts`, `run-iteration.ts`, `run-engine-step-hooks.ts`,
+   `title-coordinator.ts`, `engine-ports.ts`, `step-gate.ts`, and
+   `adjudication-routing.ts`. `run-iteration.ts` is the relocated orchestrator
+   core. `run-engine.ts` is one engine shared by TTY and non-TTY: resume plan,
+   run-state advancement, stop handling, `runIteration` invocation, and
+   session binding. `engine-ports.ts` defines engine-facing ports including
+   `RunStateStore`, `TitleService`, `StoryStatePort`, and `AdjudicationStore`.
+
+   `step-gate.ts` holds the pure `evaluateGate` gate decision and re-exports
+   `runGateScript` from `platform/gate-script.ts` for callers/tests.
+
+   `adjudication-routing.ts` holds `createAdjudicationConfig`, `decideRouting`
+   (marker present → route to the configured adjudicate step, or stop if none
+   is configured), PRD snapshot diffing (`snapshotPrd`,
+   `recordStepTransitions`), and `withAdjudicationReason`. Production
+   `main.ts`/`fallback.ts` inject concrete stores; `createAdjudicationConfig`
+   and `run-iteration`'s optional `storyState` default remain bootstrap/test
+   conveniences that construct ports when callers omit them.
 
 6. `src/opencode/`
    OpenCode integration: gateway SDK wrapper, step-runner, reattach,
    event-stream with watchdog, resubscribe, and backfill, event-consumer from
    SDK event to `LooperEvent`, continuation-records, background-tasks,
-   session-health, session-metadata, managed-resources, title-agent, and
-   opencode-id.
+   session-health, assistant-classification, session-metadata,
+   managed-resources, title-agent, and opencode-id.
 
 7. `src/persistence/`
-   State files and stop files. `run-state-store.ts` is the sole writer of
-   `.looper-run.json` and `.looper-resume-step.json`. This directory also owns
-   state-paths and stop-files.
+   State files and stop files, and the sole owner of every `.looper-*` state
+   file under `configDir`, not only the run pointer. `run-state-store.ts` is
+   the sole writer of `.looper-run.json` and `.looper-resume-step.json`.
+   `story-state-store.ts` wraps `.looper-story-state.json` (story phase
+   read/write/clear) over `lib/story-state-files.ts`. `adjudication-store.ts`
+   wraps the adjudication marker (`.looper-adjudicate`), the PRD transition
+   history and watermark (`.looper-prd-history.json`), and the in-flight
+   adjudicator session record (`.looper-adjudicate-session.json`) over
+   `lib/adjudication-files.ts`; a corrupt session record fails closed
+   (`CorruptAdjudicateSessionError`) rather than being treated as absent. This
+   directory also owns state-paths and stop-files.
 
 8. `src/presentation/`
    Output frontends. `text-printer.ts` maps `LooperEvent` to plain text.
@@ -78,22 +107,39 @@ Runtime dependencies stay frozen unless this document is changed first:
 
 10. `src/platform/`
     Host integration helpers: git helpers, opencode-server spawn and attach,
-    and `acquire-release.ts`.
+    `acquire-release.ts`, and `gate-script.ts` (detached process-group spawn
+    for a step's `gate.script`, bounded by `LOOPER_GATE_SCRIPT_TIMEOUT_MS`).
+
+`src/lib/story-id.ts` (`storyIdFromBranch`, `currentGitBranch`) and
+`src/lib/signal.ts` (the `looper signal <kind>` implementation backing the CLI
+command) are additional lib-level pieces feeding this layout: `story-id.ts`'s
+pure branch-to-story-id derivation belongs conceptually with `core/`'s pure
+logic, and `signal.ts` is CLI-command logic that belongs with `src/cli/`. Both
+remain in `src/lib/` today.
 
 ## Dependency rules
 
 1. `core/` imports only `core/` and simple config types. No SDK, no OpenTUI,
-   no filesystem, no `process.env`.
+   no filesystem, no `process.env`. Session-decision types live in
+   `core/session-types.ts`; `opencode/` re-exports them for back-compat and
+   owns the SDK-backed implementations that produce those values.
 2. `engine/` imports `core/` plus port interfaces from `engine-ports.ts`. It
-   must not import `@opentui/core` or concrete persistence. Type-only
-   `@opencode-ai/sdk` imports are permitted. `engine/run-iteration.ts`
-   transitionally retains direct SDK/fs usage as the relocated orchestrator core
-   until the OpencodeGateway port lands; new engine code must use ports from
-   `engine-ports.ts`.
+   must not import `@opentui/core`. Type-only `@opencode-ai/sdk` imports are
+   permitted. Host process helpers may come from `platform/` (e.g.
+   `gate-script.ts`). Concrete persistence construction is bootstrap work
+   (`main.ts`/`fallback.ts`); engine code depends on port shapes
+   (`RunStateStore`, `StoryStatePort`, `AdjudicationStore`).
+   `engine/run-iteration.ts` transitionally retains direct SDK/fs usage and
+   an optional `storyState` default factory until OpencodeGateway extraction
+   finishes; new engine code must use ports from `engine-ports.ts` and must
+   not grow new concrete `persistence/` imports.
 3. `opencode/` implements OpenCode-facing ports; may import the SDK.
-4. `persistence/` is the only layer reading and writing `.looper-run.json`,
-   `.looper-resume-step.json`, and stop files. Only the engine calls it during
-   execution.
+4. `persistence/` is the sole layer reading and writing every `.looper-*`
+   state file under `configDir` and stop files: this includes
+   `.looper-run.json`, `.looper-resume-step.json`, `.looper-story-state.json`,
+   `.looper-adjudicate`, `.looper-adjudicate-session.json`, and
+   `.looper-prd-history.json`, not only the run pointer. Only the engine
+   calls it during execution.
 5. `presentation/tui/` owns mutable UI state; engine, opencode, and watchers
    never mutate TUI state directly.
 6. `presentation/fallback/` and `presentation/tui/` are two frontends over the
@@ -141,10 +187,75 @@ Looper-owned user-message ID and does not invent a prompt. `title` and
 `stepSessions` carry within an iteration and are dropped at the iteration
 boundary. Resuming remains the default. `--fresh` clears this file.
 
+A gate-skipped step (`completionKind: "gate-skip"`) advances the resume pointer
+the same as an ordinary `done` completion, but it is excluded from the
+prior-steps context ledger described under "Prompt context" below; an
+ordinary manual/interruption skip does neither.
+
 ### `.looper-resume-step.json`
 
 Legacy step-only checkpoint under `configDir`. It remains in sync with the run
 state for backward compatibility. `--fresh` clears this file too.
+
+### `.looper-story-state.json`
+
+Per-story phase tracker under `configDir`:
+
+```ts
+{
+  stories: {
+    [storyId: string]: { phase: StoryPhase; updatedAt: string }
+  }
+}
+```
+
+`StoryPhase` is the ordered sequence `building < implemented < reviewed <
+verified < published < merged`. A wholly unreadable file (invalid JSON or
+missing `stories` object) collapses to an empty map rather than throwing.
+Malformed individual entries are skipped so valid peer stories survive a
+subsequent read-modify-write. Cleared only on `--fresh`, never on normal
+run-end cleanup, since per-story keying makes a stale entry for an unrelated
+branch or story harmless.
+
+### `.looper-adjudicate`
+
+Marker file under `configDir` whose contents are the adjudication reason text.
+Its presence routes the next iteration to the configured `adjudicate:` step
+(or stops the run if none is configured) instead of the regular `steps:`
+sequence. Cleared only when an adjudication completes successfully.
+
+### `.looper-adjudicate-session.json`
+
+The in-flight adjudicator's session record under `configDir`:
+
+```ts
+{ sessionID: string; messageID?: string }
+```
+
+Written before the adjudicator's prompt is dispatched, so a crash mid-run
+leaves a durable record the next run can confirm-stopped before starting a
+fresh adjudicator generation. A present-but-corrupt record fails closed
+(`CorruptAdjudicateSessionError`) rather than being treated as absent, since
+treating it as absent risks an overlapping generation. Cleared only when an
+adjudication completes successfully.
+
+### `.looper-prd-history.json`
+
+Forensic PRD `passes` transition log under `configDir`:
+
+```ts
+{
+  records: { storyId: string; from: boolean; to: boolean; iteration: number; stepName: string; at: string }[]
+  adjudicatedThrough: number
+}
+```
+
+`adjudicatedThrough` is a watermark: only `records` after it count toward
+oscillation detection, so a resolved oscillation cannot retrigger from its own
+historical flips, while the full trail stays on disk for forensics. A
+present-but-corrupt file is quarantined to
+`.looper-prd-history.json.corrupt-<timestamp>` rather than overwritten. Cleared
+only on `--fresh`, never on normal run-end cleanup.
 
 ### `.omo/run-continuation/*.json`
 
@@ -196,25 +307,54 @@ All names and defaults stay frozen:
 6. `LOOPER_EVENT_STALL_MS`, default: `45000`
 7. `LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS`, default: `1000`
 8. `LOOPER_TITLE_GEN_TIMEOUT_MS`, default: `60000`
-9. `LOOPER_E2E_KEEP`, test-only, default: off
-10. `LOOPER_E2E_MODEL`, test-only, default: the e2e test model
+9. `LOOPER_GATE_SCRIPT_TIMEOUT_MS`, default: `30000`; timeout for a step's
+   `gate.script`, after which its whole process group is SIGTERM'd then
+   SIGKILL'd.
+10. `LOOPER_PRD_FLIP_THRESHOLD`, default: `2`; overrides `prdFlipThreshold:`
+    from `looper.yaml`, which in turn overrides the built-in default.
+11. `LOOPER_E2E_KEEP`, test-only, default: off
+12. `LOOPER_E2E_MODEL`, test-only, default: the e2e test model
 
 Related non-`LOOPER_*` names also stay frozen:
 
 1. `OPENCODE_BIN`, default: `opencode`
 2. `OPENCODE_ATTACH_URL`, default: attach fallback URL
 
-### CLI flags
+### CLI
 
 The CLI surface stays frozen:
+
+Flags:
 
 1. `--attach[=url]`
 2. `--start`
 3. `--fresh`
 4. `--continue`, deprecated alias of `--start`
 5. `--wait[=minutes]`
-6. positional `max_iterations`, default `100`
-7. `--help`
+6. `--config-dir=path`
+7. positional `max_iterations`, default `100`
+8. `--help`
+
+Commands:
+
+1. `init` &mdash; scaffold a starter `looper.yml` plus example prompts in
+   `configDir` and exit.
+2. `signal <kind>` &mdash; write a state file directly, without a looper
+   process running:
+   - `signal adjudicate --reason <text>` &mdash; write the adjudication
+     marker.
+   - `signal stop --reason <text>` &mdash; request an immediate stop.
+   - `signal stop-after-iteration --reason <text>` &mdash; request a stop
+     after the current iteration.
+   - `signal story-phase <phase> [--story <ID>]` &mdash; set a story's phase;
+     without `--story`, the story id is derived from the current branch via
+     `storyIdPattern`.
+
+   `signal` resolves `configDir` the same way a normal run does and does not
+   require a running looper process. It exits `0` on success and exits `2`
+   with a usage message on an unknown kind, a missing `--reason`, an invalid
+   phase, or a `story-phase` invocation with no `--story` and no derivable
+   story id from the branch.
 
 Attach URL resolution remains: CLI value, `opencode.serverUrl`,
 `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
@@ -240,14 +380,43 @@ has no effect and users should remove it. Do not restore the option or panel.
 11. top-level `validateResources`
 12. top-level `prd`
 13. top-level `context`
-14. `steps`
+14. top-level `storyIdPattern` &mdash; overrides the default branch-to-story-id
+    regex (`^([a-z]+-[0-9]+)-`, capture group 1 uppercased).
+15. top-level `prdFlipThreshold` &mdash; overrides the default oscillation flip
+    count (see `LOOPER_PRD_FLIP_THRESHOLD` above for precedence).
+16. top-level `adjudicate` &mdash; same field shape as one `steps:` entry;
+    never part of the `steps:` sequence itself. Runs only when oscillation is
+    detected or `.looper-adjudicate` is written directly.
+17. `steps`
 
 Per-step fields stay: `name`, `agent`, `model`, `variant`, `prompt`, `prefix`,
-`suffix`, `args`, `timeout`, `permissionPolicy`, `questionPolicy`, `title`, and
-`context`.
+`suffix`, `args`, `timeout`, `permissionPolicy`, `questionPolicy`, `title`,
+`context`, `gate`, and `setsPhase`.
+
+Per-step `gate` fields, all optional and AND-combined:
+
+1. `branch: "story" | "main"` &mdash; `"story"` requires a derivable story id
+   from the current branch; `"main"` requires the current branch to literally
+   be `main`.
+2. `prdPasses: true` &mdash; requires the story's `passes` flag in `prd.json`
+   to be `true` (requires top-level `prd:`).
+3. `phase: <StoryPhase>` &mdash; requires the story's recorded phase to be at
+   or past the given phase; a story with no recorded phase is treated as
+   `building`.
+4. `script: string` &mdash; a `bash -c` script that must exit `0`.
+
+A failing gate skips the step (no opencode session is created) and still
+advances the run to the next step, the same as a normal completion.
+
+`setsPhase: <StoryPhase>` advances that story's phase when the step finishes
+with a `done` result. See "Behavior invariants" below for the write's monotonic
+and flip-guard rules.
 
 Prompt context keys stay: `datetime`, `repoDir`, `loopPosition`, `timebox`,
-`vcsDelta`, `sessionIds`, and `prd`.
+`vcsDelta`, `sessionIds`, `prd`, and `story`. `story` renders whatever of
+`branch`, `storyId`, `passes`, `phase` looper could derive; each field is
+omitted individually when unknown, and the whole block is omitted when no
+branch is derivable.
 
 Config file discovery remains ordered:
 
@@ -257,6 +426,33 @@ Config file discovery remains ordered:
 4. `.looper.yaml`
 
 Prompt paths still resolve relative to `configDir` unless absolute.
+
+## Behavior invariants
+
+These hold across gates, signals, adjudication, and prompt context, and are
+easy to get backward when touching that code:
+
+1. `passes` (read from `prd.json`) is authoritative for `gate.prdPasses` and
+   for oscillation/adjudication detection. `phase`
+   (`.looper-story-state.json`) is authoritative only for `gate.phase`. Do not
+   conflate the two.
+2. A gate-skipped step (`completionKind: "gate-skip"`) advances the resume
+   pointer like a `done` step, but is excluded from the prompt-context
+   prior-steps ledger; an ordinary manual/interruption skip is excluded from
+   neither.
+3. A `setsPhase` write is monotonic: it never regresses an existing phase.
+   It's skipped, with the story auto-demoted to `building` instead, if that
+   story's `passes` flipped `true` to `false` during the step. Only
+   `looper signal story-phase` or the auto-demote may move a phase backward.
+   A phase-write failure fails the step closed rather than silently advancing
+   past it.
+4. Every gate, signal, and context lookup re-derives the current branch fresh
+   from git for that one use. None of them trust the cached `state.branch`
+   the TUI keeps for display.
+5. The ephemeral adjudicate row is never a resumable run-state position; the
+   `.looper-adjudicate` marker plus `.looper-adjudicate-session.json` are the
+   durable signals a resumed run uses to detect and recover an in-flight
+   adjudication.
 
 ## Migration status
 
@@ -272,8 +468,12 @@ Prompt paths still resolve relative to `configDir` unless absolute.
     <tr><td>6</td><td>TUI structured rendering</td><td>DONE</td></tr>
     <tr><td>7</td><td>shared RunEngine</td><td>DONE</td></tr>
     <tr><td>8</td><td>watchers extraction</td><td>DONE</td></tr>
+    <tr><td>9</td><td>story gates + phase state + signals CLI</td><td>DONE</td></tr>
+    <tr><td>10</td><td>PRD oscillation adjudication</td><td>DONE</td></tr>
   </tbody>
 </table>
 
 Remaining future work: OpencodeGateway port extraction (`engine/run-iteration.ts`
-and step execution still use `OpencodeClient` directly).
+and step execution still use `OpencodeClient` directly); drop
+`run-iteration`'s transitional `storyState` default factory so every caller
+injects a `StoryStatePort` explicitly.
