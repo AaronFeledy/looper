@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import YAML from "yaml";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
+import { STORY_PHASE_ORDER, isValidPhase, type StoryPhase } from "./story-state-files.ts";
 
 export type PermissionAction = "always" | "once" | "reject" | "ask";
 
@@ -13,13 +14,20 @@ export type QuestionPolicy = "ask" | "reject";
 // Keys of the `<looper-context>` prompt-injection block (see prompt-context.ts),
 // each individually toggleable via `context:` config. Kept in sync manually;
 // this list IS the config-side source of truth for valid keys.
-export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd"] as const;
+export const CONTEXT_KEYS = ["datetime", "repoDir", "loopPosition", "timebox", "vcsDelta", "sessionIds", "prd", "story"] as const;
 export type ContextKey = (typeof CONTEXT_KEYS)[number];
 export type ContextPolicy = Record<ContextKey, boolean>;
 type ContextPolicyOverride = Partial<ContextPolicy>;
 
 /** `string` = named variant; `null` = force-disable; omit = agent/opencode default. */
 export type VariantConfig = string | null;
+
+export type GateConfig = {
+  readonly branch?: "story" | "main";
+  readonly prdPasses?: true;
+  readonly phase?: StoryPhase;
+  readonly script?: string;
+};
 
 export type LoadedStep = {
   name: string;
@@ -35,12 +43,13 @@ export type LoadedStep = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   contextPolicy?: ContextPolicyOverride;
+  gate?: GateConfig;
+  setsPhase?: StoryPhase;
 };
 
 // Config file name candidates, in resolution order. `.yml` is preferred over
 // `.yaml`; dot-prefixed variants are last-resort fallbacks.
 export const CONFIG_FILE_NAMES = ["looper.yml", "looper.yaml", ".looper.yml", ".looper.yaml"] as const;
-// Preferred / default file name, used in messages and when creating a config.
 export const CONFIG_FILE_NAME = CONFIG_FILE_NAMES[0];
 
 type RawStep = {
@@ -57,6 +66,8 @@ type RawStep = {
   permissionPolicy?: unknown;
   questionPolicy?: unknown;
   context?: unknown;
+  gate?: unknown;
+  setsPhase?: unknown;
 };
 
 type RawConfig = {
@@ -73,6 +84,7 @@ type RawConfig = {
   context?: unknown;
   prd?: unknown;
   prdFlipThreshold?: unknown;
+  storyIdPattern?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -103,6 +115,7 @@ export type RuntimeConfig = {
   contextPolicy?: ContextPolicyOverride;
   prdDir?: string;
   prdFlipThreshold?: number;
+  storyIdPattern?: string;
   useSessionIdle: boolean;
   validateResources: boolean;
 };
@@ -179,6 +192,57 @@ function parsePermissionPolicy(value: unknown, label: string): PermissionPolicy 
   return Object.keys(out).length === 0 ? undefined : out;
 }
 
+function storyPhaseValue(value: unknown, label: string): StoryPhase {
+  if (typeof value !== "string" || !isValidPhase(value)) {
+    throw new Error(`${label} must be one of: ${STORY_PHASE_ORDER.join(", ")}`);
+  }
+  return value;
+}
+
+function parseGateConfig(value: unknown, label: string): GateConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a mapping`);
+  }
+
+  let branch: GateConfig["branch"];
+  let prdPasses: GateConfig["prdPasses"];
+  let phase: StoryPhase | undefined;
+  let script: string | undefined;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    switch (key) {
+      case "branch":
+        if (entry !== "story" && entry !== "main") {
+          throw new Error(`${label}.branch must be "story" or "main"`);
+        }
+        branch = entry;
+        break;
+      case "prdPasses":
+        if (entry !== true) throw new Error(`${label}.prdPasses must be true`);
+        prdPasses = true;
+        break;
+      case "phase":
+        phase = storyPhaseValue(entry, `${label}.phase`);
+        break;
+      case "script":
+        if (typeof entry !== "string") throw new Error(`${label}.script must be a string`);
+        if (entry.length === 0) throw new Error(`${label}.script cannot be empty`);
+        script = entry;
+        break;
+      default:
+        throw new Error(`${label}.${key} is not a valid gate key (valid keys: branch, prdPasses, phase, script)`);
+    }
+  }
+
+  if (branch === undefined && prdPasses === undefined && phase === undefined && script === undefined) return undefined;
+  return {
+    ...(branch !== undefined ? { branch } : {}),
+    ...(prdPasses !== undefined ? { prdPasses } : {}),
+    ...(phase !== undefined ? { phase } : {}),
+    ...(script !== undefined ? { script } : {}),
+  };
+}
+
 function parseContextPolicy(value: unknown, label: string): ContextPolicyOverride | undefined {
   if (value === undefined || value === null || value === true) return undefined;
   if (value === false) {
@@ -225,7 +289,7 @@ export function resolvePermissionAction(
   return "ask";
 }
 
-const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
+export const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   datetime: true,
   repoDir: true,
   loopPosition: true,
@@ -233,6 +297,7 @@ const DEFAULT_CONTEXT_POLICY: ContextPolicy = {
   vcsDelta: true,
   sessionIds: true,
   prd: true,
+  story: true,
 };
 
 export function resolveContextPolicy(
@@ -315,6 +380,8 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     permissionPolicy: parsePermissionPolicy(rawStep.permissionPolicy, `${input.label}.permissionPolicy`),
     questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `${input.label}.questionPolicy`),
     contextPolicy: parseContextPolicy(rawStep.context, `${input.label}.context`),
+    gate: parseGateConfig(rawStep.gate, `${input.label}.gate`),
+    setsPhase: rawStep.setsPhase === undefined ? undefined : storyPhaseValue(rawStep.setsPhase, `${input.label}.setsPhase`),
   };
 }
 
@@ -330,7 +397,6 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedSt
   );
 }
 
-/** Absolute paths of every candidate config file in `configDir`, in resolution order. */
 export function configCandidatePaths(configDir: string): string[] {
   return CONFIG_FILE_NAMES.map((name) => join(configDir, name));
 }
@@ -343,12 +409,10 @@ function isRegularFile(path: string): boolean {
   }
 }
 
-/** First existing config file in `configDir`, or undefined if none exist. */
 export function findConfigFile(configDir: string): string | undefined {
   return configCandidatePaths(configDir).find((candidate) => isRegularFile(candidate));
 }
 
-/** Resolved existing config path, or the default (preferred) path when none exist. */
 export function configFilePath(configDir: string): string {
   return findConfigFile(configDir) ?? join(configDir, CONFIG_FILE_NAME);
 }
@@ -362,7 +426,6 @@ function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
-/** First readable config file in `configDir` (path + raw YAML text), or undefined. */
 export function readConfigFileSource(configDir: string): ConfigFileSource | undefined {
   for (const configPath of configCandidatePaths(configDir)) {
     if (!isRegularFile(configPath)) continue;
@@ -455,7 +518,21 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   const contextPolicy = parseContextPolicy(rawConfig.context, "context");
   const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
   const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
+  if (prdDir === undefined) {
+    const rootTimeoutMs = timeoutValue(rawConfig.timeout, "timeout");
+    const adjudicateStep =
+      rawConfig.adjudicate === undefined
+        ? undefined
+        : parseConfiguredStep({ configDir, rawStep: rawConfig.adjudicate, label: "adjudicate", defaultName: "adjudicate", rootTimeoutMs });
+    const stepRequiringPrd = [...parseConfiguredSteps(configDir, rawConfig), ...(adjudicateStep === undefined ? [] : [adjudicateStep])].find(
+      (step) => step.gate?.prdPasses === true,
+    );
+    if (stepRequiringPrd !== undefined) {
+      throw new Error(`${stepRequiringPrd.name} gate requires top-level prd: when using gate.prdPasses`);
+    }
+  }
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
+  const storyIdPattern = optionalNonEmptyStringValue(rawConfig.storyIdPattern, "storyIdPattern");
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -465,6 +542,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
+    ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };

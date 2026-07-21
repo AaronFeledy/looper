@@ -1,13 +1,9 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+import type { AssistantClassification } from "../core/session-types.ts";
 import { isRecord, stringValue } from "./util.ts";
 
-export type AssistantClassification =
-  | { kind: "done" }
-  | { kind: "empty"; errorMessage: string }
-  | { kind: "failed"; errorMessage: string }
-  | { kind: "in-progress" }
-  | { kind: "missing" };
+export type { AssistantClassification } from "../core/session-types.ts";
 
 export function assistantErrorMessage(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;

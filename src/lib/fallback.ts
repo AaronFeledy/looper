@@ -17,6 +17,7 @@ import { divider, label, ui } from "./fallback-ui.ts";
 import { createAdjudicationStore, type AdjudicationStore } from "../persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
+import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -32,6 +33,7 @@ export type FallbackOptions = {
   useSessionIdle?: boolean;
   prdDir?: string;
   prdFlipThreshold?: number;
+  storyIdPattern?: string;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 };
@@ -58,17 +60,20 @@ export async function runNonTty({
   useSessionIdle,
   prdDir,
   prdFlipThreshold: configuredPrdFlipThreshold,
+  storyIdPattern,
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
+  const storyStateStore = createStoryStateStore({ configDir });
   runStateStore.clearStopFiles();
   if (options.fresh) {
     runStateStore.clearRunArtifacts();
     adjudicationStore.clearHistory();
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
+    storyStateStore.clear();
   }
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
@@ -106,7 +111,9 @@ export async function runNonTty({
       ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
       ...(prdDir !== undefined ? { prdDir } : {}),
       ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
+      ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
       adjudicationStore,
+      storyStateStore,
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       currentBranch,
     });
@@ -170,7 +177,9 @@ export async function runNonTtyIterations({
   useSessionIdle,
   prdDir,
   configuredPrdFlipThreshold,
+  storyIdPattern,
   adjudicationStore,
+  storyStateStore,
   contextPolicy,
   currentBranch,
 }: {
@@ -185,7 +194,9 @@ export async function runNonTtyIterations({
   useSessionIdle?: boolean;
   prdDir?: string;
   configuredPrdFlipThreshold?: number;
+  storyIdPattern?: string;
   adjudicationStore?: AdjudicationStore;
+  storyStateStore?: StoryStateStore;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
@@ -208,7 +219,8 @@ export async function runNonTtyIterations({
     currentBranch,
     createLooperRunID,
     legacyResumeStepIndex: (steps) => resumeStepIndex([...steps]),
-    runIteration: (input) => runIteration(input),
+    runIteration,
+    ...(storyStateStore !== undefined ? { storyState: storyStateStore } : {}),
     persistTitles: false,
     ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
     recoverySnapshots,
@@ -216,6 +228,7 @@ export async function runNonTtyIterations({
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
+    ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     adjudication,
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     hooks: createFallbackEngineHooks(currentBranch),

@@ -76,6 +76,60 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("parses every gate condition and setsPhase", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      branch: story",
+        "      prdPasses: true",
+        "      phase: reviewed",
+        "      script: test -f ready",
+        "    setsPhase: verified",
+      ].join("\n"),
+      (dir) => {
+        expect(loadSteps(dir)[0]).toMatchObject({
+          gate: {
+            branch: "story",
+            prdPasses: true,
+            phase: "reviewed",
+            script: "test -f ready",
+          },
+          setsPhase: "verified",
+        });
+      },
+    );
+  });
+
+  test.each([
+    ["gate is not a mapping", "    gate: story", /steps\.build\.gate must be a mapping/],
+    ["gate has an unknown key", "    gate:\n      bogus: true", /steps\.build\.gate\.bogus is not a valid gate key/],
+    ["branch is invalid", "    gate:\n      branch: release", /steps\.build\.gate\.branch must be \"story\" or \"main\"/],
+    ["prdPasses is false", "    gate:\n      prdPasses: false", /steps\.build\.gate\.prdPasses must be true/],
+    ["phase is invalid", "    gate:\n      phase: shipped", /steps\.build\.gate\.phase must be one of:/],
+    ["script is not a string", "    gate:\n      script: 42", /steps\.build\.gate\.script must be a string/],
+    ["script is empty", '    gate:\n      script: ""', /steps\.build\.gate\.script cannot be empty/],
+  ])("rejects an invalid gate when %s", (_description, gateYaml, expected) => {
+    withConfigDir(`steps:\n  build:\n    prompt: hi\n${gateYaml}\n`, (dir) => {
+      expect(() => loadSteps(dir)).toThrow(expected);
+    });
+  });
+
+  test("rejects an invalid setsPhase", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    setsPhase: shipped\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.setsPhase must be one of:/);
+    });
+  });
+
+  test("continues to ignore unknown step keys", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n    futureGateFeature: enabled\n", (dir) => {
+      expect(loadSteps(dir)).toHaveLength(1);
+    });
+  });
+
   test("parses variant string, null disable, and rejects empty string", () => {
     withConfigDir(
       [
@@ -185,6 +239,9 @@ describe("adjudicate config parsing", () => {
         "  questionPolicy: reject",
         "  context:",
         "    prd: false",
+        "  gate:",
+        "    branch: main",
+        "  setsPhase: merged",
         "steps:",
         "  build:",
         "    prompt: build.md",
@@ -204,6 +261,8 @@ describe("adjudicate config parsing", () => {
           permissionPolicy: { edit: "always" },
           questionPolicy: "reject",
           contextPolicy: { prd: false },
+          gate: { branch: "main" },
+          setsPhase: "merged",
         });
       },
     );
@@ -244,8 +303,27 @@ describe("loadRuntimeConfig policy and flags", () => {
       expect(cfg.permissionPolicy).toBeUndefined();
       expect(cfg.questionPolicy).toBeUndefined();
       expect(cfg.prdDir).toBeUndefined();
+      expect(cfg.storyIdPattern).toBeUndefined();
       expect(cfg.useSessionIdle).toBe(false);
       expect(cfg.validateResources).toBe(false);
+    });
+  });
+
+  test("parses a top-level storyIdPattern", () => {
+    withConfigDir("storyIdPattern: '^story/([a-z]+-[0-9]+)$'\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).storyIdPattern).toBe("^story/([a-z]+-[0-9]+)$");
+    });
+  });
+
+  test("rejects an empty storyIdPattern", () => {
+    withConfigDir('storyIdPattern: ""\nsteps:\n  build:\n    prompt: hi\n', (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/storyIdPattern cannot be empty/);
+    });
+  });
+
+  test("rejects a non-string storyIdPattern", () => {
+    withConfigDir("storyIdPattern: 74\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/storyIdPattern must be a string/);
     });
   });
 
@@ -264,6 +342,18 @@ describe("loadRuntimeConfig policy and flags", () => {
   test("rejects an empty prd directory", () => {
     withConfigDir("prd: \"\"\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(() => loadRuntimeConfig(dir)).toThrow(/prd cannot be empty/);
+    });
+  });
+
+  test("rejects a prdPasses gate without prd, naming the step", () => {
+    withConfigDir("steps:\n  build-release:\n    prompt: hi\n    gate:\n      prdPasses: true\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd: when using gate\.prdPasses/);
+    });
+  });
+
+  test("allows a phase-only gate without prd", () => {
+    withConfigDir("steps:\n  publish:\n    prompt: hi\n    gate:\n      phase: reviewed\n", (dir) => {
+      expect(loadRuntimeConfig(dir).prdDir).toBeUndefined();
     });
   });
 
@@ -353,6 +443,7 @@ describe("context policy config parsing", () => {
         vcsDelta: true,
         sessionIds: true,
         prd: true,
+        story: true,
       });
     });
   });
@@ -372,6 +463,7 @@ describe("context policy config parsing", () => {
           vcsDelta: false,
           sessionIds: false,
           prd: false,
+          story: true,
         });
       },
     );
@@ -401,7 +493,20 @@ describe("context policy config parsing", () => {
           vcsDelta: true,
           sessionIds: true,
           prd: true,
+          story: true,
         });
+      },
+    );
+  });
+
+  test("per-step story context override disables the story section policy", () => {
+    withConfigDir(
+      ["steps:", "  build:", "    prompt: hi", "    context:", "      story: false"].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        const steps = loadSteps(dir);
+
+        expect(resolveContextPolicy(steps[0]!, cfg).story).toBe(false);
       },
     );
   });
@@ -417,6 +522,7 @@ describe("context policy config parsing", () => {
         vcsDelta: false,
         sessionIds: false,
         prd: false,
+        story: false,
       });
       const steps = loadSteps(dir);
       expect(resolveContextPolicy(steps[0]!, cfg)).toEqual({
@@ -427,6 +533,7 @@ describe("context policy config parsing", () => {
         vcsDelta: false,
         sessionIds: false,
         prd: false,
+        story: false,
       });
     });
   });
@@ -445,6 +552,7 @@ describe("context policy config parsing", () => {
           vcsDelta: false,
           sessionIds: false,
           prd: false,
+          story: false,
         });
       },
     );

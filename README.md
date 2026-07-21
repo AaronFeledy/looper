@@ -33,6 +33,7 @@ Press `?` in the TUI for a keybinding overlay.
 CLI flags:
 
 - `init` &mdash; scaffold the config directory (`looper.yml`, `work.md`, `check-done.md`) and exit. Refuses to overwrite an existing config.
+- `signal <kind>` &mdash; write a state file directly, without a looper process running. See "Signals" below.
 - `--attach[=url]` &mdash; connect to an existing opencode server instead of spawning one. Without a URL: tries `opencode.serverUrl` from the config file, then `$OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 - `--config-dir=path` / `--config-dir path` &mdash; use this directory for config, prompts, and state files. Overrides auto-detection and `$LOOPER_CONFIG_DIR`.
 - `--start` &mdash; skip the TUI start prompt and begin immediately.
@@ -73,7 +74,8 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-run.json           # resume pointer: iteration + step (+ live session while a step runs)
     ├── .looper-adjudicate         # written when PRD oscillation is detected; routes to the adjudicate step
     ├── .looper-adjudicate-session.json  # in-flight adjudicator session, reconciled on resume
-    └── .looper-prd-history.json   # per-story PRD passes transition log (+ adjudicated watermark); cleared only on --fresh
+    ├── .looper-prd-history.json   # per-story PRD passes transition log (+ adjudicated watermark); cleared only on --fresh
+    └── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh
 ```
 
 `looper.yml` / `looper.yaml` shape:
@@ -96,6 +98,7 @@ useSessionIdle: false                # optional: use session idle status in reco
 validateResources: false             # optional: validate configured agents exist during startup
 prd: spec/beta-1                     # optional PRD directory; relative paths resolve from the repo dir
 context: true                        # optional; see "Prompt context" below
+storyIdPattern: "^([a-z]+-[0-9]+)-"   # optional; overrides the default branch->story-id regex (see "Story gates" below)
 
 steps:
   build:
@@ -114,6 +117,12 @@ steps:
     title: 30                                    # see "Session titles" below
     context:
       vcsDelta: false                            # optional per-step prompt-context override
+    gate:                                        # optional; step is skipped (not run) unless every condition passes
+      branch: story                              # "story" (a story id is derivable from the branch) | "main"
+      prdPasses: true                             # requires top-level prd: configured
+      phase: reviewed                             # requires the story's phase to be at or past this StoryPhase
+      script: "test -f .ready"                    # bash -c script; must exit 0 (see "Story gates" below)
+    setsPhase: reviewed                           # optional; on a `done` result, advances the story's phase (monotonic)
   check-done:
     name: Check Done
     agent: sonny
@@ -137,6 +146,8 @@ When a permission or question is left pending (policy `ask`, or no policy), the 
 
 - `title` &mdash; see "Session titles" below.
 - `context` &mdash; see "Prompt context" below.
+- `gate` &mdash; optional; see "Story gates" below.
+- `setsPhase` &mdash; optional; see "Story gates" below.
 
 Migration note: the former top-level `vcsSummary` option and Changes panel are retired in favor of the consolidated
 Diff panel. Existing YAML containing `vcsSummary` still loads because unknown top-level keys are ignored, but the key
@@ -155,7 +166,7 @@ Control it with `context:`, at the top level of the config file and/or per-step,
 defaulting to everything on:
 
 ```yaml
-context: false   # disable the block entirely for every step (shorthand for all seven keys false)
+context: false   # disable the block entirely for every step (shorthand for all eight keys false)
 
 steps:
   build:
@@ -166,9 +177,9 @@ steps:
       sessionIds: true
 ```
 
-Valid keys: `datetime`, `repoDir`, `loopPosition`, `timebox`, `vcsDelta`, `sessionIds`, `prd`. Each accepts a
-boolean; an unknown key throws at load time naming the offending key. `context: false` (top level or
-per-step) is shorthand for all seven keys `false`; `context: true` or an absent `context:` leaves every
+Valid keys: `datetime`, `repoDir`, `loopPosition`, `timebox`, `vcsDelta`, `sessionIds`, `prd`, `story`. Each
+accepts a boolean; an unknown key throws at load time naming the offending key. `context: false` (top level or
+per-step) is shorthand for all eight keys `false`; `context: true` or an absent `context:` leaves every
 key at its default (`true`). A per-step key wins over the top-level value for that same key, which wins
 over the default.
 
@@ -182,6 +193,10 @@ rather than blocking or failing the step.
 `prd` is included only when top-level `prd:` is configured and `prd.json` can be read. It renders a one-line
 summary like `PRD: 12 of 41 user stories passing (29 remaining)`. Disable it independently with
 `context.prd: false`.
+
+`story` renders a `story:` block with whatever of `branch`, `storyId`, `passes`, `phase` looper could derive;
+each field is omitted individually when unknown, and the whole block is omitted when no branch is derivable
+(e.g. no git repo). Disable it with `context.story: false`.
 
 ### PRD progress
 
@@ -218,6 +233,48 @@ resolved flips no longer count toward detection (the full trail is retained for 
 adjudicator keeps the marker and re-routes next iteration rather than being treated as resolved. If no
 `adjudicate:` step is configured, looper stops the run instead and explains why in the stop file. Override
 the flip threshold with `prdFlipThreshold:` or the `LOOPER_PRD_FLIP_THRESHOLD` environment variable.
+
+### Story gates
+
+A story id is derived from the current git branch (`storyIdPattern`, default `^([a-z]+-[0-9]+)-` matching
+e.g. `us-074-fix-thing` &mdash; `US-074`), read fresh before every gate check, never cached.
+
+A step's `gate:` skips that step (no opencode session is created) unless every configured condition passes:
+
+- `branch: story` &mdash; a story id must be derivable from the current branch; `branch: main` &mdash; the current
+  branch must literally be `main`.
+- `prdPasses: true` &mdash; the story's `passes` flag in `prd.json` must be `true` (requires top-level `prd:`).
+- `phase: <StoryPhase>` &mdash; the story's phase in `.looper-story-state.json` must be at or past the given phase
+  in the order `building < implemented < reviewed < verified < published < merged`; a story with no recorded
+  phase is treated as `building`.
+- `script: "<bash>"` &mdash; the script is run via `bash -c` and must exit `0`. It gets the current branch and
+  story id as `LOOPER_BRANCH`/`LOOPER_STORY_ID` env vars (empty string when underivable), plus the inherited
+  process env. It is killed (its whole process group) if it runs past `LOOPER_GATE_SCRIPT_TIMEOUT_MS`
+  (default 30000).
+
+A skipped gate logs `[looper] gate skipped <step>: <reason>` and still advances the run to the next step, the
+same as a normal completion.
+
+`setsPhase: <StoryPhase>` advances that story's phase when the step finishes with a `done` result. The write is
+skipped (and the phase auto-demoted to `building` instead) if the story's `passes` flag flipped `true` to
+`false` during the step, and it never regresses an existing phase &mdash; only `looper signal story-phase` or the
+auto-demote can move a phase backward.
+
+### Signals
+
+`looper signal <kind>` writes a state file directly, without needing a looper process running:
+
+```bash
+looper signal adjudicate --reason "manual escalation"
+looper signal stop --reason "operator request"
+looper signal stop-after-iteration --reason "let the current iteration finish"
+looper signal story-phase reviewed                  # story id derived from the current branch
+looper signal story-phase merged --story US-074      # explicit story id
+```
+
+It resolves `--config-dir` the same way a normal run does, exits `0` on success, and exits `2` with a usage
+message on an unknown kind, a missing `--reason`, an invalid phase, or (for `story-phase` without `--story`)
+a branch with no derivable story id.
 
 ### Branch diff
 
@@ -280,6 +337,7 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_DEBUG_EVENTS=1` &mdash; verbose OpenCode event logging
 - `LOOPER_ATTACH_VALIDATION_TIMEOUT_MS` &mdash; timeout for attach-mode managed-resource validation (default: `10000`)
 - `LOOPER_BRANCH_DIFF_TIMEOUT_MS` &mdash; timeout for one live Diff-panel collection (default: `10000`)
+- `LOOPER_GATE_SCRIPT_TIMEOUT_MS` &mdash; timeout for a step's `gate.script` (default: `30000`)
 - `LOOPER_CONTINUATION_EXIT_GRACE_MS` &mdash; how long to wait after a step exits for a background-continuation record to appear (default: 30000)
 - `LOOPER_EVENT_WATCHDOG_POLL_MS` &mdash; event-stream watchdog poll interval (default: `15000`)
 - `LOOPER_EVENT_STALL_MS` &mdash; event-stream idle threshold before probing session status (default: `45000`)

@@ -20,6 +20,7 @@ const SERVER_RECOVERY_DEFAULT_BACKOFF_MAX_MS = 30_000;
 const SERVER_RECOVERY_DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 const TITLE_GEN_TIMEOUT_MS_DEFAULT = 60_000;
 const BRANCH_DIFF_COLLECTION_TIMEOUT_MS_DEFAULT = 10_000;
+const GATE_SCRIPT_TIMEOUT_MS_DEFAULT = 30_000;
 export const DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS = 10_000;
 
 export function staleBusyResumeThresholdMs(): number {
@@ -58,6 +59,10 @@ export function promptVcsTimeoutMs(): number {
 
 export function branchDiffCollectionTimeoutMs(): number {
   return positiveIntegerEnv("LOOPER_BRANCH_DIFF_TIMEOUT_MS", BRANCH_DIFF_COLLECTION_TIMEOUT_MS_DEFAULT);
+}
+
+export function gateScriptTimeoutMs(): number {
+  return positiveIntegerEnv("LOOPER_GATE_SCRIPT_TIMEOUT_MS", GATE_SCRIPT_TIMEOUT_MS_DEFAULT);
 }
 
 export function inheritedRenameDelayMs(): number {

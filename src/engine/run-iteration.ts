@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { DEFAULT_STEP_TIMEOUT_MS, inheritedRenameDelayMs } from "../config/tunables.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, gateScriptTimeoutMs, inheritedRenameDelayMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
-import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForFailure, nextActionForOrphanedBackgroundNudge, shouldEvaluatePriorSessionForReattach } from "../core/retry-policy.ts";
-import type { TitleService } from "./engine-ports.ts";
+import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
+import { createStepAttemptState, decideAfterFailurePolicy, decideAfterPriorEvaluation, decideAfterPriorHealth, type PriorHealthDecision } from "../core/step-attempt.ts";
+import type { StoryStatePort, TitleService } from "./engine-ports.ts";
 import { TitleCoordinator, titleModeFor } from "./title-coordinator.ts";
 import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
@@ -32,14 +33,19 @@ import {
 import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
+import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
+import { comparePhase } from "../lib/story-state-files.ts";
+import { createStoryStateStore } from "../persistence/story-state-store.ts";
 import {
   decideRouting,
   insertAdjudicationRow,
+  readPrdPasses,
   recordStepTransitions,
   snapshotPrd,
   withAdjudicationReason,
   type AdjudicationRuntime,
 } from "./adjudication-routing.ts";
+import { evaluateGate, runGateScript } from "./step-gate.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -112,9 +118,11 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
   notify();
 }
 
+export type StepCompletionKind = "done" | "gate-skip" | "runtime-skip";
+
 export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
-  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; title?: string }) => void;
+  onStepFinish?: (info: { step: Step; index: number; nextIndex: number; totalSteps: number; iteration: number; status: StepResult; completionKind: StepCompletionKind; title?: string }) => void;
   onStepSession?: (info: { iteration: number; index: number; stepName: string; sessionID: string; messageID: string; promptText?: string; looperMessageIDs?: string[]; title?: string }) => void;
   onAdjudicationRoute?: (info: { iteration: number; totalSteps: number }) => void;
 };
@@ -157,6 +165,8 @@ export type RunIterationOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   prdDir?: string;
+  storyIdPattern?: string;
+  storyState?: StoryStatePort;
   adjudication?: AdjudicationRuntime;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the
@@ -233,6 +243,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     questionPolicy,
     useSessionIdle,
     prdDir,
+    storyIdPattern,
+    storyState: providedStoryState,
     adjudication,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -260,6 +272,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
   let pendingAdjudicateStep: LoadedStep | undefined;
   let initialRoutingChecked = false;
+  const storyState = providedStoryState ?? createStoryStateStore({ configDir });
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -333,12 +346,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
         const firstRemainingRow = state.steps.length - (steps.length - index);
         markRemainingSkipped(state, firstRemainingRow);
-        hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
         if (initialRouting.kind === "stop") {
           adjudication?.writeStop(initialRouting.reason);
           adjudication?.store.clearMarker();
           break;
         }
+        hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
         pendingAdjudicateStep = initialRouting.step;
         insertAdjudicationRow(state, initialRouting.step.name);
       }
@@ -368,6 +381,111 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (step === undefined) break;
     const executionIndex = adjudicating ? steps.length : index;
     const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+    const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
+    const needsStoryFacts = !adjudicating && (
+      step.gate !== undefined ||
+      stepContextPolicy.story ||
+      step.setsPhase !== undefined ||
+      (adjudication !== undefined && prdDir !== undefined)
+    );
+    const branch = needsStoryFacts ? await currentGitBranch(repoDir) : undefined;
+    const storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
+    const passesByStory = !adjudicating && prdDir !== undefined && (step.gate !== undefined || stepContextPolicy.story)
+      ? readPrdPasses(prdDir)
+      : undefined;
+    const passes = storyId === undefined ? undefined : passesByStory?.[storyId];
+    const phase = storyId === undefined || (!stepContextPolicy.story && step.gate === undefined && step.setsPhase === undefined)
+      ? undefined
+      : storyState.readPhase(storyId);
+    const finalizeLogicalStep = (input: {
+      readonly status: StepResult;
+      readonly completionKind: StepCompletionKind;
+      readonly nextIndex: number;
+      readonly rowIndex: number;
+      readonly recordPriorStep: boolean;
+    }): void => {
+      hooks?.onStepFinish?.({
+        step,
+        index,
+        nextIndex: input.nextIndex,
+        totalSteps: steps.length,
+        iteration,
+        status: input.status,
+        completionKind: input.completionKind,
+        ...(workDescription !== undefined ? { title: workDescription } : {}),
+      });
+
+      if (input.recordPriorStep) {
+        const finishedSessionID = state.steps[input.rowIndex]?.sessionID;
+        completedLogicalSteps.push({
+          stepIndex: index,
+          name: step.name,
+          status: input.status,
+          ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+        });
+      }
+
+      completed.splice(0, completed.length, ...state.steps.slice(0, input.rowIndex + 1).map((row) => ({ ...row })));
+      index = input.nextIndex;
+    };
+
+    const applyRouting = (routing: ReturnType<typeof decideRouting>, remainingFromIndex: number): void => {
+      if (routing.kind === "continue") return;
+      markRemainingSkipped(state, remainingFromIndex);
+      if (routing.kind === "stop") {
+        adjudication?.writeStop(routing.reason);
+        adjudication?.store.clearMarker();
+        return;
+      }
+      hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
+      pendingAdjudicateStep = routing.step;
+      insertAdjudicationRow(state, routing.step.name);
+    };
+
+    if (!adjudicating && step.gate !== undefined) {
+      const declarativeGate = {
+        ...(step.gate.branch !== undefined ? { branch: step.gate.branch } : {}),
+        ...(step.gate.prdPasses !== undefined ? { prdPasses: step.gate.prdPasses } : {}),
+        ...(step.gate.phase !== undefined ? { phase: step.gate.phase } : {}),
+      };
+      let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase });
+      if (gateDecision.pass && step.gate.script !== undefined) {
+        const scriptResult = await runGateScript(step.gate.script, {
+            repoDir,
+            ...(branch !== undefined ? { branch } : {}),
+            ...(storyId !== undefined ? { storyId } : {}),
+            timeoutMs: gateScriptTimeoutMs(),
+          });
+        gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, scriptResult });
+      }
+      if (!gateDecision.pass) {
+        const resumedSessionID = pendingResume?.sessionID;
+        if (resumedSessionID !== undefined && !(await stopPriorSession(resumedSessionID, currentStepIndex))) {
+          throw new StepFailureError(
+            `could not confirm session ${resumedSessionID} stopped; not gate-skipping ${step.name} to avoid overlapping opencode generations`,
+            { stepName: step.name, sessionID: resumedSessionID },
+          );
+        }
+        pendingResume = undefined;
+        recoveryNudgePending = false;
+        failStepRow(state, currentStepIndex, "skipped");
+        logStepLine(currentStepIndex, `[looper] gate skipped ${step.name}: ${gateDecision.reason}`);
+        const routing = decideRouting(adjudication);
+        // Match post-step routing: when we divert to stop/adjudicate, park the
+        // resume pointer at the end of the configured steps (adjudicate is not a
+        // resumable position; the marker is the durable signal).
+        finalizeLogicalStep({
+          status: "skipped",
+          completionKind: "gate-skip",
+          nextIndex: routing.kind === "continue" ? index + 1 : steps.length,
+          rowIndex: currentStepIndex,
+          recordPriorStep: false,
+        });
+        applyRouting(routing, currentStepIndex + 1);
+        continue;
+      }
+    }
+
     if (!adjudicating) hooks?.onStepBegin?.({ step, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
     const prdBefore = snapshotPrd(adjudication, prdDir);
     const stepSessionMetadata = looperRunID === undefined
@@ -501,49 +619,38 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
 
     let result: StepRunResult;
     let pendingResult: StepRunResult | undefined;
-    let suppressFailureRetry = false;
-    let suppressReason: string | undefined;
-    let allowTerminalSessionToContinue = false;
-    let failureRetryCount = 0;
-    let reattachCount = 0;
-    let resumeSessionID: string | undefined;
-    let resumePrompt: string | undefined;
-    let recoveryNudgeActive = false;
+    const attempt = createStepAttemptState();
     if (recoveryNudgePending) {
       recoveryNudgePending = false;
-      recoveryNudgeActive = true;
-      resumePrompt = recoveryNudgePrompt(promptText(step));
+      attempt.recoveryNudgeActive = true;
+      attempt.resumePrompt = recoveryNudgePrompt(promptText(step));
     }
-    let backgroundResumeCount = 0;
-    let orphanNudgeCount = 0;
-    let lastErrorMessage: string | undefined;
-    let lastPromptMessageID: string | undefined;
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
     const failAfterUnconfirmedStop = (sessionID: string, stepIdx: number, action: string): StepRunResult => {
       const reason = `could not confirm session ${sessionID} stopped; not ${action} to avoid overlapping opencode generations`;
-      suppressFailureRetry = true;
-      suppressReason = reason;
-      lastErrorMessage = reason;
+      attempt.suppressFailureRetry = true;
+      attempt.suppressReason = reason;
+      attempt.lastErrorMessage = reason;
       logStepLine(stepIdx, `[looper] ${reason}`);
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
     const failAfterUnrecoveredServer = (sessionID: string, stepIdx: number): StepRunResult => {
       const reason = `server did not recover while checking session ${sessionID}; leaving the session alone so it can complete in the background`;
-      suppressFailureRetry = true;
-      suppressReason = reason;
-      allowTerminalSessionToContinue = true;
-      lastErrorMessage = reason;
+      attempt.suppressFailureRetry = true;
+      attempt.suppressReason = reason;
+      attempt.allowTerminalSessionToContinue = true;
+      attempt.lastErrorMessage = reason;
       logStepLine(stepIdx, `[looper] ${reason}`);
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
     const failAfterActivePriorSession = (sessionID: string, stepIdx: number, reason: string): StepRunResult => {
-      suppressFailureRetry = true;
-      suppressReason = reason;
-      allowTerminalSessionToContinue = true;
-      lastErrorMessage = reason;
+      attempt.suppressFailureRetry = true;
+      attempt.suppressReason = reason;
+      attempt.allowTerminalSessionToContinue = true;
+      attempt.lastErrorMessage = reason;
       logStepLine(stepIdx, `[looper] ${reason}; leaving session ${sessionID} alone so it can complete`);
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
@@ -556,7 +663,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
       if (state.quitting || stopFileExists()) {
         const reason = `stop requested while checking session ${sessionID}`;
-        lastErrorMessage = reason;
+        attempt.lastErrorMessage = reason;
         logStepLine(stepIdx, `[looper] ${reason}`);
         failStepRow(state, stepIdx, "failed");
         return { status: "failed", sessionID, errorMessage: reason };
@@ -596,11 +703,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             recordedStepName: resumeInfo.stepName,
             workState,
             messageID: resumeInfo.messageID,
-            recoveryNudgeActive,
+            recoveryNudgeActive: attempt.recoveryNudgeActive,
           });
           if (resumeDecision.kind === "reattach" && resumeInfo.messageID !== undefined) {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: session ${resumeSession} still active; reattaching`);
-            lastPromptMessageID = resumeInfo.messageID;
+            attempt.lastPromptMessageID = resumeInfo.messageID;
             // onStepBegin's saveRunStatePosition just cleared the live session ids
             // from .looper-run.json, and reattach never hits runOpenCodeStep's
             // onSessionBound; re-persist them so a crash mid-reattach can still
@@ -634,7 +741,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             });
           } else if (resumeDecision.kind === "nudge-existing") {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
-            resumeSessionID = resumeSession;
+            attempt.resumeSessionID = resumeSession;
             if (resumeInfo.promptText !== undefined) setStepPromptText(state, currentStepIndex, resumeInfo.promptText);
             setStepLooperMessageIDs(
               state,
@@ -662,7 +769,20 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = pendingResult;
         pendingResult = undefined;
       } else {
-        const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
+        const promptNeedsStoryFacts = !adjudicating && stepContextPolicy.story;
+        const promptBranch = promptNeedsStoryFacts ? await currentGitBranch(repoDir) : undefined;
+        const promptStoryId = promptBranch === undefined ? undefined : storyIdFromBranch(promptBranch, storyIdPattern);
+        const promptPassesByStory = promptNeedsStoryFacts && prdDir !== undefined ? readPrdPasses(prdDir) : undefined;
+        const promptPasses = promptStoryId === undefined ? undefined : promptPassesByStory?.[promptStoryId];
+        const promptPhase = promptStoryId === undefined ? undefined : storyState.readPhase(promptStoryId);
+        const freshStoryFacts: ContextInput["story"] = promptBranch === undefined
+          ? undefined
+          : {
+              branch: promptBranch,
+              ...(promptStoryId !== undefined ? { storyId: promptStoryId } : {}),
+              ...(promptPasses !== undefined ? { passes: promptPasses } : {}),
+              ...(promptPhase !== undefined ? { phase: promptPhase } : {}),
+            };
         const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
           name: entry.name,
           status: entry.status,
@@ -685,6 +805,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           timeoutMs: budgetMs,
           ...(prd !== undefined ? { prd } : {}),
           ...(vcs !== undefined ? { vcs } : {}),
+          ...(freshStoryFacts !== undefined ? { story: freshStoryFacts } : {}),
         };
         const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
         const stepBasePrompt = adjudicating
@@ -693,11 +814,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = await runOpenCodeStep({
           state,
           stepIndex: currentStepIndex,
-          prompt: withLooperContext(contextBlock, resumePrompt ?? stepBasePrompt),
+          prompt: withLooperContext(contextBlock, attempt.resumePrompt ?? stepBasePrompt),
           client,
           repoDir,
           step,
-          sessionID: resumeSessionID,
+          sessionID: attempt.resumeSessionID,
           timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
           ...(questionPolicy !== undefined ? { questionPolicy } : {}),
@@ -717,27 +838,27 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               : {}),
         });
       }
-      resumePrompt = undefined;
+      attempt.resumePrompt = undefined;
       const requestedRestartReason = state.restartReason;
       state.skipRequested = false;
       state.restartRequested = false;
       state.restartReason = undefined;
       notify();
 
-      if (result.messageID !== undefined) lastPromptMessageID = result.messageID;
+      if (result.messageID !== undefined) attempt.lastPromptMessageID = result.messageID;
       if (result.status === "failed" && result.errorMessage) {
-        lastErrorMessage = result.errorMessage;
+        attempt.lastErrorMessage = result.errorMessage;
       }
 
       if (result.status === "waiting" && result.sessionID !== undefined) {
         const waitSessionID = result.sessionID;
-        backgroundResumeCount += 1;
-        const backgroundResumeDecision = nextActionForBackgroundResume(backgroundResumeCount);
+        attempt.backgroundResumeCount += 1;
+        const backgroundResumeDecision = nextActionForBackgroundResume(attempt.backgroundResumeCount);
         if (backgroundResumeDecision.kind === "fail") {
           result = { status: "failed" };
-          suppressFailureRetry = true;
-          suppressReason = `${backgroundResumeDecision.reason} for session ${waitSessionID}`;
-          lastErrorMessage = lastErrorMessage ?? suppressReason;
+          attempt.suppressFailureRetry = true;
+          attempt.suppressReason = `${backgroundResumeDecision.reason} for session ${waitSessionID}`;
+          attempt.lastErrorMessage = attempt.lastErrorMessage ?? attempt.suppressReason;
           const line = `[looper] background task resume limit exceeded for session ${waitSessionID}`;
           pushAgentLine(state, line);
           pushStepOutputLine(state, currentStepIndex, line);
@@ -748,10 +869,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
         const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !state.quitting && !stopFileExists()) {
-          resumeSessionID = waitSessionID;
-          resumePrompt = backgroundContinuationPrompt();
-          pushAgentLine(state, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
-          pushStepOutputLine(state, currentStepIndex, `[looper] background tasks idle; resuming session ${resumeSessionID}`);
+          attempt.resumeSessionID = waitSessionID;
+          attempt.resumePrompt = backgroundContinuationPrompt();
+          pushAgentLine(state, `[looper] background tasks idle; resuming session ${attempt.resumeSessionID}`);
+          pushStepOutputLine(state, currentStepIndex, `[looper] background tasks idle; resuming session ${attempt.resumeSessionID}`);
           notify();
           continue;
         }
@@ -759,8 +880,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         if (waitResult === "resumed" && !state.quitting && !stopFileExists()) {
           // Track the continuation hook's own user message so the resumed
           // turn's outcome decides the step result; classifying against
-          // lastPromptMessageID would grade the already-completed prior turn.
-          const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? lastPromptMessageID;
+          // attempt.lastPromptMessageID would grade the already-completed prior turn.
+          const resumedMessageID = (await latestUserMessageID(client, repoDir, waitSessionID)) ?? attempt.lastPromptMessageID;
           if (resumedMessageID !== undefined) {
             const activeStep = state.steps[currentStepIndex];
             if (!adjudicating) {
@@ -797,23 +918,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         }
 
         if (waitResult === "orphaned" && !state.quitting && !stopFileExists()) {
-          orphanNudgeCount += 1;
-          const orphanNudgeDecision = nextActionForOrphanedBackgroundNudge(orphanNudgeCount);
+          attempt.orphanNudgeCount += 1;
+          const orphanNudgeDecision = nextActionForOrphanedBackgroundNudge(attempt.orphanNudgeCount);
           if (orphanNudgeDecision.kind === "fail") {
             result = { status: "failed" };
-            suppressFailureRetry = true;
-            suppressReason = `${orphanNudgeDecision.reason} for session ${waitSessionID}`;
-            lastErrorMessage = lastErrorMessage ?? suppressReason;
+            attempt.suppressFailureRetry = true;
+            attempt.suppressReason = `${orphanNudgeDecision.reason} for session ${waitSessionID}`;
+            attempt.lastErrorMessage = attempt.lastErrorMessage ?? attempt.suppressReason;
             const line = `[looper] background marker still orphaned after nudge; failing closed for session ${waitSessionID}`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             failStepRow(state, currentStepIndex, "failed");
             break;
           }
-          resumeSessionID = waitSessionID;
-          resumePrompt = orphanedBackgroundNudgePrompt();
-          pushAgentLine(state, `[looper] background marker orphaned; nudging session ${resumeSessionID} to verify and finish`);
-          pushStepOutputLine(state, currentStepIndex, `[looper] background marker orphaned; nudging session ${resumeSessionID} to verify and finish`);
+          attempt.resumeSessionID = waitSessionID;
+          attempt.resumePrompt = orphanedBackgroundNudgePrompt();
+          pushAgentLine(state, `[looper] background marker orphaned; nudging session ${attempt.resumeSessionID} to verify and finish`);
+          pushStepOutputLine(state, currentStepIndex, `[looper] background marker orphaned; nudging session ${attempt.resumeSessionID} to verify and finish`);
           notify();
           continue;
         }
@@ -828,8 +949,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
-          resumeSessionID = undefined;
-          resumePrompt = cleanRestartPrompt(promptText(step), reason);
+          attempt.resumeSessionID = undefined;
+          attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
           pushAgentLine(state, `[looper] restart requested during background wait for session ${waitSessionID}`);
           pushStepOutputLine(state, previousStepIndex, `[looper] restart requested during background wait for session ${waitSessionID}`);
           state.restartRequested = false;
@@ -847,8 +968,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
           stepIndexForTitle = currentStepIndex;
           stepStartTime = Date.now();
-          resumeSessionID = undefined;
-          resumePrompt = cleanRestartPrompt(promptText(step), "timeout");
+          attempt.resumeSessionID = undefined;
+          attempt.resumePrompt = cleanRestartPrompt(promptText(step), "timeout");
           pushAgentLine(state, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
           pushStepOutputLine(state, previousStepIndex, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
           resetStepRowToPending(state, currentStepIndex);
@@ -858,9 +979,9 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const skipLike = waitResult === "stopped" || waitResult === "skipped";
         result = { status: skipLike ? "skipped" : "failed" };
         if (!skipLike) {
-          suppressFailureRetry = true;
-          suppressReason = `background task wait ended with ${waitResult} for session ${waitSessionID}`;
-          lastErrorMessage = lastErrorMessage ?? suppressReason;
+          attempt.suppressFailureRetry = true;
+          attempt.suppressReason = `background task wait ended with ${waitResult} for session ${waitSessionID}`;
+          attempt.lastErrorMessage = attempt.lastErrorMessage ?? attempt.suppressReason;
         }
         failStepRow(state, currentStepIndex, result.status === "skipped" ? "skipped" : "failed");
         pushAgentLine(state, `[looper] background task wait ended with ${waitResult} for session ${waitSessionID}`);
@@ -871,7 +992,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (result.status === "restart" && !state.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
         const priorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
-        logRecoveryBoundary(currentStepIndex, "restart", priorSessionID, lastPromptMessageID);
+        logRecoveryBoundary(currentStepIndex, "restart", priorSessionID, attempt.lastPromptMessageID);
         // Confirm the prior session is actually aborted before creating the
         // fresh restart session, so the old run can't keep generating in
         // parallel with the new one.
@@ -882,19 +1003,19 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
         stepIndexForTitle = currentStepIndex;
         stepStartTime = Date.now();
-        resumeSessionID = undefined;
-        resumePrompt = cleanRestartPrompt(promptText(step), reason);
+        attempt.resumeSessionID = undefined;
+        attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
         continue;
       }
 
       if (result.status === "failed") {
-        const errReason = lastErrorMessage ?? "unknown error (no message reported)";
+        const errReason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
         const stopRequested = state.quitting || stopFileExists();
-        const failureDecision = nextActionForFailure({ failureRetryCount, suppressFailureRetry, ...(suppressReason !== undefined ? { suppressReason } : {}), stopRequested });
+        const failureDecision = decideAfterFailurePolicy(attempt, { stopRequested });
 
         if (failureDecision.kind === "fail") {
           const skipReason = failureDecision.reason;
-          logRecoveryBoundary(currentStepIndex, "skip", state.steps[currentStepIndex]?.sessionID, lastPromptMessageID);
+          logRecoveryBoundary(currentStepIndex, "skip", state.steps[currentStepIndex]?.sessionID, attempt.lastPromptMessageID);
           const line = `[looper] ${step.name} failed: ${errReason} \u2014 not retrying: ${skipReason}`;
           pushAgentLine(state, line);
           pushStepOutputLine(state, currentStepIndex, line);
@@ -905,13 +1026,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const priorSessionForCheck = state.steps[currentStepIndex]?.sessionID;
         if (
           priorSessionForCheck !== undefined &&
-          lastPromptMessageID !== undefined
+          attempt.lastPromptMessageID !== undefined
         ) {
           let ev = await evaluatePriorSession({
             client,
             repoDir,
             sessionID: priorSessionForCheck,
-            messageID: lastPromptMessageID,
+            messageID: attempt.lastPromptMessageID,
           });
           if (!ev.statusKnown && ev.classification.kind === "missing") {
             const recovered = await waitForRecoverableHealth(priorSessionForCheck, currentStepIndex);
@@ -927,31 +1048,25 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               client,
               repoDir,
               sessionID: priorSessionForCheck,
-              messageID: lastPromptMessageID,
+              messageID: attempt.lastPromptMessageID,
             });
           }
-          const shouldReattach =
-            ev.pending ||
-            ev.classification.kind === "done" ||
-            ev.classification.kind === "in-progress";
-          if (shouldReattach) {
-            if (!shouldEvaluatePriorSessionForReattach({ sessionID: priorSessionForCheck, messageID: lastPromptMessageID, reattachCount })) {
-              const reason = ev.pending
-                ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`
-                : ev.classification.kind === "in-progress"
-                  ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`
-                  : `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
-              result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, reason);
-              break;
-            }
-            reattachCount += 1;
-            const why = ev.pending
-              ? "session still busy on opencode side"
-              : ev.classification.kind === "done"
-                ? "assistant message completed server-side despite client error"
-                : "assistant message still in-progress";
-            pushAgentLine(state, `[looper] ${step.name} reattaching (${reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
-            pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
+          const priorEvaluationDecision = decideAfterPriorEvaluation(attempt, {
+            evaluation: ev,
+            reattachAllowed: {
+              sessionID: priorSessionForCheck,
+              messageID: attempt.lastPromptMessageID,
+            },
+          });
+          if (priorEvaluationDecision.kind === "leave-session-alone") {
+            result = failAfterActivePriorSession(priorSessionForCheck, currentStepIndex, priorEvaluationDecision.reason);
+            break;
+          }
+          if (priorEvaluationDecision.kind === "reattach") {
+            attempt.reattachCount += 1;
+            const why = priorEvaluationDecision.why;
+            pushAgentLine(state, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
+            pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pendingResult = await reattachOpenCodeStep({
               state,
               stepIndex: currentStepIndex,
@@ -959,7 +1074,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               repoDir,
               step,
               sessionID: priorSessionForCheck,
-              outcomeMessageID: lastPromptMessageID,
+              outcomeMessageID: attempt.lastPromptMessageID,
               timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
@@ -967,48 +1082,53 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             });
             continue;
           }
-          if (ev.classification.kind === "failed" || ev.classification.kind === "empty") {
-            lastErrorMessage = ev.classification.errorMessage;
+          if (priorEvaluationDecision.kind === "classify-failure") {
+            attempt.lastErrorMessage = priorEvaluationDecision.errorMessage;
           }
         }
 
         const priorSessionID = state.steps[currentStepIndex]?.sessionID;
-        logRecoveryBoundary(currentStepIndex, "retry", priorSessionID, lastPromptMessageID);
+        logRecoveryBoundary(currentStepIndex, "retry", priorSessionID, attempt.lastPromptMessageID);
 
         if (priorSessionID !== undefined) {
           let pending: SessionHealthState = await sessionPendingState(client, repoDir, priorSessionID);
           if (pending === "unknown") pending = await waitForRecoverableHealth(priorSessionID, currentStepIndex);
-          if (pending === "stopped") {
-            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
-            continue;
-          }
-          if (pending === "unknown") {
-            result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
-            break;
-          }
-          if (pending !== "idle") {
+          let priorHealthDecision: PriorHealthDecision;
+          if (pending === "pending") {
             const line = `[looper] ${step.name}: prior session ${priorSessionID} still ${pending}; aborting before retrying in a fresh session`;
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
+            const stopConfirmed = await stopPriorSession(priorSessionID, currentStepIndex);
+            priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending, stopConfirmed });
+          } else {
+            priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending });
           }
-          if (pending !== "idle" && !(await stopPriorSession(priorSessionID, currentStepIndex))) {
+          if (priorHealthDecision.kind === "interrupted-health-wait") {
+            pendingResult = stopAfterInterruptedHealthWait(priorSessionID, currentStepIndex);
+            continue;
+          }
+          if (priorHealthDecision.kind === "leave-session-alone") {
+            result = failAfterUnrecoveredServer(priorSessionID, currentStepIndex);
+            break;
+          }
+          if (priorHealthDecision.kind === "fail-closed") {
             result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "retrying in a fresh session");
             break;
           }
         }
 
-        failureRetryCount = failureDecision.attempt;
+        attempt.failureRetryCount = failureDecision.attempt;
         const delayMs = failureDecision.delayMs;
         const delaySeconds = Math.round(delayMs / 1000);
-        const attemptTag = `attempt ${failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
+        const attemptTag = `attempt ${attempt.failureRetryCount}/${MAX_FAILURE_RETRIES_PER_STEP}`;
 
         const targetSuffix = `will retry with a fresh session`;
         const failedStepIndex = currentStepIndex;
         currentStepIndex = insertFailureRetryAttempt(state, currentStepIndex);
         stepIndexForTitle = currentStepIndex;
-        resumeSessionID = undefined;
-        resumePrompt = failureRetryPrompt(promptText(step), priorSessionID);
+        attempt.resumeSessionID = undefined;
+        attempt.resumePrompt = failureRetryPrompt(promptText(step), priorSessionID);
         const waitingLine = `[looper] ${step.name} failed: ${errReason} \u2014 waiting ${delaySeconds}s before retry (${attemptTag}); ${targetSuffix}`;
         pushAgentLine(state, waitingLine);
         pushStepOutputLine(state, failedStepIndex, waitingLine);
@@ -1041,6 +1161,31 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       });
     }
 
+    const passesFlippedToFalse = storyId !== undefined && prdBefore?.[storyId] === true && prdAfter?.[storyId] === false;
+    try {
+      if (result.status === "done" && step.setsPhase !== undefined && storyId !== undefined && !passesFlippedToFalse) {
+        const currentPhase = storyState.readPhase(storyId);
+        if (currentPhase === undefined || comparePhase(currentPhase, step.setsPhase) < 0) {
+          storyState.writePhase(storyId, step.setsPhase);
+        }
+      }
+      if (passesFlippedToFalse && storyId !== undefined) {
+        storyState.writePhase(storyId, "building");
+        logStepLine(currentStepIndex, `[looper] auto-demoted ${storyId} story phase to building after passes flipped true to false`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const sessionID = state.steps[currentStepIndex]?.sessionID;
+      failStepRow(state, currentStepIndex, "failed");
+      logStepLine(currentStepIndex, `[looper] story phase write failed for ${storyId ?? "current branch"}: ${message}`);
+      titleCoordinator?.cancel();
+      cancelInheritedTitleTimer();
+      throw new StepFailureError(
+        `could not persist story phase for ${storyId ?? "current branch"}: ${message}`,
+        { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },
+      );
+    }
+
     const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
     if (!adjudicating && routing.kind !== "continue" && result.status !== "done") {
       const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
@@ -1053,16 +1198,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         );
       }
     }
-    if (routing.kind !== "continue") hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
-    if (routing.kind === "stop") {
-      markRemainingSkipped(state, currentStepIndex + 1);
-      adjudication?.writeStop(routing.reason);
-      adjudication?.store.clearMarker();
-    } else if (routing.kind === "adjudicate") {
-      markRemainingSkipped(state, currentStepIndex + 1);
-      pendingAdjudicateStep = routing.step;
-      insertAdjudicationRow(state, routing.step.name);
-    }
+    applyRouting(routing, currentStepIndex + 1);
 
     if (result.status === "failed" && routing.kind === "continue" && !adjudicating) {
       titleCoordinator?.cancel();
@@ -1073,23 +1209,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       // server-side after we surface the failure. Use a short budget when the
       // user is quitting so teardown stays responsive.
       const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
-      const terminalStopConfirmed = allowTerminalSessionToContinue
+      const terminalStopConfirmed = attempt.allowTerminalSessionToContinue
         ? false
         : await stopPriorSession(
             terminalSessionID,
             currentStepIndex,
             stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
           );
-      if ((allowTerminalSessionToContinue || !terminalStopConfirmed) && terminalSessionID !== undefined) {
+      if ((attempt.allowTerminalSessionToContinue || !terminalStopConfirmed) && terminalSessionID !== undefined) {
         logStepLine(currentStepIndex, `[looper] ${step.name}: session ${terminalSessionID} may still be running after terminal failure`);
       }
       if (stopRequested) {
         markRemainingSkipped(state, currentStepIndex);
         break;
       }
-      const reason = lastErrorMessage ?? "unknown error (no message reported)";
+      const reason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
       throw new StepFailureError(
-        `${step.name} failed after ${failureRetryCount} retr${failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
+        `${step.name} failed after ${attempt.failureRetryCount} retr${attempt.failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
         { stepName: step.name, ...(terminalSessionID !== undefined ? { sessionID: terminalSessionID } : {}) },
       );
     }
@@ -1136,25 +1272,19 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         break;
       }
       throw new StepFailureError(
-        `adjudicate step failed: ${lastErrorMessage ?? "adjudicator did not complete"}`,
+        `adjudicate step failed: ${attempt.lastErrorMessage ?? "adjudicator did not complete"}`,
         { stepName: step.name, ...(adjSessionID !== undefined ? { sessionID: adjSessionID } : {}) },
       );
     }
 
     const routed = routing.kind !== "continue";
-    hooks?.onStepFinish?.({ step, index, nextIndex: routed ? steps.length : index + 1, totalSteps: steps.length, iteration, status: result.status, ...(workDescription !== undefined ? { title: workDescription } : {}) });
-
-    const finishedSessionID = state.steps[currentStepIndex]?.sessionID;
-    completedLogicalSteps.push({
-      stepIndex: index,
-      name: step.name,
+    finalizeLogicalStep({
       status: result.status,
-      ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
+      completionKind: result.status === "done" ? "done" : "runtime-skip",
+      nextIndex: routed ? steps.length : index + 1,
+      rowIndex: currentStepIndex,
+      recordPriorStep: true,
     });
-
-    completed.splice(0, completed.length, ...state.steps.slice(0, currentStepIndex + 1).map((step) => ({ ...step })));
-
-    index = routed ? steps.length : index + 1;
   }
 
   return state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()

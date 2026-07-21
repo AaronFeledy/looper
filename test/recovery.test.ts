@@ -17,7 +17,7 @@ import { createLoopState, type LoopState, type RecoveryChoice } from "../src/lib
  * keeps these assertions focused on recoveryNudge behavior instead of also
  * pinning unrelated context-block formatting.
  */
-const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false };
+const CONTEXT_OFF: ContextPolicy = { datetime: false, repoDir: false, loopPosition: false, timebox: false, vcsDelta: false, sessionIds: false, prd: false, story: false };
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {

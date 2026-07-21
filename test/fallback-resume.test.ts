@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 
+import * as orchestrator from "../src/lib/orchestrator.ts";
 import { computeNonTtyResumePlan, runNonTtyIterations } from "../src/lib/fallback.ts";
 import { initStatePaths, readRunState, writeRunState } from "../src/lib/state-files.ts";
 
@@ -69,6 +70,24 @@ describe("computeNonTtyResumePlan", () => {
     expect(plan.iterationStepSessions).toEqual([]);
   });
 
+  test("an old run-state fixture without newer optional fields still loads", () => {
+    // Given a persisted run-state written by an older Looper release.
+    const { repoDir, configDir } = setupScratch(["build", "review"]);
+    scratch = repoDir;
+    writeFileSync(
+      join(configDir, ".looper-run.json"),
+      JSON.stringify({ iteration: 2, stepIndex: 1, stepName: "review", sessionID: "ses_old", updatedAt: "2025-01-01T00:00:00.000Z" }),
+    );
+
+    // When the current resume planner reads it.
+    const plan = computeNonTtyResumePlan(configDir, { fresh: false, maxIterations: 5 });
+
+    // Then it preserves the old in-flight session without requiring newer fields.
+    expect(plan.firstStartStepIndex).toBe(1);
+    expect(plan.firstIterationResume).toEqual({ sessionID: "ses_old", stepName: "review" });
+    expect(plan.iterationStepSessions).toEqual([]);
+  });
+
   test("--fresh ignores persisted run-state entirely", () => {
     const { repoDir, configDir } = setupScratch(["build", "review"]);
     scratch = repoDir;
@@ -126,13 +145,6 @@ describe("computeNonTtyResumePlan", () => {
   });
 });
 
-function waitForAbort(signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
-
 function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
   const dir = join(repoDir, ".omo", "run-continuation");
   mkdirSync(dir, { recursive: true });
@@ -172,7 +184,10 @@ function makeClient(opts: { repoDir: string; sessionIDs: string[] }): { client: 
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
         stream: (async function* (): AsyncGenerator<never> {
-          await waitForAbort(options.signal);
+          await new Promise<void>((resolve) => {
+            if (options.signal.aborted) return resolve();
+            options.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
         })(),
       }),
     },
@@ -184,8 +199,40 @@ function makeClient(opts: { repoDir: string; sessionIDs: string[] }): { client: 
 describe("runNonTtyIterations resume wiring", () => {
   let scratch: string | undefined;
   afterEach(() => {
+    mock.restore();
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
     scratch = undefined;
+  });
+
+  test("passes a custom story id pattern through the non-TTY iteration path", async () => {
+    // Given a non-TTY run configured with a custom story id pattern.
+    const { repoDir, configDir } = setupScratch(["build"]);
+    scratch = repoDir;
+    const { client } = makeClient({ repoDir, sessionIDs: [] });
+    let receivedPattern: string | undefined;
+    spyOn(orchestrator, "runIteration").mockImplementation(async (input) => {
+      receivedPattern = input.storyIdPattern;
+      return "complete";
+    });
+    const priorExitCode = process.exitCode ?? 0;
+
+    // When one non-TTY iteration runs.
+    try {
+      await runNonTtyIterations({
+        options: { attach: false, command: { kind: "run" }, configDir, fresh: false, maxIterations: 1, start: true, waitProvided: false, waitDuration: 0 },
+        repoDir,
+        configDir,
+        client,
+        recoverySnapshots: false,
+        storyIdPattern: "^story/([a-z]+-[0-9]+)$",
+        currentBranch: async () => "story/us-074",
+      });
+    } finally {
+      process.exitCode = priorExitCode;
+    }
+
+    // Then RunIterationOptions receives the configured pattern unchanged.
+    expect(receivedPattern).toBe("^story/([a-z]+-[0-9]+)$");
   });
 
   test(
@@ -221,7 +268,7 @@ describe("runNonTtyIterations resume wiring", () => {
       const priorExitCode = process.exitCode ?? 0;
       try {
         await runNonTtyIterations({
-          options: { attach: false, configDir, fresh: false, init: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
+          options: { attach: false, command: { kind: "run" }, configDir, fresh: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
           repoDir,
           configDir,
           client,
