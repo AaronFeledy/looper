@@ -133,6 +133,9 @@ const scratchDirs: string[] = [];
 const originalInheritedValue = process.env["LOOPER_GATE_TEST_INHERITED"];
 const originalBranchValue = process.env["LOOPER_BRANCH"];
 const originalStoryIdValue = process.env["LOOPER_STORY_ID"];
+const originalPrdDirValue = process.env["LOOPER_PRD_DIR"];
+const originalPrdIndexValue = process.env["LOOPER_PRD_INDEX"];
+const originalPrdProgressValue = process.env["LOOPER_PRD_PROGRESS"];
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -152,6 +155,9 @@ afterEach(() => {
   restoreEnv("LOOPER_GATE_TEST_INHERITED", originalInheritedValue);
   restoreEnv("LOOPER_BRANCH", originalBranchValue);
   restoreEnv("LOOPER_STORY_ID", originalStoryIdValue);
+  restoreEnv("LOOPER_PRD_DIR", originalPrdDirValue);
+  restoreEnv("LOOPER_PRD_INDEX", originalPrdIndexValue);
+  restoreEnv("LOOPER_PRD_PROGRESS", originalPrdProgressValue);
 });
 
 describe("runGateScript", () => {
@@ -174,6 +180,31 @@ describe("runGateScript", () => {
     expect(readFileSync(output, "utf8")).toBe("inherited|us-074-work|US-074");
   });
 
+  test("exports caller-derived PRD display paths", async () => {
+    // Given conflicting inherited PRD path values.
+    const repoDir = createScratchDir();
+    const output = join(repoDir, "prd-env.txt");
+    process.env["LOOPER_PRD_DIR"] = "stale-dir";
+    process.env["LOOPER_PRD_INDEX"] = "stale-index";
+    process.env["LOOPER_PRD_PROGRESS"] = "stale-progress";
+
+    // When a gate script receives caller-derived display paths.
+    const result = await runGateScript(
+      `printf '%s' "$LOOPER_PRD_DIR|$LOOPER_PRD_INDEX|$LOOPER_PRD_PROGRESS" > ${JSON.stringify(output)}`,
+      {
+        repoDir,
+        prdDir: "product/prd",
+        prdIndex: "product/prd/prd.json",
+        prdProgress: "product/prd/progress.txt",
+        timeoutMs: 1_000,
+      },
+    );
+
+    // Then all PRD values are overlaid.
+    expect(result).toEqual({ ran: true, exitCode: 0 });
+    expect(readFileSync(output, "utf8")).toBe("product/prd|product/prd/prd.json|product/prd/progress.txt");
+  });
+
   test("exports empty story facts when the caller cannot derive them", async () => {
     // Given no caller-derived branch or story id.
     const repoDir = createScratchDir();
@@ -181,13 +212,13 @@ describe("runGateScript", () => {
 
     // When the script records the documented environment values.
     const result = await runGateScript(
-      `printf '%s' "$LOOPER_BRANCH|$LOOPER_STORY_ID" > ${JSON.stringify(output)}`,
+      `printf '%s' "$LOOPER_BRANCH|$LOOPER_STORY_ID|$LOOPER_PRD_DIR|$LOOPER_PRD_INDEX|$LOOPER_PRD_PROGRESS" > ${JSON.stringify(output)}`,
       { repoDir, timeoutMs: 1_000 },
     );
 
-    // Then both values are present as empty strings.
+    // Then all documented values are present as empty strings.
     expect(result).toEqual({ ran: true, exitCode: 0 });
-    expect(readFileSync(output, "utf8")).toBe("|");
+    expect(readFileSync(output, "utf8")).toBe("||||");
   });
 
   test("kills the detached process group before a timed-out script can write later", async () => {

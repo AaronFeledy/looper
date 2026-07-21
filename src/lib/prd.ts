@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 export const PRD_INDEX_FILENAME = "prd.json";
+export const PRD_PROGRESS_FILENAME = "progress.txt";
+
+export type PrdPaths = {
+  readonly dir: string;
+  readonly index: string;
+  readonly progress: string;
+};
 
 export type PrdResult =
   | { readonly kind: "ok"; readonly remaining: number; readonly total: number }
@@ -9,6 +16,17 @@ export type PrdResult =
 
 export function prdIndexPath(prdDir: string): string {
   return join(prdDir, PRD_INDEX_FILENAME);
+}
+
+export function derivePrdPaths(prdDir: string, repoDir: string): PrdPaths {
+  const relativeDir = relative(repoDir, prdDir);
+  const insideRepo = relativeDir === "" || (relativeDir !== ".." && !relativeDir.startsWith(`..${sep}`) && !isAbsolute(relativeDir));
+  const dir = insideRepo ? relativeDir || "." : prdDir;
+  return {
+    dir,
+    index: join(dir, PRD_INDEX_FILENAME),
+    progress: join(dir, PRD_PROGRESS_FILENAME),
+  };
 }
 
 function isRecord(value: unknown): value is { readonly [key: string]: unknown } {

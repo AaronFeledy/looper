@@ -189,6 +189,28 @@ describe("runIteration step gate wiring", () => {
     expect(existsSync(sentinel)).toBe(false);
   });
 
+  test("a gate script receives the derived PRD display paths", async () => {
+    // Given a configured PRD directory inside the repository and a script that records its environment.
+    const { repoDir, configDir } = setupScratch([{ key: "review", gateScript: 'printf "%s" "$LOOPER_PRD_DIR|$LOOPER_PRD_INDEX|$LOOPER_PRD_PROGRESS" > gate-prd-env.txt' }]);
+    scratchDirs.push(repoDir);
+    const prdDir = join(repoDir, "product", "prd");
+    mkdirSync(prdDir, { recursive: true });
+
+    // When the iteration evaluates the script gate.
+    const result = await runIteration({
+      state: createLoopState({ maxIterations: 1, stepNames: ["Review"] }),
+      iteration: 1,
+      client: makeClient({ repoDir, sessionIDs: ["ses_review"] }).client,
+      repoDir,
+      configDir,
+      prdDir,
+    });
+
+    // Then the script receives repository-relative paths from the shared bundle.
+    expect(result).toBe("complete");
+    expect(await Bun.file(join(repoDir, "gate-prd-env.txt")).text()).toBe("product/prd|product/prd/prd.json|product/prd/progress.txt");
+  });
+
   test("a gate skip confirms a persisted busy session stopped before completion", async () => {
     // Given a gated step resumed from a busy server session that can be stopped.
     const { repoDir, configDir } = setupScratch([{ key: "review", gateScript: "exit 1" }]);

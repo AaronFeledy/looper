@@ -4,7 +4,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS, gateScriptTimeoutMs, inheritedRenameDelayMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
-import { readPrd } from "../lib/prd.ts";
+import { derivePrdPaths, readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
 import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
@@ -250,6 +250,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     contextPolicy: globalContextPolicy,
     resumedStepSessions,
   } = options;
+  const prdPaths = prdDir === undefined ? undefined : derivePrdPaths(prdDir, repoDir);
   const completed: LoopStep[] = [];
   // Logical-step ledger for the `<looper-context>` prior-steps section, keyed
   // by `stepIndex` (config position; immune to duplicate step names) rather
@@ -454,6 +455,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             repoDir,
             ...(branch !== undefined ? { branch } : {}),
             ...(storyId !== undefined ? { storyId } : {}),
+            ...(prdPaths !== undefined ? {
+              prdDir: prdPaths.dir,
+              prdIndex: prdPaths.index,
+              prdProgress: prdPaths.progress,
+            } : {}),
             timeoutMs: gateScriptTimeoutMs(),
           });
         gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, scriptResult });
@@ -804,6 +810,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           priorSteps,
           timeoutMs: budgetMs,
           ...(prd !== undefined ? { prd } : {}),
+          ...(prdPaths !== undefined ? { prdPaths } : {}),
           ...(vcs !== undefined ? { vcs } : {}),
           ...(freshStoryFacts !== undefined ? { story: freshStoryFacts } : {}),
         };

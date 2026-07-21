@@ -190,9 +190,22 @@ independent of the TUI `Diff` panel &mdash; turning one off does not affect the 
 lookup errors or hangs past its bound, looper logs one line and sends the prompt without that section
 rather than blocking or failing the step.
 
-`prd` is included only when top-level `prd:` is configured and `prd.json` can be read. It renders a one-line
-summary like `PRD: 12 of 41 user stories passing (29 remaining)`. Disable it independently with
-`context.prd: false`.
+`prd` is included when top-level `prd:` is configured. It renders the configured artifact paths plus counts
+when `prd.json` is readable:
+
+```yaml
+prd:
+  dir: spec/beta-1
+  index: spec/beta-1/prd.json
+  progress: spec/beta-1/progress.txt
+  passing: 12
+  total: 41
+  remaining: 29
+```
+
+In-repository paths are relative to the repo dir; paths outside the repo remain absolute. If `prd.json`
+cannot be read, the path fields are still included and only the count fields are omitted. Disable the
+entire block independently with `context.prd: false`.
 
 `story` renders a `story:` block with whatever of `branch`, `storyId`, `passes`, `phase` looper could derive;
 each field is omitted individually when unknown, and the whole block is omitted when no branch is derivable
@@ -207,8 +220,9 @@ resolve against the repo dir, not the config dir:
 prd: spec/beta-1
 ```
 
-When configured, the TUI shows a PRD progress panel and the prompt context can include the same progress line.
-Looper polls `prd.json` every few seconds and reports parse/read errors in the panel instead of failing the run.
+When configured, the TUI shows a PRD progress panel and the prompt context can include the structured `prd:`
+block above. Looper polls `prd.json` every few seconds and reports parse/read errors in the panel instead of
+failing the run.
 
 ### Adjudication
 
@@ -248,9 +262,11 @@ A step's `gate:` skips that step (no opencode session is created) unless every c
   in the order `building < implemented < reviewed < verified < published < merged`; a story with no recorded
   phase is treated as `building`.
 - `script: "<bash>"` &mdash; the script is run via `bash -c` and must exit `0`. It gets the current branch and
-  story id as `LOOPER_BRANCH`/`LOOPER_STORY_ID` env vars (empty string when underivable), plus the inherited
-  process env. It is killed (its whole process group) if it runs past `LOOPER_GATE_SCRIPT_TIMEOUT_MS`
-  (default 30000).
+  story id as `LOOPER_BRANCH`/`LOOPER_STORY_ID`, plus configured PRD paths as `LOOPER_PRD_DIR`,
+  `LOOPER_PRD_INDEX`, and `LOOPER_PRD_PROGRESS`. Looper-owned variables are empty strings when unavailable;
+  in-repository PRD paths are relative to the script's repo-dir working directory and external paths remain
+  absolute. The script also inherits the process env. It is killed (its whole process group) if it runs past
+  `LOOPER_GATE_SCRIPT_TIMEOUT_MS` (default 30000).
 
 A skipped gate logs `[looper] gate skipped <step>: <reason>` and still advances the run to the next step, the
 same as a normal completion.

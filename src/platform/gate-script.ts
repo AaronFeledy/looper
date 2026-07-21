@@ -10,6 +10,9 @@ export type GateScriptOptions = {
   readonly repoDir: string;
   readonly branch?: string;
   readonly storyId?: string;
+  readonly prdDir?: string;
+  readonly prdIndex?: string;
+  readonly prdProgress?: string;
   readonly timeoutMs?: number;
 };
 
@@ -45,6 +48,9 @@ export async function runGateScript(script: string, options: GateScriptOptions):
         ...process.env,
         LOOPER_BRANCH: options.branch ?? "",
         LOOPER_STORY_ID: options.storyId ?? "",
+        LOOPER_PRD_DIR: options.prdDir ?? "",
+        LOOPER_PRD_INDEX: options.prdIndex ?? "",
+        LOOPER_PRD_PROGRESS: options.prdProgress ?? "",
       },
       stdin: "ignore",
       stdout: "ignore",

@@ -41,7 +41,7 @@ const CONTEXT_MARKERS = {
   timebox: "This step is aborted after",
   vcsDelta: "VCS delta",
   sessionIds: "Opencode sessions from earlier steps this iteration:",
-  prd: "PRD:",
+  prd: "prd:",
   story: "story:",
 } satisfies Record<ContextKey, string>;
 
@@ -123,7 +123,7 @@ describe("buildLooperContext", () => {
     expect(block).toMatch(/iteration 2 of 10/);
     expect(block).toMatch(/step "test" \(2 of 3\)/);
     expect(block).toMatch(/90m/);
-    expect(block).toContain("PRD: 28 of 41 user stories passing (13 remaining)");
+    expect(block).toContain("prd:\n  passing: 28\n  total: 41\n  remaining: 13");
     expect(block).toContain("main");
     expect(block).toContain("src/a.ts");
     expect(block).toContain("Opencode sessions from earlier steps this iteration:");
@@ -177,7 +177,7 @@ describe("buildLooperContext", () => {
           expect(block).not.toMatch(/aborted after/);
           break;
         case "prd":
-          expect(block).not.toContain("PRD:");
+          expect(block).not.toContain("prd:");
           break;
         case "vcsDelta":
           expect(block).not.toContain("a.ts");
@@ -336,24 +336,70 @@ describe("buildLooperContext", () => {
     expect(buildLooperContext(ALL_OFF, input)).toBe("");
   });
 
-  test("renders the neutral PRD progress line when policy and input are present", () => {
-    const block = buildLooperContext(ALL_ON, baseInput({ prd: { remaining: 13, total: 41 } }));
+  test("renders structured PRD paths and counts when both are available", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({
+      prd: { remaining: 13, total: 41 },
+      prdPaths: { dir: "spec/beta-1", index: "spec/beta-1/prd.json", progress: "spec/beta-1/progress.txt" },
+    }));
 
-    expect(block).toContain("PRD: 28 of 41 user stories passing (13 remaining)");
+    expect(block).toContain([
+      "prd:",
+      "  dir: spec/beta-1",
+      "  index: spec/beta-1/prd.json",
+      "  progress: spec/beta-1/progress.txt",
+      "  passing: 28",
+      "  total: 41",
+      "  remaining: 13",
+    ].join("\n"));
     expect(block.startsWith("<looper-context>")).toBe(true);
     expect(block.endsWith("</looper-context>")).toBe(true);
   });
 
-  test("omits the PRD progress line when policy is off", () => {
-    const block = buildLooperContext({ ...ALL_ON, prd: false }, baseInput({ prd: { remaining: 13, total: 41 } }));
+  test("renders PRD paths when the progress index cannot be read", () => {
+    // Given configured PRD paths without count data.
+    const input = baseInput({
+      prdPaths: { dir: "/srv/shared/prd", index: "/srv/shared/prd/prd.json", progress: "/srv/shared/prd/progress.txt" },
+    });
 
-    expect(block).not.toContain("PRD:");
+    // When PRD context is rendered.
+    const block = buildLooperContext(ALL_ON, input);
+
+    // Then concrete paths remain available even though the count line is absent.
+    expect(block).toContain([
+      "prd:",
+      "  dir: /srv/shared/prd",
+      "  index: /srv/shared/prd/prd.json",
+      "  progress: /srv/shared/prd/progress.txt",
+    ].join("\n"));
+    expect(block).not.toContain("  passing:");
+    expect(block).not.toContain("  total:");
+    expect(block).not.toContain("  remaining:");
   });
 
-  test("omits the PRD progress line when input is absent", () => {
+  test("renders structured PRD counts when paths are unavailable", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({ prd: { remaining: 13, total: 41 } }));
+
+    expect(block).toContain("prd:\n  passing: 28\n  total: 41\n  remaining: 13");
+    expect(block).not.toContain("  dir:");
+    expect(block).not.toContain("  index:");
+    expect(block).not.toContain("  progress:");
+  });
+
+  test("omits the entire structured PRD block when policy is off", () => {
+    const block = buildLooperContext({ ...ALL_ON, prd: false }, baseInput({
+      prd: { remaining: 13, total: 41 },
+      prdPaths: { dir: "product/prd", index: "product/prd/prd.json", progress: "product/prd/progress.txt" },
+    }));
+
+    expect(block).not.toContain("prd:");
+    expect(block).not.toContain("  dir: product/prd");
+    expect(block).not.toContain("  passing: 28");
+  });
+
+  test("omits the PRD block when input is absent", () => {
     const block = buildLooperContext(ALL_ON, baseInput());
 
-    expect(block).not.toContain("PRD:");
+    expect(block).not.toContain("prd:");
   });
 
   test("empty priorSteps and no vcs with all-on policy renders remaining sections only", () => {

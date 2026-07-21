@@ -1,4 +1,5 @@
 import type { StoryPhase } from "./story-state-files.ts";
+import type { PrdPaths } from "./prd.ts";
 
 export type ContextPolicy = {
   readonly datetime: boolean;
@@ -50,6 +51,7 @@ export type ContextInput = {
   readonly priorSteps: readonly PriorStepInfo[];
   readonly timeoutMs: number;
   readonly prd?: { readonly remaining: number; readonly total: number };
+  readonly prdPaths?: PrdPaths;
   readonly vcs?: VcsSnapshot;
   readonly story?: {
     readonly branch?: string;
@@ -91,10 +93,6 @@ function buildLoopPositionLine(input: ContextInput): string {
   if (input.priorSteps.length === 0) return base;
   const statuses = input.priorSteps.map((step) => `${step.name}=${step.status}`).join(", ");
   return `${base}; prior steps this iteration: ${statuses}`;
-}
-
-function buildPrdLine(prd: { readonly remaining: number; readonly total: number }): string {
-  return `PRD: ${prd.total - prd.remaining} of ${prd.total} user stories passing (${prd.remaining} remaining)`;
 }
 
 function buildSessionLines(priorSteps: readonly PriorStepInfo[]): string[] {
@@ -169,7 +167,20 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
   if (policy.repoDir) fixedLines.push(`Repo dir: ${input.repoDir}`);
   if (policy.loopPosition) fixedLines.push(buildLoopPositionLine(input));
   if (policy.timebox) fixedLines.push(`This step is aborted after ${formatDuration(input.timeoutMs)}`);
-  if (policy.prd && input.prd !== undefined) fixedLines.push(buildPrdLine(input.prd));
+  if (policy.prd && (input.prdPaths !== undefined || input.prd !== undefined)) {
+    const prdLines = ["prd:"];
+    if (input.prdPaths !== undefined) {
+      prdLines.push(`  dir: ${input.prdPaths.dir}`);
+      prdLines.push(`  index: ${input.prdPaths.index}`);
+      prdLines.push(`  progress: ${input.prdPaths.progress}`);
+    }
+    if (input.prd !== undefined) {
+      prdLines.push(`  passing: ${input.prd.total - input.prd.remaining}`);
+      prdLines.push(`  total: ${input.prd.total}`);
+      prdLines.push(`  remaining: ${input.prd.remaining}`);
+    }
+    fixedLines.push(prdLines.join("\n"));
+  }
   const fixedBlock = fixedLines.join("\n");
 
   const sessionLines = policy.sessionIds ? buildSessionLines(input.priorSteps) : [];

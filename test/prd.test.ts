@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { countPrd, prdIndexPath, PRD_INDEX_FILENAME, readPrd } from "../src/lib/prd.ts";
+import { countPrd, derivePrdPaths, prdIndexPath, PRD_INDEX_FILENAME, PRD_PROGRESS_FILENAME, readPrd } from "../src/lib/prd.ts";
 
 function withPrdDir(raw: string, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "looper-prd-"));
@@ -75,6 +75,40 @@ describe("prd.json reading", () => {
       const result = readPrd(dir);
 
       expect(result).toEqual({ kind: "ok", remaining: 3, total: 4 });
+    });
+  });
+});
+
+describe("PRD path derivation", () => {
+  test("uses repo-relative display paths when the PRD directory is inside the repository", () => {
+    // Given an absolute PRD directory nested inside the repository.
+    const repoDir = "/home/aaron/projects/looper";
+    const prdDir = join(repoDir, "product", "prd");
+
+    // When display paths are derived.
+    const paths = derivePrdPaths(prdDir, repoDir);
+
+    // Then every path is repository-relative and includes the conventional filenames.
+    expect(paths).toEqual({
+      dir: join("product", "prd"),
+      index: join("product", "prd", PRD_INDEX_FILENAME),
+      progress: join("product", "prd", PRD_PROGRESS_FILENAME),
+    });
+    expect(PRD_PROGRESS_FILENAME).toBe("progress.txt");
+  });
+
+  test("uses absolute display paths when the PRD directory is outside the repository", () => {
+    // Given an absolute PRD directory outside the repository.
+    const prdDir = "/srv/shared/product-prd";
+
+    // When display paths are derived.
+    const paths = derivePrdPaths(prdDir, "/home/aaron/projects/looper");
+
+    // Then every path remains absolute.
+    expect(paths).toEqual({
+      dir: prdDir,
+      index: join(prdDir, PRD_INDEX_FILENAME),
+      progress: join(prdDir, PRD_PROGRESS_FILENAME),
     });
   });
 });
