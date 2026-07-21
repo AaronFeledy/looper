@@ -3,7 +3,7 @@ import { StepFailureError, type ResumeSession } from "../lib/orchestrator.ts";
 import type { Step } from "../lib/runner.ts";
 import type { StepSessionEntry } from "../lib/state-files.ts";
 import type { RunStateStoreStep } from "../persistence/run-state-store.ts";
-import type { EngineFrontendHooks, EngineRunIteration, RunEngineOptions, RunEngineResult, RunStateStore } from "./engine-ports.ts";
+import type { EngineFrontendHooks, EngineRunIteration, RunEngineOptions, RunEngineResult, RunStateStore, StoryStatePort } from "./engine-ports.ts";
 import { buildEngineStepHooks } from "./run-engine-step-hooks.ts";
 import type { AdjudicationConfig } from "./adjudication-routing.ts";
 
@@ -44,6 +44,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
+  readonly storyState?: StoryStatePort;
   readonly adjudication?: AdjudicationConfig;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
@@ -202,6 +203,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
         ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
+        ...(input.storyState !== undefined ? { storyState: input.storyState } : {}),
         ...(input.adjudication !== undefined
           ? { adjudication: { ...input.adjudication, writeStop: input.store.writeStop } }
           : {}),

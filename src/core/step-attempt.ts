@@ -1,5 +1,4 @@
-import type { PriorSessionEvaluation } from "../opencode/reattach.ts";
-import type { SessionHealthState } from "../opencode/session-health.ts";
+import type { PriorSessionEvaluation, SessionHealthState } from "./session-types.ts";
 import {
   MAX_REATTACH_PER_STEP,
   nextActionForFailure,
@@ -85,18 +84,24 @@ export function decideAfterPriorEvaluation(
       reattachCount: attempt.reattachCount,
     });
     if (!allowed) {
-      const reason = evaluation.pending
-        ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`
-        : evaluation.classification.kind === "in-progress"
-          ? `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`
-          : `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
+      let reason: string;
+      if (evaluation.pending) {
+        reason = `reattach limit (${MAX_REATTACH_PER_STEP}) reached while session is still busy on opencode side`;
+      } else if (evaluation.classification.kind === "in-progress") {
+        reason = `reattach limit (${MAX_REATTACH_PER_STEP}) reached while assistant message still in-progress`;
+      } else {
+        reason = `reattach limit (${MAX_REATTACH_PER_STEP}) reached after assistant message completed server-side`;
+      }
       return { kind: "leave-session-alone", reason };
     }
-    const why = evaluation.pending
-      ? "session still busy on opencode side"
-      : evaluation.classification.kind === "done"
-        ? "assistant message completed server-side despite client error"
-        : "assistant message still in-progress";
+    let why: string;
+    if (evaluation.pending) {
+      why = "session still busy on opencode side";
+    } else if (evaluation.classification.kind === "done") {
+      why = "assistant message completed server-side despite client error";
+    } else {
+      why = "assistant message still in-progress";
+    }
     return { kind: "reattach", why };
   }
   if (evaluation.classification.kind === "failed" || evaluation.classification.kind === "empty") {

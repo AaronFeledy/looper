@@ -2,10 +2,10 @@ import type { OpencodeClient, SessionStatus } from "@opencode-ai/sdk/v2";
 
 import { STOP_SESSION_CONFIRM_POLL_MS, serverRecoveryBackoffBaseMs, serverRecoveryBackoffMaxMs, serverRecoveryMaxWaitMs, serverRecoveryProbeTimeoutMs, stopSessionConfirmTimeoutMs } from "../config/tunables.ts";
 import { backoffDelayMs } from "../core/backoff.ts";
+import type { SessionHealthState, SessionPendingState } from "../core/session-types.ts";
 import { formatRequestError, toError } from "./util.ts";
 
-export type SessionPendingState = "pending" | "idle" | "unknown";
-export type SessionHealthState = SessionPendingState | "stopped";
+export type { SessionHealthState, SessionPendingState } from "../core/session-types.ts";
 
 function serverRecoveryDelayMs(attempt: number, remainingMs: number): number {
   return backoffDelayMs(

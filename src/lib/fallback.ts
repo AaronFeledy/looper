@@ -17,7 +17,7 @@ import { divider, label, ui } from "./fallback-ui.ts";
 import { createAdjudicationStore, type AdjudicationStore } from "../persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
-import { createStoryStateStore } from "../persistence/story-state-store.ts";
+import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -113,6 +113,7 @@ export async function runNonTty({
       ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
       ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
       adjudicationStore,
+      storyStateStore,
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
       currentBranch,
     });
@@ -178,6 +179,7 @@ export async function runNonTtyIterations({
   configuredPrdFlipThreshold,
   storyIdPattern,
   adjudicationStore,
+  storyStateStore,
   contextPolicy,
   currentBranch,
 }: {
@@ -194,6 +196,7 @@ export async function runNonTtyIterations({
   configuredPrdFlipThreshold?: number;
   storyIdPattern?: string;
   adjudicationStore?: AdjudicationStore;
+  storyStateStore?: StoryStateStore;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 }): Promise<void> {
@@ -216,7 +219,8 @@ export async function runNonTtyIterations({
     currentBranch,
     createLooperRunID,
     legacyResumeStepIndex: (steps) => resumeStepIndex([...steps]),
-    runIteration: (input) => runIteration(input),
+    runIteration,
+    ...(storyStateStore !== undefined ? { storyState: storyStateStore } : {}),
     persistTitles: false,
     ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
     recoverySnapshots,

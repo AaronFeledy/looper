@@ -1,11 +1,8 @@
-import { clearStoryState, readStoryPhase, writeStoryPhase, type StoryPhase } from "../lib/story-state-files.ts";
+import type { StoryStatePort } from "../engine/engine-ports.ts";
+import { clearStoryState, readStoryPhase, writeStoryPhase } from "../lib/story-state-files.ts";
 import { initStatePaths } from "../lib/state-files.ts";
 
-export type StoryStateStore = {
-  readonly readPhase: (storyId: string) => StoryPhase | undefined;
-  readonly writePhase: (storyId: string, phase: StoryPhase) => void;
-  readonly clear: () => void;
-};
+export type StoryStateStore = StoryStatePort;
 
 export function createStoryStateStore(opts: { readonly configDir: string }): StoryStateStore {
   initStatePaths({ configDir: opts.configDir });

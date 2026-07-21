@@ -12,7 +12,8 @@ import {
 import type { LoadedStep } from "../lib/config.ts";
 import { createStepRow, notify, type LoopState } from "../lib/state.ts";
 import { prdFlipThreshold } from "../config/tunables.ts";
-import { createAdjudicationStore, type AdjudicationStore } from "../persistence/adjudication-store.ts";
+import { createAdjudicationStore } from "../persistence/adjudication-store.ts";
+import type { AdjudicationStore } from "./engine-ports.ts";
 
 export type PrdPassesReader = (prdDir: string) => PrdPassesMap | undefined;
 
@@ -35,6 +36,7 @@ export function createAdjudicationConfig(input: {
 }): AdjudicationConfig {
   const step = loadAdjudicateStep(input.configDir);
   return {
+    // Factory fallback supports tests/bootstrap; production callers should inject the store.
     store: input.store ?? createAdjudicationStore({ configDir: input.configDir }),
     ...(step !== undefined ? { step } : {}),
     threshold: prdFlipThreshold(input.configuredThreshold),

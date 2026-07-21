@@ -1,6 +1,7 @@
 import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
+import type { PriorSessionEvaluation } from "../core/session-types.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
@@ -123,12 +124,7 @@ export async function resumeSessionWorkState({
 
 export { assistantErrorMessage, assistantHasMeaningfulActivity, classifyAssistantForMessage, emptyAssistantMessage, isNonRetryableAssistantError } from "./assistant-classification.ts";
 export type { AssistantClassification } from "./assistant-classification.ts";
-
-export type PriorSessionEvaluation = {
-  statusKnown: boolean;
-  pending: boolean;
-  classification: AssistantClassification;
-};
+export type { PriorSessionEvaluation } from "../core/session-types.ts";
 
 export async function evaluatePriorSession({
   client,

@@ -1,10 +1,13 @@
 import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { ContextPolicy, PermissionPolicy, QuestionPolicy, RecoverySnapshotsConfig, TitleGenConfig } from "../lib/config.ts";
+import type { StoryTransitionRecord } from "../lib/adjudication-detection.ts";
+import type { AdjudicateSession } from "../lib/adjudication-files.ts";
 import type { Step, StepResult } from "../lib/runner.ts";
 import type { StepCompletionKind } from "./run-iteration.ts";
 import type { LooperSessionMetadataInput } from "../lib/session-metadata.ts";
 import type { RunState, StepSessionEntry } from "../lib/state-files.ts";
+import type { StoryPhase } from "../lib/story-state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { AdjudicationRuntime } from "./adjudication-routing.ts";
 
@@ -24,6 +27,27 @@ export type RunStateStore = {
   readonly stopAfterIterationFileExists: () => boolean;
   readonly writeStop: (reason: string) => void;
   readonly writeStopAfterIteration: (reason: string) => void;
+};
+
+export type StoryStatePort = {
+  readonly readPhase: (storyId: string) => StoryPhase | undefined;
+  readonly writePhase: (storyId: string, phase: StoryPhase) => void;
+  readonly clear: () => void;
+};
+
+export type AdjudicationStore = {
+  readonly markerExists: () => boolean;
+  readonly readMarker: () => string | null;
+  readonly writeMarker: (reason: string) => void;
+  readonly clearMarker: () => void;
+  readonly appendHistory: (records: readonly StoryTransitionRecord[]) => void;
+  readonly readHistory: () => StoryTransitionRecord[];
+  readonly readActiveHistory: () => StoryTransitionRecord[];
+  readonly markAdjudicated: () => void;
+  readonly clearHistory: () => void;
+  readonly writeSession: (session: AdjudicateSession) => void;
+  readonly readSession: () => AdjudicateSession | null;
+  readonly clearSession: () => void;
 };
 
 export type RunEngineOptions = {
@@ -125,6 +149,7 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
+  readonly storyState?: StoryStatePort;
   readonly adjudication?: AdjudicationRuntime;
   readonly maxIterations?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;
