@@ -1,4 +1,4 @@
-import type { StoryTransitionRecord } from "../lib/adjudication-detection.ts";
+import type { AdjudicationStore } from "../engine/engine-ports.ts";
 import {
   adjudicateMarkerExists,
   appendPrdHistory,
@@ -17,21 +17,26 @@ import {
 import { initStatePaths } from "../lib/state-files.ts";
 
 export type { AdjudicateSession } from "../lib/adjudication-files.ts";
+export type { AdjudicationStore } from "../engine/engine-ports.ts";
 
-export type AdjudicationStore = {
-  readonly markerExists: () => boolean;
-  readonly readMarker: () => string | null;
-  readonly writeMarker: (reason: string) => void;
-  readonly clearMarker: () => void;
-  readonly appendHistory: (records: readonly StoryTransitionRecord[]) => void;
-  readonly readHistory: () => StoryTransitionRecord[];
-  readonly readActiveHistory: () => StoryTransitionRecord[];
-  readonly markAdjudicated: () => void;
-  readonly clearHistory: () => void;
-  readonly writeSession: (session: AdjudicateSession) => void;
-  readonly readSession: () => AdjudicateSession | null;
-  readonly clearSession: () => void;
-};
+export class CorruptAdjudicateSessionError extends Error {
+  constructor() {
+    super("adjudicator session record is corrupt; refusing to start a potentially overlapping generation");
+    this.name = "CorruptAdjudicateSessionError";
+  }
+}
+
+function readSessionFailClosed(): AdjudicateSession | null {
+  const result = readAdjudicateSession();
+  switch (result.kind) {
+    case "absent":
+      return null;
+    case "ok":
+      return result.session;
+    case "corrupt":
+      throw new CorruptAdjudicateSessionError();
+  }
+}
 
 export function createAdjudicationStore(opts: { readonly configDir: string }): AdjudicationStore {
   initStatePaths({ configDir: opts.configDir });
@@ -50,7 +55,7 @@ export function createAdjudicationStore(opts: { readonly configDir: string }): A
     // for an explicit fresh run, never as part of max-iteration run cleanup.
     clearHistory: clearPrdHistory,
     writeSession: writeAdjudicateSession,
-    readSession: readAdjudicateSession,
+    readSession: readSessionFailClosed,
     clearSession: clearAdjudicateSession,
   };
 }

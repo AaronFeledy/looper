@@ -45,11 +45,11 @@ function parseStoryState(content: string | null): StoryStateFile {
 
   const stories: Record<string, StoryStateEntry> = {};
   for (const [storyId, value] of Object.entries(parsed["stories"])) {
-    if (storyId.length === 0 || !isRecord(value)) return { stories: {} };
+    if (storyId.length === 0 || !isRecord(value)) continue;
     const phase = value["phase"];
     const updatedAt = value["updatedAt"];
     if (typeof phase !== "string" || !isValidPhase(phase) || typeof updatedAt !== "string" || updatedAt.length === 0) {
-      return { stories: {} };
+      continue;
     }
     stories[storyId] = { phase, updatedAt };
   }

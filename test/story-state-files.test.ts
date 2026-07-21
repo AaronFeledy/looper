@@ -16,6 +16,21 @@ import { initStatePaths } from "../src/lib/state-files.ts";
 const TMP_ROOT = join(import.meta.dir, ".tmp");
 const STORY_STATE_FILE = ".looper-story-state.json";
 
+function writeMalformedPeerState(scratch: string): string {
+  const statePath = join(scratch, STORY_STATE_FILE);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      stories: {
+        "US-074": { phase: "reviewed", updatedAt: "2026-07-20T10:00:00.000Z" },
+        "US-BAD": { phase: "unknown", updatedAt: "2026-07-20T10:00:00.000Z" },
+        "US-075": { phase: "implemented", updatedAt: "2026-07-20T10:00:00.000Z" },
+      },
+    }),
+  );
+  return statePath;
+}
+
 describe("story state files", () => {
   let scratch: string;
 
@@ -89,6 +104,38 @@ describe("story state files", () => {
     expect(readStoryPhase("US-074")).toBe("verified");
     expect(readStoryPhase("US-075")).toBe("reviewed");
     expect(readdirSync(scratch).filter((name) => name.includes(".tmp"))).toEqual([]);
+  });
+
+  test("reads valid stories when a peer entry is malformed", () => {
+    // Given two valid stories and one malformed peer entry.
+    writeMalformedPeerState(scratch);
+
+    // When the valid stories are read.
+    const first = readStoryPhase("US-074");
+    const second = readStoryPhase("US-075");
+
+    // Then the malformed peer does not hide either valid story.
+    expect(first).toBe("reviewed");
+    expect(second).toBe("implemented");
+  });
+
+  test("preserves valid stories and drops a malformed peer on write", () => {
+    // Given two valid stories and one malformed peer entry.
+    const statePath = writeMalformedPeerState(scratch);
+
+    // When a third valid story is written.
+    writeStoryPhase("US-076", "published");
+
+    // Then both valid peers and the new story remain while the malformed entry is omitted.
+    const persisted: unknown = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(persisted).toMatchObject({
+      stories: {
+        "US-074": { phase: "reviewed", updatedAt: "2026-07-20T10:00:00.000Z" },
+        "US-075": { phase: "implemented", updatedAt: "2026-07-20T10:00:00.000Z" },
+        "US-076": { phase: "published", updatedAt: expect.any(String) },
+      },
+    });
+    expect(persisted).not.toMatchObject({ stories: { "US-BAD": expect.anything() } });
   });
 
   test("treats malformed state as empty and repairs it on the next write", () => {

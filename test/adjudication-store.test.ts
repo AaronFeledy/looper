@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import type { StoryTransitionRecord } from "../src/lib/adjudication-detection.ts";
-import { createAdjudicationStore, type AdjudicationStore } from "../src/persistence/adjudication-store.ts";
+import { CorruptAdjudicateSessionError, createAdjudicationStore, type AdjudicationStore } from "../src/persistence/adjudication-store.ts";
 import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts";
 
 const FIRST_TRANSITION: StoryTransitionRecord = {
@@ -134,5 +134,12 @@ describe("adjudication store paths", () => {
 
     expect(existsSync(join(configDir, ".looper-adjudicate"))).toBe(true);
     expect(existsSync(join(configDir, ".looper-prd-history.json"))).toBe(true);
+  });
+
+  test("fails closed when the adjudicator session record is corrupt", () => {
+    const store = createAdjudicationStore({ configDir });
+    writeFileSync(join(configDir, ".looper-adjudicate-session.json"), "not json");
+
+    expect(() => store.readSession()).toThrow(CorruptAdjudicateSessionError);
   });
 });

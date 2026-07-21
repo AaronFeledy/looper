@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,13 +14,6 @@ import { initStatePaths, readRunState } from "../src/lib/state-files.ts";
 import { createRunStateStore } from "../src/persistence/run-state-store.ts";
 
 type CompletionKind = NonNullable<Parameters<NonNullable<RunIterationHooks["onStepFinish"]>>[0]["completionKind"]>;
-
-function waitForAbort(signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
 
 async function capturedRejection(promise: Promise<unknown>): Promise<unknown> {
   try {
@@ -44,6 +37,7 @@ function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
 type StepSpec = {
   readonly key: string;
   readonly gateScript?: string;
+  readonly gateBranch?: "main" | "story";
 };
 
 function setupScratch(steps: readonly StepSpec[]): { readonly repoDir: string; readonly configDir: string } {
@@ -55,8 +49,10 @@ function setupScratch(steps: readonly StepSpec[]): { readonly repoDir: string; r
   for (const step of steps) {
     writeFileSync(join(configDir, `${step.key}.md`), `${step.key} prompt body\n`);
     lines.push(`  ${step.key}:`, `    prompt: ${step.key}.md`, "    timeout: 1h");
-    if (step.gateScript !== undefined) {
-      lines.push("    gate:", `      script: ${JSON.stringify(step.gateScript)}`);
+    if (step.gateScript !== undefined || step.gateBranch !== undefined) {
+      lines.push("    gate:");
+      if (step.gateBranch !== undefined) lines.push(`      branch: ${step.gateBranch}`);
+      if (step.gateScript !== undefined) lines.push(`      script: ${JSON.stringify(step.gateScript)}`);
     }
   }
   writeFileSync(join(configDir, "looper.yaml"), `${lines.join("\n")}\n`);
@@ -112,7 +108,10 @@ function makeClient(input: {
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
         stream: (async function* (): AsyncGenerator<never> {
-          await waitForAbort(options.signal);
+          await new Promise<void>((resolve) => {
+            if (options.signal.aborted) return resolve();
+            options.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
         })(),
       }),
     },
@@ -167,6 +166,27 @@ describe("runIteration step gate wiring", () => {
     expect(begun).toEqual(["Publish"]);
     expect(completions).toEqual(["gate-skip", "done"]);
     expect(stub.promptTexts[0]).not.toContain("Review (skipped)");
+  });
+
+  test("a declarative gate failure short-circuits its script", async () => {
+    // Given a non-git directory whose story branch gate fails before a side-effecting script.
+    const sentinel = join(tmpdir(), `looper-gate-sentinel-${crypto.randomUUID()}`);
+    const { repoDir, configDir } = setupScratch([
+      { key: "review", gateBranch: "story", gateScript: `touch ${JSON.stringify(sentinel)}` },
+    ]);
+    scratchDirs.push(repoDir);
+
+    // When the iteration evaluates the gate.
+    await runIteration({
+      state: createLoopState({ maxIterations: 1, stepNames: ["Review"] }),
+      iteration: 1,
+      client: makeClient({ repoDir, sessionIDs: [] }).client,
+      repoDir,
+      configDir,
+    });
+
+    // Then the declarative rejection prevents the script side effect.
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   test("a gate skip confirms a persisted busy session stopped before completion", async () => {

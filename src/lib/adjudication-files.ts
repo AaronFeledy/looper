@@ -19,6 +19,11 @@ export type AdjudicateSession = {
   readonly messageID?: string;
 };
 
+export type AdjudicateSessionRead =
+  | { readonly kind: "absent" }
+  | { readonly kind: "ok"; readonly session: AdjudicateSession }
+  | { readonly kind: "corrupt" };
+
 function adjudicateMarkerPath(): string {
   return join(requireConfigDir(), ADJUDICATE_FILE_NAME);
 }
@@ -197,19 +202,22 @@ export function writeAdjudicateSession(session: AdjudicateSession): void {
   );
 }
 
-export function readAdjudicateSession(): AdjudicateSession | null {
+export function readAdjudicateSession(): AdjudicateSessionRead {
   const content = tolerantRead(adjudicateSessionPath());
-  if (content === null) return null;
+  if (content === null) return { kind: "absent" };
   try {
     const parsed: unknown = JSON.parse(content);
-    if (!isRecord(parsed) || typeof parsed["sessionID"] !== "string" || parsed["sessionID"].length === 0) return null;
+    if (!isRecord(parsed) || typeof parsed["sessionID"] !== "string" || parsed["sessionID"].length === 0) return { kind: "corrupt" };
     const messageID = parsed["messageID"];
     return {
-      sessionID: parsed["sessionID"],
-      ...(typeof messageID === "string" && messageID.length > 0 ? { messageID } : {}),
+      kind: "ok",
+      session: {
+        sessionID: parsed["sessionID"],
+        ...(typeof messageID === "string" && messageID.length > 0 ? { messageID } : {}),
+      },
     };
   } catch {
-    return null;
+    return { kind: "corrupt" };
   }
 }
 

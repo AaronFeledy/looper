@@ -345,9 +345,15 @@ describe("loadRuntimeConfig policy and flags", () => {
     });
   });
 
-  test.each(["prdPasses: true", "phase: reviewed"])("rejects a %s gate without prd, naming the step", (gateEntry) => {
-    withConfigDir(`steps:\n  build-release:\n    prompt: hi\n    gate:\n      ${gateEntry}\n`, (dir) => {
-      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd:/);
+  test("rejects a prdPasses gate without prd, naming the step", () => {
+    withConfigDir("steps:\n  build-release:\n    prompt: hi\n    gate:\n      prdPasses: true\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd: when using gate\.prdPasses/);
+    });
+  });
+
+  test("allows a phase-only gate without prd", () => {
+    withConfigDir("steps:\n  publish:\n    prompt: hi\n    gate:\n      phase: reviewed\n", (dir) => {
+      expect(loadRuntimeConfig(dir).prdDir).toBeUndefined();
     });
   });
 

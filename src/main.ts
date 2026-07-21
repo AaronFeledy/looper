@@ -564,6 +564,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       adjudicationStore.clearHistory();
       adjudicationStore.clearMarker();
       adjudicationStore.clearSession();
+      storyStateStore.clear();
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
@@ -708,6 +709,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       createLooperRunID,
       legacyResumeStepIndex: (resumeSteps) => resumeStepIndex([...resumeSteps]),
       runIteration: (input) => runIteration(input),
+      storyState: storyStateStore,
       initialPlan: {
         startIteration,
         firstIterationStartStepIndex,

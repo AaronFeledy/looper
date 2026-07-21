@@ -8,7 +8,7 @@ import { runEngine } from "../src/engine/run-engine.ts";
 import { runNonTtyIterations } from "../src/lib/fallback.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { createLoopState } from "../src/lib/state.ts";
-import { initStatePaths } from "../src/lib/state-files.ts";
+import { initStatePaths, readRunState, writeRunState } from "../src/lib/state-files.ts";
 import { createAdjudicationStore } from "../src/persistence/adjudication-store.ts";
 import { createRunStateStore } from "../src/persistence/run-state-store.ts";
 import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts";
@@ -184,6 +184,40 @@ describe("PRD adjudication routing", () => {
     expect(state.steps[1]?.status).toBe("skipped");
   });
 
+  test("routes a marker written by a gate-skipped step", async () => {
+    // Given a gate script that requests adjudication and then rejects its step.
+    const scratch = setup(2);
+    writeFileSync(
+      join(scratch.configDir, "looper.yaml"),
+      [
+        "steps:",
+        "  step1:",
+        "    prompt: step1.md",
+        "    gate:",
+        `      script: ${JSON.stringify(`printf gate-conflict > ${join(scratch.configDir, ".looper-adjudicate")}; exit 1`)}`,
+        "  step2:",
+        "    prompt: step2.md",
+        "adjudicate:",
+        "  prompt: adjudicate.md",
+      ].join("\n") + "\n",
+    );
+    const store = createAdjudicationStore({ configDir: scratch.configDir });
+    const stub = clientFor(scratch.repoDir);
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2"] });
+
+    // When the gate skips after writing the marker.
+    await runIteration({ state, iteration: 1, client: stub.client, ...scratch, adjudication: { store, step: { name: "adjudicate", prompt: join(scratch.configDir, "adjudicate.md") }, threshold: 2, writeStop: () => {} } });
+
+    // Then routing skips the remainder and runs the adjudicator immediately.
+    expect(stub.prompts).toHaveLength(1);
+    expect(stub.prompts[0]).toContain("resolve the PRD conflict");
+    expect(state.steps.map(({ name, status }) => ({ name, status }))).toEqual([
+      { name: "Step1", status: "skipped" },
+      { name: "Step2", status: "skipped" },
+      { name: "adjudicate", status: "done" },
+    ]);
+  });
+
   test("writes a stop reason when no adjudicate step is configured", async () => {
     const scratch = setup(2, false);
     const store = createInMemoryAdjudicationStore();
@@ -195,6 +229,39 @@ describe("PRD adjudication routing", () => {
 
     expect(stopReasons).toEqual(["contract conflict"]);
     expect(store.readMarker()).toBeNull();
+  });
+
+  test("initial stop routing without an adjudicator preserves the resume pointer", async () => {
+    // Given an in-flight first step and a stale marker with no adjudicator configured.
+    const scratch = setup(2, false);
+    const adjudicationStore = createInMemoryAdjudicationStore();
+    adjudicationStore.writeMarker("contract conflict");
+    writeRunState({ iteration: 1, stepIndex: 0, stepName: "Step1", looperRunID: "run-stop-pointer" });
+    const runStateStore = createRunStateStore({ configDir: scratch.configDir });
+
+    // When initial routing writes a stop instead of launching adjudication.
+    await runEngine({
+      fresh: false,
+      maxIterations: 2,
+      waitProvided: false,
+      waitDuration: 0,
+      ...scratch,
+      client: clientFor(scratch.repoDir).client,
+      store: runStateStore,
+      hooks: { createIterationState: () => createLoopState({ maxIterations: 2, stepNames: ["Step1", "Step2"] }) },
+      loadSteps: () => [
+        { name: "Step1", prompt: join(scratch.configDir, "step1.md") },
+        { name: "Step2", prompt: join(scratch.configDir, "step2.md") },
+      ],
+      currentBranch: async () => "main",
+      createLooperRunID: () => "unused",
+      legacyResumeStepIndex: () => 0,
+      runIteration,
+      adjudication: { store: adjudicationStore, threshold: 2 },
+    });
+
+    // Then the durable pointer still names the interrupted step.
+    expect(readRunState()).toMatchObject({ iteration: 1, stepIndex: 0, stepName: "Step1" });
   });
 
   test("clears a marker written by the adjudicator without recursing", async () => {

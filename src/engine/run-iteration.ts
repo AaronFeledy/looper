@@ -9,7 +9,7 @@ import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, background
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
 import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
 import { createStepAttemptState, decideAfterFailurePolicy, decideAfterPriorEvaluation, decideAfterPriorHealth, type PriorHealthDecision } from "../core/step-attempt.ts";
-import type { TitleService } from "./engine-ports.ts";
+import type { StoryStatePort, TitleService } from "./engine-ports.ts";
 import { TitleCoordinator, titleModeFor } from "./title-coordinator.ts";
 import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
@@ -166,6 +166,7 @@ export type RunIterationOptions = {
   useSessionIdle?: boolean;
   prdDir?: string;
   storyIdPattern?: string;
+  storyState?: StoryStatePort;
   adjudication?: AdjudicationRuntime;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the
@@ -243,6 +244,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     useSessionIdle,
     prdDir,
     storyIdPattern,
+    storyState: providedStoryState,
     adjudication,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -270,7 +272,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   let pendingResume: ResumeSession | undefined = resume?.sessionID !== undefined ? resume : undefined;
   let pendingAdjudicateStep: LoadedStep | undefined;
   let initialRoutingChecked = false;
-  const storyState = createStoryStateStore({ configDir });
+  const storyState = providedStoryState ?? createStoryStateStore({ configDir });
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -344,12 +346,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
         const firstRemainingRow = state.steps.length - (steps.length - index);
         markRemainingSkipped(state, firstRemainingRow);
-        hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
         if (initialRouting.kind === "stop") {
           adjudication?.writeStop(initialRouting.reason);
           adjudication?.store.clearMarker();
           break;
         }
+        hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
         pendingAdjudicateStep = initialRouting.step;
         insertAdjudicationRow(state, initialRouting.step.name);
       }
@@ -395,15 +397,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const phase = storyId === undefined || (!stepContextPolicy.story && step.gate === undefined && step.setsPhase === undefined)
       ? undefined
       : storyState.readPhase(storyId);
-    const storyFacts: ContextInput["story"] = branch === undefined
-      ? undefined
-      : {
-          branch,
-          ...(storyId !== undefined ? { storyId } : {}),
-          ...(passes !== undefined ? { passes } : {}),
-          ...(phase !== undefined ? { phase } : {}),
-        };
-
     const finalizeLogicalStep = (input: {
       readonly status: StepResult;
       readonly completionKind: StepCompletionKind;
@@ -436,23 +429,35 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       index = input.nextIndex;
     };
 
+    const applyRouting = (routing: ReturnType<typeof decideRouting>, remainingFromIndex: number): void => {
+      if (routing.kind === "continue") return;
+      markRemainingSkipped(state, remainingFromIndex);
+      if (routing.kind === "stop") {
+        adjudication?.writeStop(routing.reason);
+        adjudication?.store.clearMarker();
+        return;
+      }
+      hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
+      pendingAdjudicateStep = routing.step;
+      insertAdjudicationRow(state, routing.step.name);
+    };
+
     if (!adjudicating && step.gate !== undefined) {
-      const scriptResult = step.gate.script === undefined
-        ? undefined
-        : await runGateScript(step.gate.script, {
+      const declarativeGate = {
+        ...(step.gate.branch !== undefined ? { branch: step.gate.branch } : {}),
+        ...(step.gate.prdPasses !== undefined ? { prdPasses: step.gate.prdPasses } : {}),
+        ...(step.gate.phase !== undefined ? { phase: step.gate.phase } : {}),
+      };
+      let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase });
+      if (gateDecision.pass && step.gate.script !== undefined) {
+        const scriptResult = await runGateScript(step.gate.script, {
             repoDir,
             ...(branch !== undefined ? { branch } : {}),
             ...(storyId !== undefined ? { storyId } : {}),
             timeoutMs: gateScriptTimeoutMs(),
           });
-      const gateDecision = evaluateGate({
-        gate: step.gate,
-        branch,
-        storyId,
-        passes,
-        phase,
-        ...(scriptResult !== undefined ? { scriptResult } : {}),
-      });
+        gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, scriptResult });
+      }
       if (!gateDecision.pass) {
         const resumedSessionID = pendingResume?.sessionID;
         if (resumedSessionID !== undefined && !(await stopPriorSession(resumedSessionID, currentStepIndex))) {
@@ -465,13 +470,18 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         recoveryNudgePending = false;
         failStepRow(state, currentStepIndex, "skipped");
         logStepLine(currentStepIndex, `[looper] gate skipped ${step.name}: ${gateDecision.reason}`);
+        const routing = decideRouting(adjudication);
+        // Match post-step routing: when we divert to stop/adjudicate, park the
+        // resume pointer at the end of the configured steps (adjudicate is not a
+        // resumable position; the marker is the durable signal).
         finalizeLogicalStep({
           status: "skipped",
           completionKind: "gate-skip",
-          nextIndex: index + 1,
+          nextIndex: routing.kind === "continue" ? index + 1 : steps.length,
           rowIndex: currentStepIndex,
           recordPriorStep: false,
         });
+        applyRouting(routing, currentStepIndex + 1);
         continue;
       }
     }
@@ -759,6 +769,20 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         result = pendingResult;
         pendingResult = undefined;
       } else {
+        const promptNeedsStoryFacts = !adjudicating && stepContextPolicy.story;
+        const promptBranch = promptNeedsStoryFacts ? await currentGitBranch(repoDir) : undefined;
+        const promptStoryId = promptBranch === undefined ? undefined : storyIdFromBranch(promptBranch, storyIdPattern);
+        const promptPassesByStory = promptNeedsStoryFacts && prdDir !== undefined ? readPrdPasses(prdDir) : undefined;
+        const promptPasses = promptStoryId === undefined ? undefined : promptPassesByStory?.[promptStoryId];
+        const promptPhase = promptStoryId === undefined ? undefined : storyState.readPhase(promptStoryId);
+        const freshStoryFacts: ContextInput["story"] = promptBranch === undefined
+          ? undefined
+          : {
+              branch: promptBranch,
+              ...(promptStoryId !== undefined ? { storyId: promptStoryId } : {}),
+              ...(promptPasses !== undefined ? { passes: promptPasses } : {}),
+              ...(promptPhase !== undefined ? { phase: promptPhase } : {}),
+            };
         const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
           name: entry.name,
           status: entry.status,
@@ -781,7 +805,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           timeoutMs: budgetMs,
           ...(prd !== undefined ? { prd } : {}),
           ...(vcs !== undefined ? { vcs } : {}),
-          ...(stepContextPolicy.story && storyFacts !== undefined ? { story: storyFacts } : {}),
+          ...(freshStoryFacts !== undefined ? { story: freshStoryFacts } : {}),
         };
         const contextBlock = buildLooperContext(stepContextPolicy, contextInput);
         const stepBasePrompt = adjudicating
@@ -1174,16 +1198,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         );
       }
     }
-    if (routing.kind !== "continue") hooks?.onAdjudicationRoute?.({ iteration, totalSteps: steps.length });
-    if (routing.kind === "stop") {
-      markRemainingSkipped(state, currentStepIndex + 1);
-      adjudication?.writeStop(routing.reason);
-      adjudication?.store.clearMarker();
-    } else if (routing.kind === "adjudicate") {
-      markRemainingSkipped(state, currentStepIndex + 1);
-      pendingAdjudicateStep = routing.step;
-      insertAdjudicationRow(state, routing.step.name);
-    }
+    applyRouting(routing, currentStepIndex + 1);
 
     if (result.status === "failed" && routing.kind === "continue" && !adjudicating) {
       titleCoordinator?.cancel();

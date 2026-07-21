@@ -129,13 +129,19 @@ describe("adjudication files", () => {
 
   test("round-trips and clears the adjudicator session record", () => {
     writeAdjudicateSession({ sessionID: "ses_adj", messageID: "msg_adj" });
-    expect(readAdjudicateSession()).toEqual({ sessionID: "ses_adj", messageID: "msg_adj" });
+    expect(readAdjudicateSession()).toEqual({ kind: "ok", session: { sessionID: "ses_adj", messageID: "msg_adj" } });
 
     writeAdjudicateSession({ sessionID: "ses_only" });
-    expect(readAdjudicateSession()).toEqual({ sessionID: "ses_only" });
+    expect(readAdjudicateSession()).toEqual({ kind: "ok", session: { sessionID: "ses_only" } });
 
     clearAdjudicateSession();
-    expect(readAdjudicateSession()).toBeNull();
+    expect(readAdjudicateSession()).toEqual({ kind: "absent" });
+  });
+
+  test("distinguishes a corrupt adjudicator session record from an absent record", () => {
+    writeFileSync(join(scratch, ".looper-adjudicate-session.json"), "not json");
+
+    expect(readAdjudicateSession()).toEqual({ kind: "corrupt" });
   });
 
   test("does not create a history file for an empty append", () => {

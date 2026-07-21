@@ -40,13 +40,6 @@ function writePrd(prdDir: string, passes: boolean): void {
   writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", passes }] }));
 }
 
-function waitForAbort(signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
-
 function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { readonly client: OpencodeClient; readonly prompts: string[]; readonly titleUpdates: string[] } {
   const prompts: string[] = [];
   const titleUpdates: string[] = [];
@@ -74,7 +67,12 @@ function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { read
     },
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
-        stream: (async function* (): AsyncGenerator<never> { await waitForAbort(options.signal); })(),
+        stream: (async function* (): AsyncGenerator<never> {
+          await new Promise<void>((resolve) => {
+            if (options.signal.aborted) return resolve();
+            options.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        })(),
       }),
     },
   } as unknown as OpencodeClient;
@@ -158,6 +156,27 @@ describe("runIteration story phase wiring", () => {
 
     // Then the rendered block carries the values collected at the engine boundary.
     expect(stub.prompts[0]).toContain("story:\n  branch: us-074-story-state\n  storyId: US-074\n  passes: true\n  phase: reviewed");
+  });
+
+  test("refreshes story facts before a retry prompt", async () => {
+    // Given a passing story whose first prompt attempt changes PRD state and fails.
+    const scratch = await setup();
+    let promptCount = 0;
+    const stub = clientFor(scratch.repoDir, () => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        writePrd(scratch.prdDir, false);
+        throw new Error("retry after PRD change");
+      }
+    });
+
+    // When the step retries with a fresh prompt.
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
+
+    // Then each prompt reflects story facts read immediately before that send.
+    expect(stub.prompts).toHaveLength(2);
+    expect(stub.prompts[0]).toContain("passes: true");
+    expect(stub.prompts[1]).toContain("passes: false");
   });
 
   test("story-state write failure leaves the durable pointer on the step", async () => {

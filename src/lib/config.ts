@@ -50,7 +50,6 @@ export type LoadedStep = {
 // Config file name candidates, in resolution order. `.yml` is preferred over
 // `.yaml`; dot-prefixed variants are last-resort fallbacks.
 export const CONFIG_FILE_NAMES = ["looper.yml", "looper.yaml", ".looper.yml", ".looper.yaml"] as const;
-// Preferred / default file name, used in messages and when creating a config.
 export const CONFIG_FILE_NAME = CONFIG_FILE_NAMES[0];
 
 type RawStep = {
@@ -398,7 +397,6 @@ function parseConfiguredSteps(configDir: string, rawConfig: RawConfig): LoadedSt
   );
 }
 
-/** Absolute paths of every candidate config file in `configDir`, in resolution order. */
 export function configCandidatePaths(configDir: string): string[] {
   return CONFIG_FILE_NAMES.map((name) => join(configDir, name));
 }
@@ -411,12 +409,10 @@ function isRegularFile(path: string): boolean {
   }
 }
 
-/** First existing config file in `configDir`, or undefined if none exist. */
 export function findConfigFile(configDir: string): string | undefined {
   return configCandidatePaths(configDir).find((candidate) => isRegularFile(candidate));
 }
 
-/** Resolved existing config path, or the default (preferred) path when none exist. */
 export function configFilePath(configDir: string): string {
   return findConfigFile(configDir) ?? join(configDir, CONFIG_FILE_NAME);
 }
@@ -430,7 +426,6 @@ function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 }
 
-/** First readable config file in `configDir` (path + raw YAML text), or undefined. */
 export function readConfigFileSource(configDir: string): ConfigFileSource | undefined {
   for (const configPath of configCandidatePaths(configDir)) {
     if (!isRegularFile(configPath)) continue;
@@ -530,10 +525,10 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
         ? undefined
         : parseConfiguredStep({ configDir, rawStep: rawConfig.adjudicate, label: "adjudicate", defaultName: "adjudicate", rootTimeoutMs });
     const stepRequiringPrd = [...parseConfiguredSteps(configDir, rawConfig), ...(adjudicateStep === undefined ? [] : [adjudicateStep])].find(
-      (step) => step.gate?.prdPasses === true || step.gate?.phase !== undefined,
+      (step) => step.gate?.prdPasses === true,
     );
     if (stepRequiringPrd !== undefined) {
-      throw new Error(`${stepRequiringPrd.name} gate requires top-level prd: when using gate.prdPasses or gate.phase`);
+      throw new Error(`${stepRequiringPrd.name} gate requires top-level prd: when using gate.prdPasses`);
     }
   }
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
