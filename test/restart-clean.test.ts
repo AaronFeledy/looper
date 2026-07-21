@@ -202,9 +202,12 @@ describe("clean manual and timeout restarts", () => {
     };
   }
 
-  test("manual restart starts a new session instead of resuming the previous session", async () => {
-    const { repoDir, configDir, state } = setup("1h");
-    const stub = makeRestartClient({ repoDir, state, mode: "manual" });
+  test.each([
+    ["manual", "1h", "manual"],
+    ["timeout", "1s", "timeout"],
+  ] as const)("%s restart starts a new session instead of resuming the previous session", async (mode, timeout, reason) => {
+    const { repoDir, configDir, state } = setup(timeout);
+    const stub = makeRestartClient({ repoDir, state, mode });
 
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: CONTEXT_OFF });
 
@@ -218,7 +221,7 @@ describe("clean manual and timeout restarts", () => {
     expect(stub.promptTexts[1]).toContain("build from scratch\n");
     expect(stub.messagesCalls).toBe(1);
     expect(state.steps.map((step) => step.sessionID)).toEqual(["ses_old", "ses_new"]);
-    expect(state.steps.map((step) => step.restartReason)).toEqual(["manual", undefined]);
+    expect(state.steps.map((step) => step.restartReason)).toEqual([reason, undefined]);
     expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
   });
 
@@ -240,26 +243,6 @@ describe("clean manual and timeout restarts", () => {
       repoDir,
       purpose: "step",
     });
-  });
-
-  test("timeout restart starts a new session instead of resuming the previous session", async () => {
-    const { repoDir, configDir, state } = setup("1s");
-    const stub = makeRestartClient({ repoDir, state, mode: "timeout" });
-
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, contextPolicy: CONTEXT_OFF });
-
-    expect(result).toBe("complete");
-    expect(stub.createdSessionIDs).toEqual(["ses_old", "ses_new"]);
-    expect(stub.promptedSessionIDs).toEqual(["ses_old", "ses_new"]);
-    expect(stub.promptTexts[0]).toBe("build from scratch\n");
-    expect(stub.promptTexts[0]).not.toContain("previous attempt may have been interrupted");
-    expect(stub.promptTexts[1]).toContain("clean restart in a new session");
-    expect(stub.promptTexts[1]).toContain("previous attempt may have been interrupted");
-    expect(stub.promptTexts[1]).toContain("build from scratch\n");
-    expect(stub.messagesCalls).toBe(1);
-    expect(state.steps.map((step) => step.sessionID)).toEqual(["ses_old", "ses_new"]);
-    expect(state.steps.map((step) => step.restartReason)).toEqual(["timeout", undefined]);
-    expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
   });
 
   test("failure retry inserts a new step row and tells the new session where to tail context", async () => {

@@ -34,13 +34,14 @@ describe("parseArgs resume flags", () => {
   });
 
   test("--help throws HelpRequested whose message documents --fresh", () => {
-    expect(() => parseArgs(["--help"])).toThrow(HelpRequested);
+    let thrown: unknown;
     try {
       parseArgs(["--help"]);
     } catch (error) {
-      expect(error).toBeInstanceOf(HelpRequested);
-      expect((error as HelpRequested).message).toContain("--fresh");
+      thrown = error;
     }
+    expect(thrown).toBeInstanceOf(HelpRequested);
+    expect((thrown as HelpRequested).message).toContain("--fresh");
   });
 });
 

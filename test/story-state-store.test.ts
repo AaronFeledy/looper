@@ -60,30 +60,19 @@ describe("story state store", () => {
     expect(existsSync(join(scratch, ".looper-story-state.json"))).toBe(false);
   });
 
-  test("--fresh clears story state on the non-TTY path before server startup", async () => {
-    // Given persisted story state in a valid non-TTY CLI configuration.
+  test.each([
+    ["non-TTY", false],
+    ["TTY", true],
+  ] as const)("--fresh clears story state on the %s path before server startup", async (_label, tty) => {
+    // Given persisted story state in a valid CLI configuration.
     const fixture = setupCliScratch();
     scratch = fixture.repoDir;
     writeFileSync(fixture.statePath, JSON.stringify({ stories: { "US-074": { phase: "reviewed", updatedAt: "2026-07-20T00:00:00.000Z" } } }));
 
-    // When a fresh non-TTY run reaches the deliberately failing server startup.
-    const exitCode = await runFreshCli(fixture.repoDir, false);
+    // When a fresh run reaches the deliberately failing server startup.
+    const exitCode = await runFreshCli(fixture.repoDir, tty);
 
     // Then fresh state was cleared before startup failed.
-    expect(exitCode).toBe(1);
-    expect(existsSync(fixture.statePath)).toBe(false);
-  });
-
-  test("--fresh clears story state on the TTY path before server startup", async () => {
-    // Given persisted story state and a pseudo-terminal CLI invocation.
-    const fixture = setupCliScratch();
-    scratch = fixture.repoDir;
-    writeFileSync(fixture.statePath, JSON.stringify({ stories: { "US-074": { phase: "reviewed", updatedAt: "2026-07-20T00:00:00.000Z" } } }));
-
-    // When a fresh TTY run reaches the deliberately failing server startup.
-    const exitCode = await runFreshCli(fixture.repoDir, true);
-
-    // Then the TTY fresh path cleared story state first.
     expect(exitCode).toBe(1);
     expect(existsSync(fixture.statePath)).toBe(false);
   });

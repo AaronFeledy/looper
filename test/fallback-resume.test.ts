@@ -145,13 +145,6 @@ describe("computeNonTtyResumePlan", () => {
   });
 });
 
-function waitForAbort(signal: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    signal.addEventListener("abort", () => resolve(), { once: true });
-  });
-}
-
 function writeIdleContinuationRecord(repoDir: string, sessionID: string): void {
   const dir = join(repoDir, ".omo", "run-continuation");
   mkdirSync(dir, { recursive: true });
@@ -191,7 +184,10 @@ function makeClient(opts: { repoDir: string; sessionIDs: string[] }): { client: 
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
         stream: (async function* (): AsyncGenerator<never> {
-          await waitForAbort(options.signal);
+          await new Promise<void>((resolve) => {
+            if (options.signal.aborted) return resolve();
+            options.signal.addEventListener("abort", () => resolve(), { once: true });
+          });
         })(),
       }),
     },
