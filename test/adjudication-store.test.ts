@@ -99,6 +99,27 @@ function runStoreContract(name: string, makeHarness: () => StoreHarness): void {
       harness.store.clearSession();
       expect(harness.store.readSession()).toBeNull();
     });
+
+    test("appends and reads adjudication completion records in order", () => {
+      harness.store.appendCompletion({ at: "2026-07-28T10:00:00.000Z", reason: "first escalation" });
+      harness.store.appendCompletion({ at: "2026-07-28T11:00:00.000Z", reason: "second escalation" });
+
+      expect(harness.store.readCompletions()).toEqual([
+        { at: "2026-07-28T10:00:00.000Z", reason: "first escalation" },
+        { at: "2026-07-28T11:00:00.000Z", reason: "second escalation" },
+      ]);
+    });
+
+    test("completion records survive marker clearing but clear with history", () => {
+      harness.store.writeMarker("adjudicate");
+      harness.store.appendCompletion({ at: "2026-07-28T10:00:00.000Z", reason: "escalation" });
+
+      harness.store.clearMarker();
+      expect(harness.store.readCompletions()).toHaveLength(1);
+
+      harness.store.clearHistory();
+      expect(harness.store.readCompletions()).toEqual([]);
+    });
   });
 }
 

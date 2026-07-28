@@ -15,6 +15,8 @@ afterEach(cleanupAdjudicationResumeScratch);
 describe("adjudication failure and resume safety", () => {
   test("does not persist the dynamic adjudicator during background resumption", async () => {
     // Given a stale marker and an adjudicator resumed by OpenCode after background continuation.
+    const previousPoll = process.env.LOOPER_CONTINUATION_POLL_MS;
+    process.env.LOOPER_CONTINUATION_POLL_MS = "20";
     const scratch = setup();
     const adjudicationStore = createInMemoryAdjudicationStore();
     adjudicationStore.writeMarker("resume adjudication");
@@ -22,33 +24,38 @@ describe("adjudication failure and resume safety", () => {
     const persistedRunStates: string[] = [];
     const stub = backgroundResumptionClient(scratch.repoDir);
 
-    // When the dynamic adjudicator reaches the background-resumption callback path.
-    await runIteration({
-      state: createLoopState({ maxIterations: 1, stepNames: ["Step1"] }),
-      iteration: 1,
-      client: stub.client,
-      ...scratch,
-      useSessionIdle: true,
-      hooks: {
-        onStepSession: (info) => {
-          runStateStore.savePosition({
-            iteration: info.iteration,
-            steps: [{ name: "Step1" }],
-            stepIndex: info.index,
-            stepName: info.stepName,
-            sessionID: info.sessionID,
-            messageID: info.messageID,
-          });
-          persistedRunStates.push(readFileSync(join(scratch.configDir, ".looper-run.json"), "utf8"));
+    try {
+      // When the dynamic adjudicator reaches the background-resumption callback path.
+      await runIteration({
+        state: createLoopState({ maxIterations: 1, stepNames: ["Step1"] }),
+        iteration: 1,
+        client: stub.client,
+        ...scratch,
+        useSessionIdle: true,
+        hooks: {
+          onStepSession: (info) => {
+            runStateStore.savePosition({
+              iteration: info.iteration,
+              steps: [{ name: "Step1" }],
+              stepIndex: info.index,
+              stepName: info.stepName,
+              sessionID: info.sessionID,
+              messageID: info.messageID,
+            });
+            persistedRunStates.push(readFileSync(join(scratch.configDir, ".looper-run.json"), "utf8"));
+          },
         },
-      },
-      adjudication: { store: adjudicationStore, step: { name: "adjudicate", prompt: join(scratch.configDir, "adjudicate.md") }, threshold: 2, writeStop: () => {} },
-    });
+        adjudication: { store: adjudicationStore, step: { name: "adjudicate", prompt: join(scratch.configDir, "adjudicate.md") }, threshold: 2, writeStop: () => {} },
+      });
 
-    // Then no persisted position ever names the ephemeral row.
-    expect(stub.backgroundResumptionReached()).toBeTrue();
-    expect(persistedRunStates.some((snapshot) => snapshot.includes("adjudicate"))).toBeFalse();
-  });
+      // Then no persisted position ever names the ephemeral row.
+      expect(stub.backgroundResumptionReached()).toBeTrue();
+      expect(persistedRunStates.some((snapshot) => snapshot.includes("adjudicate"))).toBeFalse();
+    } finally {
+      if (previousPoll === undefined) delete process.env.LOOPER_CONTINUATION_POLL_MS;
+      else process.env.LOOPER_CONTINUATION_POLL_MS = previousPoll;
+    }
+  }, 15_000);
 
   test("advances a skipped triggering step before running the adjudicator", async () => {
     // Given a normal step that writes a marker and is then skipped.

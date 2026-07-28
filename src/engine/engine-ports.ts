@@ -2,7 +2,7 @@ import type { Message, OpencodeClient, Part } from "@opencode-ai/sdk/v2";
 
 import type { ContextPolicy, PermissionPolicy, QuestionPolicy, RecoverySnapshotsConfig, TitleGenConfig } from "../lib/config.ts";
 import type { StoryTransitionRecord } from "../lib/adjudication-detection.ts";
-import type { AdjudicateSession } from "../lib/adjudication-files.ts";
+import type { AdjudicateSession, AdjudicationCompletionRecord } from "../lib/adjudication-files.ts";
 import type { Step, StepResult } from "../lib/runner.ts";
 import type { StepCompletionKind } from "./run-iteration.ts";
 import type { LooperSessionMetadataInput } from "../lib/session-metadata.ts";
@@ -45,6 +45,8 @@ export type AdjudicationStore = {
   readonly readActiveHistory: () => StoryTransitionRecord[];
   readonly markAdjudicated: () => void;
   readonly clearHistory: () => void;
+  readonly appendCompletion: (record: AdjudicationCompletionRecord) => void;
+  readonly readCompletions: () => AdjudicationCompletionRecord[];
   readonly writeSession: (session: AdjudicateSession) => void;
   readonly readSession: () => AdjudicateSession | null;
   readonly clearSession: () => void;

@@ -451,8 +451,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       };
       let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase });
       if (gateDecision.pass && step.gate.script !== undefined) {
+        const adjudicationCompletions = adjudication?.store.readCompletions() ?? [];
+        const lastAdjudication = adjudicationCompletions[adjudicationCompletions.length - 1];
         const scriptResult = await runGateScript(step.gate.script, {
             repoDir,
+            adjudicationCount: adjudicationCompletions.length,
+            ...(lastAdjudication !== undefined ? { lastAdjudicatedAt: lastAdjudication.at } : {}),
             ...(branch !== undefined ? { branch } : {}),
             ...(storyId !== undefined ? { storyId } : {}),
             ...(prdPaths !== undefined ? {
@@ -1259,9 +1263,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (adjudicating) {
       pendingAdjudicateStep = undefined;
       if (result.status === "done") {
-        // Only a completed adjudication resolves the conflict: advance the
-        // history watermark so the resolved flips no longer count toward
-        // detection, then drop the durable adjudication signals.
+        // Only a completed adjudication resolves the conflict: record the
+        // durable completion (before the marker is dropped, so the reason
+        // survives for gate scripts), advance the history watermark so the
+        // resolved flips no longer count toward detection, then drop the
+        // durable adjudication signals.
+        if (adjudication !== undefined) {
+          adjudication.store.appendCompletion({ at: new Date().toISOString(), reason: adjudication.store.readMarker() ?? "" });
+        }
         adjudication?.store.markAdjudicated();
         adjudication?.store.clearMarker();
         adjudication?.store.clearSession();

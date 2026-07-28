@@ -13,6 +13,8 @@ export type GateScriptOptions = {
   readonly prdDir?: string;
   readonly prdIndex?: string;
   readonly prdProgress?: string;
+  readonly lastAdjudicatedAt?: string;
+  readonly adjudicationCount?: number;
   readonly timeoutMs?: number;
 };
 
@@ -51,6 +53,8 @@ export async function runGateScript(script: string, options: GateScriptOptions):
         LOOPER_PRD_DIR: options.prdDir ?? "",
         LOOPER_PRD_INDEX: options.prdIndex ?? "",
         LOOPER_PRD_PROGRESS: options.prdProgress ?? "",
+        LOOPER_LAST_ADJUDICATED_AT: options.lastAdjudicatedAt ?? "",
+        LOOPER_ADJUDICATION_COUNT: String(options.adjudicationCount ?? 0),
       },
       stdin: "ignore",
       stdout: "ignore",
