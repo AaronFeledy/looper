@@ -1,14 +1,17 @@
 import type { AdjudicationStore } from "../engine/engine-ports.ts";
 import {
   adjudicateMarkerExists,
+  appendAdjudicationCompletion,
   appendPrdHistory,
   clearAdjudicateMarker,
   clearAdjudicateSession,
+  clearAdjudicationLog,
   clearPrdHistory,
   markPrdHistoryAdjudicated,
   readActivePrdHistory,
   readAdjudicateMarker,
   readAdjudicateSession,
+  readAdjudicationLog,
   readPrdHistory,
   writeAdjudicateMarker,
   writeAdjudicateSession,
@@ -51,9 +54,15 @@ export function createAdjudicationStore(opts: { readonly configDir: string }): A
     // so a resolved oscillation cannot retrigger from its own old flips.
     readActiveHistory: readActivePrdHistory,
     markAdjudicated: markPrdHistoryAdjudicated,
-    // PRD transition history is forensic cross-iteration data. Clear it only
-    // for an explicit fresh run, never as part of max-iteration run cleanup.
-    clearHistory: clearPrdHistory,
+    // PRD transition history and the adjudication completion log are forensic
+    // cross-iteration data. Clear them only for an explicit fresh run, never
+    // as part of max-iteration run cleanup.
+    clearHistory: () => {
+      clearPrdHistory();
+      clearAdjudicationLog();
+    },
+    appendCompletion: appendAdjudicationCompletion,
+    readCompletions: readAdjudicationLog,
     writeSession: writeAdjudicateSession,
     readSession: readSessionFailClosed,
     clearSession: clearAdjudicateSession,

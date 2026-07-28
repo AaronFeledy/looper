@@ -1,7 +1,8 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
-import { loadSteps, type ContextPolicy, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "./config.ts";
+import { loadSteps, type ContextPolicy, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type StallConfig, type TitleGenConfig } from "./config.ts";
+import { stallAdjudicationLimit, stallIterationLimit } from "../config/tunables.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
 import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "./opencode-managed-resources.ts";
@@ -34,6 +35,7 @@ export type FallbackOptions = {
   prdDir?: string;
   prdFlipThreshold?: number;
   storyIdPattern?: string;
+  stall?: StallConfig;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
 };
@@ -61,6 +63,7 @@ export async function runNonTty({
   prdDir,
   prdFlipThreshold: configuredPrdFlipThreshold,
   storyIdPattern,
+  stall,
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
@@ -112,6 +115,7 @@ export async function runNonTty({
       ...(prdDir !== undefined ? { prdDir } : {}),
       ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
       ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+      ...(stall !== undefined ? { stall } : {}),
       adjudicationStore,
       storyStateStore,
       ...(contextPolicy !== undefined ? { contextPolicy } : {}),
@@ -178,6 +182,7 @@ export async function runNonTtyIterations({
   prdDir,
   configuredPrdFlipThreshold,
   storyIdPattern,
+  stall,
   adjudicationStore,
   storyStateStore,
   contextPolicy,
@@ -195,6 +200,7 @@ export async function runNonTtyIterations({
   prdDir?: string;
   configuredPrdFlipThreshold?: number;
   storyIdPattern?: string;
+  stall?: StallConfig;
   adjudicationStore?: AdjudicationStore;
   storyStateStore?: StoryStateStore;
   contextPolicy?: Partial<ContextPolicy>;
@@ -230,6 +236,7 @@ export async function runNonTtyIterations({
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     adjudication,
+    stall: { iterations: stallIterationLimit(stall?.iterations), adjudications: stallAdjudicationLimit(stall?.adjudications) },
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     hooks: createFallbackEngineHooks(currentBranch),
   });

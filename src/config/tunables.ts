@@ -32,6 +32,26 @@ export function prdFlipThreshold(configValue?: number): number {
   return positiveIntegerEnv("LOOPER_PRD_FLIP_THRESHOLD", configValue ?? 2);
 }
 
+export function nonNegativeIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+const STALL_ITERATION_LIMIT_DEFAULT = 3;
+const STALL_ADJUDICATION_LIMIT_DEFAULT = 3;
+
+export function stallIterationLimit(configValue?: number): number {
+  // Precedence: environment override, then looper.yaml stall.iterations, then the default. 0 disables.
+  return nonNegativeIntegerEnv("LOOPER_STALL_ITERATIONS", configValue ?? STALL_ITERATION_LIMIT_DEFAULT);
+}
+
+export function stallAdjudicationLimit(configValue?: number): number {
+  // Precedence: environment override, then looper.yaml stall.adjudications, then the default. 0 disables.
+  return nonNegativeIntegerEnv("LOOPER_STALL_ADJUDICATIONS", configValue ?? STALL_ADJUDICATION_LIMIT_DEFAULT);
+}
+
 export function stopSessionConfirmTimeoutMs(): number {
   return positiveIntegerEnv("LOOPER_STOP_SESSION_TIMEOUT_MS", STOP_SESSION_CONFIRM_TIMEOUT_MS);
 }

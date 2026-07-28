@@ -4,9 +4,9 @@ import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeT
 import type { PriorSessionEvaluation } from "../core/session-types.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, syncStepBackgroundAgents, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
-import { continuationBackgroundAgent, continuationFallback, logContinuationState, setContinuationStatus, startBackgroundAgentPoller, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
+import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { createRunnerEventController, type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
@@ -243,15 +243,6 @@ export async function reattachOpenCodeStep({
     notify();
     requestCancellation("restart");
   }, effectiveTimeoutMs);
-  const bgPoller = startBackgroundAgentPoller({
-    state,
-    stepIndex,
-    client,
-    repoDir,
-    parentSessionID: sessionID,
-    fallbackAgents: continuationFallback(repoDir, sessionID),
-  });
-
   let consumerPromise: Promise<void> | undefined;
   let sessionEventError: Error | undefined;
   let timedOut = false;
@@ -378,7 +369,6 @@ export async function reattachOpenCodeStep({
   } finally {
     clearInterval(watcher);
     clearTimeout(stepTimeout);
-    bgPoller.stop();
     ctrl.abort();
     if (consumerPromise) {
       let consumerTimedOut = false;
@@ -442,7 +432,6 @@ export async function reattachOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after reattach");
-      syncStepBackgroundAgents(state, stepIndex, [continuationBackgroundAgent(record)]);
       activeStep.status = "waiting";
       activeStep.finishedAt = undefined;
       state.activeStepIndex = null;

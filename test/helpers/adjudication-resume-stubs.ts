@@ -44,7 +44,6 @@ export function backgroundResumptionClient(repoDir: string): {
   readonly backgroundResumptionReached: () => boolean;
 } {
   let messagesCalls = 0;
-  let statusCalls = 0;
   let reattachReady = false;
   const writeContinuation = (state: "active" | "idle"): void => {
     const dir = join(repoDir, ".omo", "run-continuation");
@@ -57,13 +56,12 @@ export function backgroundResumptionClient(repoDir: string): {
       create: async () => ({ data: { id: "ses_adjudicate" } }),
       prompt: async () => {
         writeContinuation("active");
+        void Bun.sleep(5).then(() => {
+          if (!reattachReady) writeContinuation("idle");
+        });
         return { data: {} };
       },
-      status: async () => {
-        statusCalls += 1;
-        if (messagesCalls === 1 && statusCalls >= 2 && !reattachReady) writeContinuation("idle");
-        return { data: { ses_adjudicate: { type: reattachReady ? "idle" : "busy" } } };
-      },
+      status: async () => ({ data: { ses_adjudicate: { type: reattachReady ? "idle" : "busy" } } }),
       messages: async () => {
         messagesCalls += 1;
         if (messagesCalls === 1) return { data: [] };

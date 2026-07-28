@@ -11,6 +11,8 @@ import {
   historyMoveIteration,
   historyMoveStep,
   requestScrollIntent,
+  collapseSelectedCompleteGroup,
+  expandSelectedCompleteGroup,
   selectNextStep,
   selectPreviousStep,
   setFocusedPane,
@@ -218,6 +220,14 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
                       ? () => selectPreviousStep(state)
                       : state.focusedPane === "steps" && keyName === "down"
                         ? () => selectNextStep(state)
+                        : state.focusedPane === "steps" && (keyName === "right" || keyName === "arrowright")
+                          ? () => {
+                              expandSelectedCompleteGroup(state);
+                            }
+                          : state.focusedPane === "steps" && (keyName === "left" || keyName === "arrowleft")
+                            ? () => {
+                                collapseSelectedCompleteGroup(state);
+                              }
                         : state.focusedPane === "output" && keyName === "up"
                           ? () => scrollSelectedStepOutput(state, "up")
                           : state.focusedPane === "output" && keyName === "down"

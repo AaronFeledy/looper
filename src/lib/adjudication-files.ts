@@ -13,6 +13,17 @@ import {
 const ADJUDICATE_FILE_NAME = ".looper-adjudicate";
 const PRD_HISTORY_FILE_NAME = ".looper-prd-history.json";
 const ADJUDICATE_SESSION_FILE_NAME = ".looper-adjudicate-session.json";
+const ADJUDICATION_LOG_FILE_NAME = ".looper-adjudication-log.json";
+
+/**
+ * One completed adjudication: when it finished and the marker reason that
+ * triggered it. Durable so gate scripts and prompts can distinguish "already
+ * adjudicated, nothing new since" from a genuinely fresh escalation.
+ */
+export type AdjudicationCompletionRecord = {
+  readonly at: string;
+  readonly reason: string;
+};
 
 export type AdjudicateSession = {
   readonly sessionID: string;
@@ -34,6 +45,10 @@ function prdHistoryPath(): string {
 
 function adjudicateSessionPath(): string {
   return join(requireConfigDir(), ADJUDICATE_SESSION_FILE_NAME);
+}
+
+function adjudicationLogPath(): string {
+  return join(requireConfigDir(), ADJUDICATION_LOG_FILE_NAME);
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -186,6 +201,79 @@ export function markPrdHistoryAdjudicated(): void {
 
 export function clearPrdHistory(): void {
   tolerantRm(prdHistoryPath());
+}
+
+function parseCompletionRecord(value: unknown): AdjudicationCompletionRecord | null {
+  if (!isRecord(value)) return null;
+  const at = value["at"];
+  const reason = value["reason"];
+  if (typeof at !== "string" || at.length === 0) return null;
+  if (typeof reason !== "string") return null;
+  return { at, reason };
+}
+
+type AdjudicationLogParse =
+  | { readonly kind: "empty" }
+  | { readonly kind: "ok"; readonly records: AdjudicationCompletionRecord[] }
+  | { readonly kind: "corrupt" };
+
+function parseAdjudicationLogContent(content: string | null): AdjudicationLogParse {
+  if (content === null) return { kind: "empty" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return { kind: "corrupt" };
+  }
+  if (!Array.isArray(parsed)) return { kind: "corrupt" };
+  const records: AdjudicationCompletionRecord[] = [];
+  for (const value of parsed) {
+    const record = parseCompletionRecord(value);
+    if (record === null) return { kind: "corrupt" };
+    records.push(record);
+  }
+  return { kind: "ok", records };
+}
+
+function readAdjudicationLogFile(): AdjudicationLogParse {
+  return parseAdjudicationLogContent(tolerantRead(adjudicationLogPath()));
+}
+
+function quarantineCorruptAdjudicationLog(): boolean {
+  const path = adjudicationLogPath();
+  const quarantinePath = `${path}.corrupt-${Date.now()}`;
+  try {
+    renameSync(path, quarantinePath);
+    console.error(`[looper] adjudication: corrupt adjudication log detected; moved original to ${quarantinePath}`);
+    return true;
+  } catch {
+    console.error("[looper] adjudication: corrupt adjudication log detected; could not quarantine it, skipping this update");
+    return false;
+  }
+}
+
+export function readAdjudicationLog(): AdjudicationCompletionRecord[] {
+  const parse = readAdjudicationLogFile();
+  return parse.kind === "ok" ? parse.records : [];
+}
+
+export function appendAdjudicationCompletion(record: AdjudicationCompletionRecord): void {
+  const parse = readAdjudicationLogFile();
+  if (parse.kind === "corrupt") {
+    if (!quarantineCorruptAdjudicationLog()) return;
+    writeAdjudicationLogFile([record]);
+    return;
+  }
+  const base = parse.kind === "ok" ? parse.records : [];
+  writeAdjudicationLogFile([...base, record]);
+}
+
+function writeAdjudicationLogFile(records: readonly AdjudicationCompletionRecord[]): void {
+  writeFileAtomically(adjudicationLogPath(), `${JSON.stringify(records, null, 2)}\n`);
+}
+
+export function clearAdjudicationLog(): void {
+  tolerantRm(adjudicationLogPath());
 }
 
 /**

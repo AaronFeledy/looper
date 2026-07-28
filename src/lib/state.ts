@@ -111,10 +111,13 @@ export type BranchDiffStatus =
  */
 export type BackgroundAgent = {
   sessionID: string;
+  depth: number;
+  parentSessionID?: string;
   agent?: string;
   title?: string;
-  placeholder?: true;
+  activity?: "busy" | "idle";
   startedAt: number;
+  finishedAt?: number;
   outputLines: string[];
   outputLineTimes: number[];
   outputEvents?: LooperEvent[];
@@ -141,6 +144,7 @@ export type LoopStep = {
   outputScrollTop: number;
   outputPinnedToBottom: boolean;
   backgroundAgents: BackgroundAgent[];
+  continuation?: { reason: string; since: number };
   restartReason?: StepRestartReason;
 };
 
@@ -224,6 +228,7 @@ export type LoopState = {
   focusedPane: LoopPane;
   selectedStepIndex: number | null;
   selectedBackgroundSessionID: string | null;
+  expandedCompleteGroups: Set<string>;
   manualStepSelection: boolean;
   activeStepIndex: number | null;
   started: boolean;
@@ -257,9 +262,37 @@ export type LoopState = {
   historyView: HistoryView | null;
 };
 
+export const COMPLETE_GROUP_SESSION_ID = "__complete__";
+
 export type FlatRow =
   | { kind: "step"; stepIndex: number }
-  | { kind: "background"; stepIndex: number; sessionID: string };
+  | { kind: "background"; stepIndex: number; sessionID: string }
+  | {
+      kind: "background-complete";
+      stepIndex: number;
+      count: number;
+      parentSessionID: string | null;
+      depth: number;
+    };
+
+export function completeGroupKey(stepIndex: number, parentSessionID: string | null): string {
+  return parentSessionID === null ? `${stepIndex}` : `${stepIndex}:${parentSessionID}`;
+}
+
+export function completeGroupSelectionId(parentSessionID: string | null): string {
+  return parentSessionID === null ? COMPLETE_GROUP_SESSION_ID : `${COMPLETE_GROUP_SESSION_ID}:${parentSessionID}`;
+}
+
+export function parseCompleteGroupSelection(selectionID: string): string | null | undefined {
+  if (selectionID === COMPLETE_GROUP_SESSION_ID) return null;
+  const prefix = `${COMPLETE_GROUP_SESSION_ID}:`;
+  if (selectionID.startsWith(prefix)) return selectionID.slice(prefix.length);
+  return undefined;
+}
+
+export function isCompleteGroupSelectionId(selectionID: string | null): boolean {
+  return selectionID !== null && parseCompleteGroupSelection(selectionID) !== undefined;
+}
 
 type Listener = () => void;
 
@@ -295,14 +328,28 @@ export function backgroundAgentLabel(agent: BackgroundAgent): string {
 export function createBackgroundAgent(
   sessionID: string,
   startedAt: number,
-  fields: { agent?: string; title?: string; placeholder?: true } = {},
+  fields: {
+    depth?: number;
+    parentSessionID?: string;
+    agent?: string;
+    title?: string;
+    activity?: "busy" | "idle";
+    finishedAt?: number;
+  } = {},
 ): BackgroundAgent {
+  const activity = fields.activity;
+  const finishedAt =
+    fields.finishedAt ??
+    (activity === "idle" ? startedAt : undefined);
   return {
     sessionID,
     startedAt,
+    depth: fields.depth ?? 1,
+    ...(fields.parentSessionID !== undefined ? { parentSessionID: fields.parentSessionID } : {}),
     ...(fields.agent !== undefined ? { agent: fields.agent } : {}),
     ...(fields.title !== undefined ? { title: fields.title } : {}),
-    ...(fields.placeholder !== undefined ? { placeholder: fields.placeholder } : {}),
+    ...(activity !== undefined ? { activity } : {}),
+    ...(finishedAt !== undefined ? { finishedAt } : {}),
     outputLines: [],
     outputLineTimes: [],
     outputEvents: [],
@@ -369,6 +416,7 @@ export function createLoopState({
     focusedPane: "steps",
     selectedStepIndex: null,
     selectedBackgroundSessionID: null,
+    expandedCompleteGroups: new Set(),
     manualStepSelection: false,
     activeStepIndex: null,
     started: false,
@@ -519,15 +567,235 @@ export function setSelectedStepIndex(state: LoopState, stepIndex: number | null)
   notifyStateChange();
 }
 
+function isIdleAgent(agent: BackgroundAgent): boolean {
+  return agent.activity === "idle";
+}
+
+function agentBySessionID(agents: readonly BackgroundAgent[]): Map<string, BackgroundAgent> {
+  return new Map(agents.map((agent) => [agent.sessionID, agent] as const));
+}
+
+export function directChildAgents(
+  agents: readonly BackgroundAgent[],
+  parentSessionID: string | null,
+  stepSessionID: string | undefined,
+): BackgroundAgent[] {
+  const known = agentBySessionID(agents);
+  const rootID = stepSessionID;
+  return agents.filter((agent) => {
+    const parent = agent.parentSessionID;
+    if (parentSessionID === null) {
+      if (rootID !== undefined) return parent === rootID;
+      if (agent.depth === 1) return true;
+      if (parent === undefined) return true;
+      return !known.has(parent);
+    }
+    return parent === parentSessionID;
+  });
+}
+
+function completeGroupParentOfAgent(agent: BackgroundAgent, stepSessionID: string | undefined): string | null {
+  const parent = agent.parentSessionID;
+  if (parent === undefined) return null;
+  if (stepSessionID !== undefined && parent === stepSessionID) return null;
+  return parent;
+}
+
+export function shouldCollapseIdleGroup(
+  idle: readonly BackgroundAgent[],
+  agents: readonly BackgroundAgent[],
+  stepSessionID: string | undefined,
+): boolean {
+  if (idle.length >= 2) return true;
+  if (idle.length !== 1) return false;
+  const only = idle[0]!;
+  return directChildAgents(agents, only.sessionID, stepSessionID).length > 0;
+}
+
 export function flattenRows(state: LoopState): FlatRow[] {
   const rows: FlatRow[] = [];
   state.steps.forEach((step, stepIndex) => {
     rows.push({ kind: "step", stepIndex });
-    for (const agent of step.backgroundAgents) {
+    const agents = step.backgroundAgents;
+
+    const emitAgent = (agent: BackgroundAgent, depth: number): void => {
       rows.push({ kind: "background", stepIndex, sessionID: agent.sessionID });
-    }
+      emitChildren(agent.sessionID, depth + 1);
+    };
+
+    const emitChildren = (parentSessionID: string | null, childDepth: number): void => {
+      const children = directChildAgents(agents, parentSessionID, step.sessionID);
+      if (children.length === 0) return;
+      const busy: BackgroundAgent[] = [];
+      const idle: BackgroundAgent[] = [];
+      for (const child of children) {
+        if (isIdleAgent(child)) idle.push(child);
+        else busy.push(child);
+      }
+      for (const child of busy) emitAgent(child, childDepth);
+
+      if (idle.length === 0) return;
+
+      if (!shouldCollapseIdleGroup(idle, agents, step.sessionID)) {
+        for (const child of idle) emitAgent(child, childDepth);
+        return;
+      }
+
+      const key = completeGroupKey(stepIndex, parentSessionID);
+      const expanded = state.expandedCompleteGroups.has(key);
+      rows.push({
+        kind: "background-complete",
+        stepIndex,
+        count: idle.length,
+        parentSessionID,
+        depth: childDepth,
+      });
+      if (!expanded) return;
+      for (const child of idle) emitAgent(child, childDepth);
+    };
+
+    emitChildren(null, 1);
   });
   return rows;
+}
+
+export function isCompleteGroupExpanded(
+  state: LoopState,
+  stepIndex: number,
+  parentSessionID: string | null = null,
+): boolean {
+  return state.expandedCompleteGroups.has(completeGroupKey(stepIndex, parentSessionID));
+}
+
+export function setCompleteGroupExpanded(
+  state: LoopState,
+  stepIndex: number,
+  expanded: boolean,
+  parentSessionID: string | null = null,
+): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  const idleChildren = directChildAgents(step.backgroundAgents, parentSessionID, step.sessionID).filter(isIdleAgent);
+  const key = completeGroupKey(stepIndex, parentSessionID);
+  if (!shouldCollapseIdleGroup(idleChildren, step.backgroundAgents, step.sessionID)) {
+    if (state.expandedCompleteGroups.delete(key)) notifyStateChange();
+    return;
+  }
+  const currently = state.expandedCompleteGroups.has(key);
+  if (currently === expanded) return;
+  if (expanded) state.expandedCompleteGroups.add(key);
+  else {
+    state.expandedCompleteGroups.delete(key);
+    if (state.selectedStepIndex === stepIndex && state.selectedBackgroundSessionID !== null) {
+      const selectedID = state.selectedBackgroundSessionID;
+      if (!isCompleteGroupSelectionId(selectedID)) {
+        const selected = step.backgroundAgents.find((agent) => agent.sessionID === selectedID);
+        if (selected !== undefined && isIdleAgent(selected)) {
+          const groupParent = completeGroupParentOfAgent(selected, step.sessionID);
+          if (groupParent === parentSessionID) {
+            state.selectedBackgroundSessionID = completeGroupSelectionId(parentSessionID);
+          }
+        }
+      }
+    }
+  }
+  notifyStateChange();
+}
+
+export function toggleCompleteGroupExpanded(
+  state: LoopState,
+  stepIndex: number,
+  parentSessionID: string | null = null,
+): void {
+  setCompleteGroupExpanded(state, stepIndex, !isCompleteGroupExpanded(state, stepIndex, parentSessionID), parentSessionID);
+}
+
+function selectedCompleteGroupParent(state: LoopState): string | null | undefined {
+  const id = state.selectedBackgroundSessionID;
+  if (id === null) return undefined;
+  return parseCompleteGroupSelection(id);
+}
+
+export function canToggleCompleteGroup(state: LoopState): boolean {
+  if (state.focusedPane !== "steps" || state.historyView !== null) return false;
+  const stepIndex = state.selectedStepIndex;
+  if (stepIndex === null) return false;
+  const step = state.steps[stepIndex];
+  if (!step) return false;
+  const selectedID = state.selectedBackgroundSessionID;
+  if (selectedID === null) return false;
+
+  const groupParent = parseCompleteGroupSelection(selectedID);
+  if (groupParent !== undefined) {
+    const idle = directChildAgents(step.backgroundAgents, groupParent, step.sessionID).filter(isIdleAgent);
+    return shouldCollapseIdleGroup(idle, step.backgroundAgents, step.sessionID);
+  }
+
+  const agent = step.backgroundAgents.find((a) => a.sessionID === selectedID);
+  if (agent === undefined || !isIdleAgent(agent)) return false;
+  const parent = completeGroupParentOfAgent(agent, step.sessionID);
+  return isCompleteGroupExpanded(state, stepIndex, parent);
+}
+
+export function toggleSelectedCompleteGroup(state: LoopState): boolean {
+  if (!canToggleCompleteGroup(state)) return false;
+  const stepIndex = state.selectedStepIndex;
+  if (stepIndex === null) return false;
+  const step = state.steps[stepIndex];
+  if (!step) return false;
+
+  const selectedID = state.selectedBackgroundSessionID;
+  if (selectedID === null) return false;
+
+  let parentSessionID = parseCompleteGroupSelection(selectedID);
+  if (parentSessionID === undefined) {
+    const agent = step.backgroundAgents.find((a) => a.sessionID === selectedID);
+    if (agent === undefined) return false;
+    parentSessionID = completeGroupParentOfAgent(agent, step.sessionID);
+  }
+
+  const expanding = !isCompleteGroupExpanded(state, stepIndex, parentSessionID);
+  state.selectedBackgroundSessionID = completeGroupSelectionId(parentSessionID);
+  setCompleteGroupExpanded(state, stepIndex, expanding, parentSessionID);
+  return true;
+}
+
+export function expandSelectedCompleteGroup(state: LoopState): boolean {
+  if (state.focusedPane !== "steps" || state.historyView !== null) return false;
+  const stepIndex = state.selectedStepIndex;
+  if (stepIndex === null) return false;
+  const parentSessionID = selectedCompleteGroupParent(state);
+  if (parentSessionID === undefined) return false;
+  if (isCompleteGroupExpanded(state, stepIndex, parentSessionID)) return false;
+  const step = state.steps[stepIndex];
+  if (!step) return false;
+  if (!directChildAgents(step.backgroundAgents, parentSessionID, step.sessionID).some(isIdleAgent)) return false;
+  setCompleteGroupExpanded(state, stepIndex, true, parentSessionID);
+  return true;
+}
+
+export function collapseSelectedCompleteGroup(state: LoopState): boolean {
+  if (state.focusedPane !== "steps" || state.historyView !== null) return false;
+  const stepIndex = state.selectedStepIndex;
+  if (stepIndex === null) return false;
+  const step = state.steps[stepIndex];
+  if (!step) return false;
+  const selectedID = state.selectedBackgroundSessionID;
+  if (selectedID === null) return false;
+
+  const groupParent = parseCompleteGroupSelection(selectedID);
+  if (groupParent !== undefined) {
+    if (!isCompleteGroupExpanded(state, stepIndex, groupParent)) return false;
+    setCompleteGroupExpanded(state, stepIndex, false, groupParent);
+    return true;
+  }
+
+  const agent = step.backgroundAgents.find((a) => a.sessionID === selectedID);
+  if (agent === undefined || !isIdleAgent(agent)) return false;
+  const parent = completeGroupParentOfAgent(agent, step.sessionID);
+  if (!isCompleteGroupExpanded(state, stepIndex, parent)) return false;
+  setCompleteGroupExpanded(state, stepIndex, false, parent);
+  return true;
 }
 
 function currentRowIndex(state: LoopState, rows: FlatRow[]): number | null {
@@ -540,7 +808,18 @@ function currentRowIndex(state: LoopState, rows: FlatRow[]): number | null {
     if (sessionID === null) {
       if (row.kind === "step" && row.stepIndex === stepIndex) return i;
     } else {
-      if (row.kind === "background" && row.stepIndex === stepIndex && row.sessionID === sessionID) return i;
+      const groupParent = parseCompleteGroupSelection(sessionID);
+      if (groupParent !== undefined) {
+        if (
+          row.kind === "background-complete" &&
+          row.stepIndex === stepIndex &&
+          row.parentSessionID === groupParent
+        ) {
+          return i;
+        }
+      } else if (row.kind === "background" && row.stepIndex === stepIndex && row.sessionID === sessionID) {
+        return i;
+      }
     }
   }
   return null;
@@ -555,7 +834,12 @@ function pinStepOutputToBottom(state: LoopState, stepIndex: number): boolean {
 }
 
 function applyRowSelection(state: LoopState, row: FlatRow): void {
-  const nextSessionID = row.kind === "background" ? row.sessionID : null;
+  const nextSessionID =
+    row.kind === "background"
+      ? row.sessionID
+      : row.kind === "background-complete"
+        ? completeGroupSelectionId(row.parentSessionID)
+        : null;
   const rejoiningLive =
     row.kind === "step" &&
     state.activeStepIndex !== null &&
@@ -574,6 +858,22 @@ function applyRowSelection(state: LoopState, row: FlatRow): void {
   state.manualStepSelection = nextManual;
   if (rejoiningLive) pinStepOutputToBottom(state, row.stepIndex);
   notifyStateChange();
+}
+
+export function activateStepListRow(state: LoopState, rowIndex: number): void {
+  setFocusedPane(state, "steps");
+  if (state.historyView !== null) {
+    selectHistoryStepAt(state, rowIndex);
+    return;
+  }
+  const row = flattenRows(state)[rowIndex];
+  if (row === undefined) return;
+  if (row.kind === "background-complete") {
+    applyRowSelection(state, row);
+    toggleCompleteGroupExpanded(state, row.stepIndex, row.parentSessionID);
+    return;
+  }
+  applyRowSelection(state, row);
 }
 
 export function selectFlatRow(state: LoopState, row: FlatRow): void {
@@ -751,9 +1051,9 @@ export function finalizeStepRow(
 /**
  * Orchestrator inline outcome: -> failed | skipped. Clears
  * `state.activeStepIndex` but PRESERVES background-agent rows — some inline
- * paths (e.g. the background-resume-limit branch) fire while a continuation
- * placeholder row is still installed, and clearing it would change visible TUI
- * state and selection.
+ * paths (e.g. the background-resume-limit branch) fire while registry-projected
+ * rows remain installed, and clearing them would change visible TUI state and
+ * selection.
  */
 export function failStepRow(
   state: LoopState,
@@ -997,7 +1297,7 @@ export function syncSelectionToActiveStep(state: LoopState): void {
 export function syncStepBackgroundAgents(
   state: LoopState,
   stepIndex: number,
-  next: { sessionID: string; agent?: string; title?: string; placeholder?: true; startedAt: number }[],
+  next: { sessionID: string; agent?: string; title?: string; startedAt: number }[],
 ): void {
   const step = state.steps[stepIndex];
   if (!step) return;
@@ -1018,17 +1318,11 @@ export function syncStepBackgroundAgents(
         prev.title = incoming.title;
         changed = true;
       }
-      if (prev.placeholder !== incoming.placeholder) {
-        if (incoming.placeholder === undefined) delete prev.placeholder;
-        else prev.placeholder = incoming.placeholder;
-        changed = true;
-      }
       merged.push(prev);
     } else {
       merged.push(createBackgroundAgent(incoming.sessionID, incoming.startedAt, {
         ...(incoming.agent !== undefined ? { agent: incoming.agent } : {}),
         ...(incoming.title !== undefined ? { title: incoming.title } : {}),
-        ...(incoming.placeholder !== undefined ? { placeholder: incoming.placeholder } : {}),
       }));
       changed = true;
     }
@@ -1048,6 +1342,7 @@ export function syncStepBackgroundAgents(
   if (
     state.selectedBackgroundSessionID !== null &&
     state.selectedStepIndex === stepIndex &&
+    !isCompleteGroupSelectionId(state.selectedBackgroundSessionID) &&
     !nextIDs.has(state.selectedBackgroundSessionID)
   ) {
     state.selectedBackgroundSessionID = null;

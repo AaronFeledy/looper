@@ -53,6 +53,18 @@ describe("eventsToOutputBlocks — step markers and tool merge", () => {
     expect(tool!.outputLines).toContain("retained full output: /tmp/full-output.txt");
   });
 
+  test("orphan tool.done without a started event still becomes a tool block", () => {
+    const events: LooperEvent[] = [{ kind: "tool.done", tool: "read", output: "file contents" }];
+    const blocks = eventsToOutputBlocks(events, times(events));
+    expect(blocks.map((b) => b.kind)).toEqual(["tool"]);
+    const tool = blocks[0];
+    expect(tool?.kind).toBe("tool");
+    if (tool?.kind === "tool") {
+      expect(tool.status).toBe("done");
+      expect(tool.outputLines.join("\n")).toContain("file contents");
+    }
+  });
+
   test("a full step (start, tool, finish) yields start → tool → finish with the tool un-nested", () => {
     const events: LooperEvent[] = [
       { kind: "step.started" },

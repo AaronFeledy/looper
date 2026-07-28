@@ -17,6 +17,7 @@ import {
   followIndicatorColor,
   pinAfterUserScroll,
 } from "../lib/output-follow.ts";
+import { createToolBlock, toolOutputBlockKey } from "./tool-block.ts";
 import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
 
 const FOLLOW_PULSE_MS = 80;
@@ -149,37 +150,6 @@ function createStepFinishBlock(renderer: CliRenderer, id: string, block: Extract
     marginBottom: 1,
   });
   box.add(createTextBlock(renderer, `${id}-summary`, [block.summary], "#a6e3a1"));
-  return box;
-}
-
-function createToolBlock(renderer: CliRenderer, id: string, block: Extract<OutputBlock, { kind: "tool" }>): BoxRenderable {
-  const borderColor = block.status === "waiting" ? "#f9e2af" : block.status === "error" ? "#f38ba8" : "#a6e3a1";
-  const statusText = block.status === "waiting" ? "waiting" : block.status === "error" ? "failed" : "done";
-  const box = new BoxRenderable(renderer, {
-    id,
-    width: "100%",
-    minWidth: 0,
-    alignSelf: "stretch",
-    flexDirection: "column",
-    border: true,
-    borderStyle: "rounded",
-    borderColor,
-    title: `Tool · ${block.tool} · ${statusText}`,
-    titleAlignment: "left",
-    bottomTitle: formatTimestamp(block.firstSeenAt),
-    bottomTitleAlignment: "right",
-    paddingX: 1,
-    marginBottom: 1,
-  });
-
-  box.add(createTextBlock(renderer, `${id}-call`, [block.callLine], "#f9e2af"));
-
-  if (block.status === "waiting") {
-    box.add(createTextBlock(renderer, `${id}-waiting`, ["⏳ waiting for response…"], "#6c7086"));
-  } else {
-    box.add(createTextBlock(renderer, `${id}-response`, block.outputLines.length > 0 ? block.outputLines : ["(no output)"], block.status === "error" ? "#f38ba8" : "#cdd6f4"));
-  }
-
   return box;
 }
 
@@ -332,6 +302,8 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   };
 
   let outputRenderables: OutputRenderable[] = [];
+  const expandedToolKeys = new Set<string>();
+  let latestSelectedOutput = initialOutput;
 
   const replaceOutput = (output: SelectedOutput) => {
     for (const renderable of outputRenderables) {
@@ -340,6 +312,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     }
 
     outputRenderables = [];
+    latestSelectedOutput = output;
 
     const blocks = output.events.length > 0
       ? eventsToOutputBlocks(output.events, output.eventTimes)
@@ -357,7 +330,17 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
       } else if (block.kind === "step-finish") {
         renderable = createStepFinishBlock(renderer, `loop-agent-step-finish-${index}`, block);
       } else if (block.kind === "tool") {
-        renderable = createToolBlock(renderer, `loop-agent-tool-${index}`, block);
+        const key = toolOutputBlockKey(block);
+        renderable = createToolBlock(renderer, `loop-agent-tool-${index}`, block, {
+          expanded: expandedToolKeys.has(key),
+          onToggleExpand: () => {
+            if (expandedToolKeys.has(key)) expandedToolKeys.delete(key);
+            else expandedToolKeys.add(key);
+            replaceOutput(latestSelectedOutput);
+            renderer.requestRender();
+            scheduleFollowScroll(false);
+          },
+        });
       } else {
         renderable = createTextBlock(renderer, `loop-agent-lines-${index}`, block.lines);
       }

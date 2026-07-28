@@ -192,7 +192,14 @@ export function eventsToOutputBlocks(events: readonly LooperEvent[], times: read
         }
         closeStructured();
         flushLines();
-        blocks.push({ kind: "group", title: `Tool output · ${event.tool}`, borderColor: "#a6e3a1", contentColor: "#cdd6f4", lines: toolOutputLines(event), firstSeenAt });
+        blocks.push({
+          kind: "tool",
+          tool: event.tool,
+          callLine: firstFormattedLine({ kind: "tool.started", tool: event.tool, input: {} }),
+          status: "done",
+          outputLines: toolOutputLines(event),
+          firstSeenAt,
+        });
         return;
       }
       case "tool.failed": {

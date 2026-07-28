@@ -1,4 +1,5 @@
 import type { StoryTransitionRecord } from "../../src/lib/adjudication-detection.ts";
+import type { AdjudicationCompletionRecord } from "../../src/lib/adjudication-files.ts";
 import type { AdjudicateSession, AdjudicationStore } from "../../src/persistence/adjudication-store.ts";
 
 export function createInMemoryAdjudicationStore(): AdjudicationStore {
@@ -6,6 +7,7 @@ export function createInMemoryAdjudicationStore(): AdjudicationStore {
   let history: StoryTransitionRecord[] = [];
   let adjudicatedThrough = 0;
   let session: AdjudicateSession | null = null;
+  let completions: AdjudicationCompletionRecord[] = [];
 
   return {
     markerExists: () => marker !== null,
@@ -27,7 +29,12 @@ export function createInMemoryAdjudicationStore(): AdjudicationStore {
     clearHistory: () => {
       history = [];
       adjudicatedThrough = 0;
+      completions = [];
     },
+    appendCompletion: (record) => {
+      completions = [...completions, record];
+    },
+    readCompletions: () => [...completions],
     writeSession: (next) => {
       session = next;
     },

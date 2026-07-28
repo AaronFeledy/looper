@@ -205,6 +205,31 @@ describe("runGateScript", () => {
     expect(readFileSync(output, "utf8")).toBe("product/prd|product/prd/prd.json|product/prd/progress.txt");
   });
 
+  test("exports adjudication facts and defaults them when absent", async () => {
+    // Given a gate script that records the adjudication environment values.
+    const repoDir = createScratchDir();
+    const withValues = join(repoDir, "adj-env.txt");
+    const withoutValues = join(repoDir, "adj-env-empty.txt");
+
+    // When the caller supplies adjudication facts.
+    const supplied = await runGateScript(
+      `printf '%s' "$LOOPER_LAST_ADJUDICATED_AT|$LOOPER_ADJUDICATION_COUNT" > ${JSON.stringify(withValues)}`,
+      { repoDir, lastAdjudicatedAt: "2026-07-28T10:00:00.000Z", adjudicationCount: 3, timeoutMs: 1_000 },
+    );
+
+    // And when the caller has no adjudication state.
+    const defaulted = await runGateScript(
+      `printf '%s' "$LOOPER_LAST_ADJUDICATED_AT|$LOOPER_ADJUDICATION_COUNT" > ${JSON.stringify(withoutValues)}`,
+      { repoDir, timeoutMs: 1_000 },
+    );
+
+    // Then supplied facts are exported and absent facts default to empty/zero.
+    expect(supplied).toEqual({ ran: true, exitCode: 0 });
+    expect(readFileSync(withValues, "utf8")).toBe("2026-07-28T10:00:00.000Z|3");
+    expect(defaulted).toEqual({ ran: true, exitCode: 0 });
+    expect(readFileSync(withoutValues, "utf8")).toBe("|0");
+  });
+
   test("exports empty story facts when the caller cannot derive them", async () => {
     // Given no caller-derived branch or story id.
     const repoDir = createScratchDir();
