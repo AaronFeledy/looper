@@ -357,6 +357,36 @@ describe("loadRuntimeConfig policy and flags", () => {
     });
   });
 
+  test("stall defaults to undefined when absent", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).stall).toBeUndefined();
+    });
+  });
+
+  test("parses stall limits including explicit zero to disable", () => {
+    withConfigDir("stall:\n  iterations: 5\n  adjudications: 0\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).stall).toEqual({ iterations: 5, adjudications: 0 });
+    });
+  });
+
+  test("parses a partial stall mapping", () => {
+    withConfigDir("stall:\n  iterations: 4\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadRuntimeConfig(dir).stall).toEqual({ iterations: 4 });
+    });
+  });
+
+  test("rejects a non-mapping stall", () => {
+    withConfigDir("stall: 3\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/stall must be a mapping/);
+    });
+  });
+
+  test("rejects negative stall limits", () => {
+    withConfigDir("stall:\n  iterations: -1\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/stall\.iterations must be an integer >= 0/);
+    });
+  });
+
   test("parses a positive prdFlipThreshold", () => {
     withConfigDir("prdFlipThreshold: 4\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
       expect(loadRuntimeConfig(dir).prdFlipThreshold).toBe(4);

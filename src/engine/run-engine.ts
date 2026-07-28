@@ -6,6 +6,7 @@ import type { RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { EngineFrontendHooks, EngineRunIteration, RunEngineOptions, RunEngineResult, RunStateStore, StoryStatePort } from "./engine-ports.ts";
 import { buildEngineStepHooks } from "./run-engine-step-hooks.ts";
 import type { AdjudicationConfig } from "./adjudication-routing.ts";
+import { createStallObserver, stallDetectionEnabled, type StallLimits, type StallObserver } from "./stall-detector.ts";
 
 export type RunResumePlan = {
   readonly startIteration: number;
@@ -46,6 +47,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly storyIdPattern?: string;
   readonly storyState?: StoryStatePort;
   readonly adjudication?: AdjudicationConfig;
+  readonly stall?: StallLimits;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
   readonly initialPlan?: RunResumePlan;
@@ -157,6 +159,18 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
   let recoveryNudgeNext = false;
   let stepSessionsIteration: number | undefined;
 
+  const stallObserver: StallObserver | undefined =
+    input.stall !== undefined && stallDetectionEnabled(input.stall)
+      ? createStallObserver({
+          repoDir: input.repoDir,
+          limits: input.stall,
+          ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
+          ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
+          ...(input.storyState !== undefined ? { readPhase: input.storyState.readPhase } : {}),
+          readCompletionsCount: () => input.adjudication?.store.readCompletions().length ?? 0,
+        })
+      : undefined;
+
   for (let iteration = startIteration; iteration <= input.maxIterations; iteration += 1) {
     if (input.store.stopFileExists() || input.store.stopAfterIterationFileExists()) {
       const reason = input.store.stopReason();
@@ -231,6 +245,14 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         const reason = input.store.stopReason();
         await input.hooks.onStopRequested?.({ iteration, reason, phase: "after-iteration" });
         return { kind: "stopped", reason };
+      }
+      if (stallObserver !== undefined) {
+        const verdict = await stallObserver.checkIteration(await input.currentBranch());
+        if (verdict.stalled) {
+          input.store.writeStop(verdict.reason);
+          await input.hooks.onStopRequested?.({ iteration, reason: verdict.reason, phase: "after-iteration" });
+          return { kind: "stopped", reason: verdict.reason };
+        }
       }
     } catch (error) {
       if (!(error instanceof StepFailureError) || input.hooks.onStepFailure === undefined || input.hooks.recoveryResumeForChoice === undefined) throw error;

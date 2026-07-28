@@ -85,6 +85,7 @@ type RawConfig = {
   prd?: unknown;
   prdFlipThreshold?: unknown;
   storyIdPattern?: unknown;
+  stall?: unknown;
 };
 
 export type RecoverySnapshotsConfig = false | "before-retry" | "before-retry-and-skip";
@@ -116,8 +117,14 @@ export type RuntimeConfig = {
   prdDir?: string;
   prdFlipThreshold?: number;
   storyIdPattern?: string;
+  stall?: StallConfig;
   useSessionIdle: boolean;
   validateResources: boolean;
+};
+
+export type StallConfig = {
+  iterations?: number;
+  adjudications?: number;
 };
 
 function titleFromKey(key: string): string {
@@ -499,6 +506,28 @@ function optionalPositiveIntegerValue(value: unknown, label: string): number | u
   return value;
 }
 
+function optionalNonNegativeIntegerValue(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} must be an integer >= 0`);
+  }
+  return value;
+}
+
+function parseStallConfig(value: unknown, label: string): StallConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${CONFIG_FILE_NAME}.${label} must be a mapping`);
+  }
+  const raw = value as { iterations?: unknown; adjudications?: unknown };
+  const iterations = optionalNonNegativeIntegerValue(raw.iterations, `${label}.iterations`);
+  const adjudications = optionalNonNegativeIntegerValue(raw.adjudications, `${label}.adjudications`);
+  return {
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(adjudications !== undefined ? { adjudications } : {}),
+  };
+}
+
 export function loadRuntimeConfig(configDir: string, repoDir: string = process.cwd()): RuntimeConfig {
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
@@ -533,6 +562,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   }
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
   const storyIdPattern = optionalNonEmptyStringValue(rawConfig.storyIdPattern, "storyIdPattern");
+  const stall = parseStallConfig(rawConfig.stall, "stall");
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -543,6 +573,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+    ...(stall !== undefined ? { stall } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
   };
