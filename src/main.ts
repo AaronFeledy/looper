@@ -10,10 +10,13 @@ import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
 import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadAdjudicateStep, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
+import { startAgentRegistryController } from "./lib/agent-registry-controller.ts";
 import { runNonTty } from "./lib/fallback.ts";
+import { startAgentRegistry, type AgentRegistry } from "./opencode/agent-registry.ts";
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import { computeRunResumePlan, runEngine, type RunResumePlan } from "./engine/run-engine.ts";
+import { stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
@@ -33,6 +36,7 @@ import {
   type EscConfirmMode,
   hydrateResumableBootStep,
   notify,
+  pushAgentLine,
   resetIterationNavigationState,
   resetPrdIterationBaseline,
   snapshotIterationToHistory,
@@ -282,7 +286,10 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   if (!state.started) {
     if (firstIterationResumed) {
       state.resumable = true;
-      for (const step of state.steps.slice(0, firstIterationStartStepIndex)) step.status = "done";
+      for (const step of state.steps.slice(0, firstIterationStartStepIndex)) {
+        step.status = "done";
+        step.finishedAt ??= Date.now();
+      }
       if (state.steps.length > 0) {
         const resumeStepIndex = Math.min(firstIterationStartStepIndex, state.steps.length - 1);
         const resumeStep = state.steps[resumeStepIndex];
@@ -313,6 +320,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let cleanupBootInterrupt: (() => void) | undefined;
   let cleanupKeys: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
+  let agentRegistry: AgentRegistry | undefined;
+  let agentRegistryController: { stop: () => void } | undefined;
   let historyStreamer: { stop: () => void } | undefined;
   let branchWatcher: BranchWatcherHandle | undefined;
   let branchDiffWatcher: BranchDiffWatcher | undefined;
@@ -473,6 +482,12 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     );
 
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
+    agentRegistry = startAgentRegistry({
+      client,
+      repoDir,
+      onError: (message) => pushAgentLine(state, `[looper] agent registry ${message}`),
+    });
+    agentRegistryController = startAgentRegistryController({ state, registry: agentRegistry });
     historyStreamer = startHistoryStreamer({ state, client, repoDir });
 
     const root = new BoxRenderable(renderer, {
@@ -731,6 +746,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         store: adjudicationStore,
         ...(runtimeConfig.prdFlipThreshold !== undefined ? { configuredThreshold: runtimeConfig.prdFlipThreshold } : {}),
       }),
+      stall: { iterations: stallIterationLimit(runtimeConfig.stall?.iterations), adjudications: stallAdjudicationLimit(runtimeConfig.stall?.adjudications) },
       useSessionIdle: runtimeConfig.useSessionIdle,
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       elapsedSeconds,
@@ -794,6 +810,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   } finally {
     cleanupBootInterrupt?.();
     cleanupKeys?.();
+    agentRegistryController?.stop();
+    agentRegistry?.stop();
     backgroundAgentStreamer?.stop();
     historyStreamer?.stop();
     githubWatcher?.stop();
@@ -883,6 +901,7 @@ async function main(): Promise<number> {
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       ...(runtimeConfig.prdFlipThreshold !== undefined ? { prdFlipThreshold: runtimeConfig.prdFlipThreshold } : {}),
       ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
+      ...(runtimeConfig.stall !== undefined ? { stall: runtimeConfig.stall } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,
     });
