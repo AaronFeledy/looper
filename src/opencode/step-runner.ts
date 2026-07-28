@@ -2,11 +2,11 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, syncStepBackgroundAgents, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
-import { continuationBackgroundAgent, continuationFallback, logContinuationState, setContinuationStatus, startBackgroundAgentPoller, waitForActiveLoopContinuationRecord, type BackgroundAgentPoller } from "./background-tasks.ts";
+import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
 import type { RunContinuationRecord } from "./continuation-records.ts";
 import { classifyAssistantForMessage } from "./assistant-classification.ts";
@@ -81,20 +81,9 @@ export async function runOpenCodeStep({
     activeSessionID: sessionID,
   };
 
-  let bgPoller: BackgroundAgentPoller | undefined;
   const persistSessionID = (sid: string) => {
     cancellation.activeSessionID = sid;
     setStepSessionID(state, stepIndex, sid);
-    if (bgPoller === undefined) {
-      bgPoller = startBackgroundAgentPoller({
-        state,
-        stepIndex,
-        client,
-        repoDir,
-        parentSessionID: sid,
-        fallbackAgents: continuationFallback(repoDir, sid),
-      });
-    }
   };
 
   if (sessionID !== undefined) persistSessionID(sessionID);
@@ -240,7 +229,6 @@ export async function runOpenCodeStep({
   } finally {
     clearInterval(watcher);
     clearTimeout(timeout);
-    bgPoller?.stop();
     subscription.ctrl?.abort();
     ctrl.abort();
     await eventStream?.stop();
@@ -283,7 +271,6 @@ export async function runOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(state, stepIndex, record);
       logContinuationState(state, stepIndex, record, "background tasks active after opencode exit");
-      syncStepBackgroundAgents(state, stepIndex, [continuationBackgroundAgent(record)]);
       return { status: "waiting", sessionID: record.sessionID, ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}) };
     }
   }

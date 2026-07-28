@@ -209,6 +209,7 @@ describe("runIteration fail-path characterization", () => {
       "LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS",
       "LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS",
       "LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS",
+      "LOOPER_CONTINUATION_POLL_MS",
     ]) {
       savedEnv.set(key, process.env[key]);
     }
@@ -217,6 +218,7 @@ describe("runIteration fail-path characterization", () => {
     process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = "1";
     process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS = "1";
     process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS = "1";
+    process.env.LOOPER_CONTINUATION_POLL_MS = "20";
   });
 
   afterEach(() => {
@@ -296,22 +298,15 @@ describe("runIteration fail-path characterization", () => {
   }, 30_000);
 
   test("(d) a second orphaned-background nudge fails at the one-nudge cap", async () => {
-    // Given
+    // Given — fresh-active so waitForActive accepts it, then flip to stale for orphan detection.
     const input = setupScratch();
-    let transitionRecord = false;
     const harness = makeHarness({
       sessionIDs: ["ses_bg"],
       prompt: async ({ sessionID }) => {
-        writeContinuation(input.repoDir, sessionID, "active");
-        transitionRecord = true;
+        writeContinuation(input.repoDir, sessionID, "active", false);
+        void Bun.sleep(5).then(() => writeContinuation(input.repoDir, sessionID, "active", true));
       },
-      status: async () => {
-        if (transitionRecord) {
-          transitionRecord = false;
-          writeContinuation(input.repoDir, "ses_bg", "active", true);
-        }
-        return { ses_bg: { type: "idle" } };
-      },
+      status: async () => ({ ses_bg: { type: "idle" } }),
     });
 
     // When
@@ -326,22 +321,15 @@ describe("runIteration fail-path characterization", () => {
   }, 10_000);
 
   test("(e) eleven background resumptions fail at the ten-resume cap", async () => {
-    // Given
+    // Given — flip the continuation file to idle after prompt without relying on status polls.
     const input = setupScratch();
-    let transitionRecord = false;
     const harness = makeHarness({
       sessionIDs: ["ses_bg"],
       prompt: async ({ sessionID }) => {
         writeContinuation(input.repoDir, sessionID, "active");
-        transitionRecord = true;
+        void Bun.sleep(5).then(() => writeContinuation(input.repoDir, sessionID, "idle"));
       },
-      status: async () => {
-        if (transitionRecord) {
-          transitionRecord = false;
-          writeContinuation(input.repoDir, "ses_bg", "idle");
-        }
-        return { ses_bg: { type: "idle" } };
-      },
+      status: async () => ({ ses_bg: { type: "idle" } }),
     });
 
     // When

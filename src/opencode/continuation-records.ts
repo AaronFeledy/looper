@@ -1,8 +1,12 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
+import { positiveIntegerEnv } from "../config/tunables.ts";
 import { isMissingPathError, isRecord, stringValue } from "./util.ts";
 
+export function continuationPollMs(): number {
+  return positiveIntegerEnv("LOOPER_CONTINUATION_POLL_MS", 5_000);
+}
 export const CONTINUATION_POLL_MS = 5_000;
 export const CONTINUATION_MAX_WAIT_MS = 60 * 60 * 1000;
 export const CONTINUATION_STALE_MS = 15 * 60 * 1000;

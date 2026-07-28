@@ -24,7 +24,7 @@ function selectedTarget(state: LoopState): { sessionID: string; stepIndex: numbe
   if (sessionID === null || stepIndex === null) return null;
   const step = state.steps[stepIndex];
   if (!step) return null;
-  if (!step.backgroundAgents.some((agent) => agent.sessionID === sessionID && !agent.placeholder)) return null;
+  if (!step.backgroundAgents.some((agent) => agent.sessionID === sessionID)) return null;
   return { sessionID, stepIndex };
 }
 
