@@ -96,8 +96,7 @@ function collectControlFlagOffenses(): Offense[] {
   return offenses;
 }
 
-// TODO(T10): unskip once opencode/engine decoupling lands
-describe.skip("architecture guards", () => {
+describe("architecture guards", () => {
   test("src/opencode must not import state.ts, reference LoopState, or import agent-tree-state.ts", () => {
     const offenses = collectOpencodeBoundaryOffenses();
     expect(offenses.map((o) => o.message)).toEqual([]);
