@@ -1,4 +1,4 @@
-import type { LooperEvent } from "../core/events.ts";
+import { looperLogEventFromLine, type LooperEvent } from "../core/events.ts";
 import type {
   FinalizeStepStatus,
   StepRestartReason,
@@ -379,12 +379,6 @@ function trimPairedEvents(events: LooperEvent[], times: number[]): number {
   events.splice(0, overflow);
   times.splice(0, overflow);
   return overflow;
-}
-
-function looperLogEventFromLine(line: string): LooperEvent | null {
-  const prefix = "[looper] ";
-  if (!line.startsWith(prefix)) return null;
-  return { kind: "looper.log", message: line.slice(prefix.length) };
 }
 
 function getSelectedStep(state: LoopState): LoopStep | null {

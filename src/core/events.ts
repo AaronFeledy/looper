@@ -34,3 +34,10 @@ export type LooperEvent =
       readonly reason?: string;
       readonly updatedAt: string;
     };
+
+/** Derives a `looper.log` event from a raw `[looper] ...` output line, or null for any other line. */
+export function looperLogEventFromLine(line: string): LooperEvent | null {
+  const prefix = "[looper] ";
+  if (!line.startsWith(prefix)) return null;
+  return { kind: "looper.log", message: line.slice(prefix.length) };
+}
