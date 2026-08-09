@@ -106,23 +106,7 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     const keyName = normalizeKeyName(event);
     const isEscape = keyName === "escape" || keyName === "esc";
 
-    // Help / prompt / config overlays are modal: while visible, the next keypress only closes them.
-    if (state.helpVisible) {
-      hideHelp(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-    if (state.promptModalVisible) {
-      hidePromptModal(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-    if (state.configModalVisible) {
-      hideConfigModal(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-
+    // Interrupt and escape stay reachable above every modal layer.
     if (isInterruptKey(event)) {
       if (state.escConfirm !== null) dismissEscConfirm(state);
       const selectedText = renderer.getSelection()?.getSelectedText() ?? "";
@@ -146,6 +130,41 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       return;
     }
 
+    // Key routing follows modalFocusWinner so a visible higher modal cannot be stolen by a
+    // still-flagged lower one (e.g. help open underneath the permission gate).
+    const winner = modalFocusWinner(state);
+
+    // Human gate for permission/question asks. Recovery and the esc confirmation outrank it
+    // via winner; quit and interrupt stay reachable so a gated run can always be abandoned.
+    // Every other key is held by the gate.
+    if (winner === "permission") {
+      const gateHead = state.pendingRequests[0];
+      if (!event.ctrl && keyName !== "q" && gateHead !== undefined) {
+        const action = gateHead.kind === "permission" ? permissionKeyAction(keyName) : questionKeyAction(keyName);
+        // The broker consumes the claim; deny+skip signals the skip only after its reject lands.
+        if (action !== null) tryClaimPendingRequestDecision(state, { requestID: gateHead.requestID, generation: gateHead.generation, action });
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        return;
+      }
+    }
+
+    // Help / prompt / config overlays are modal: while they own focus, the next keypress only closes them.
+    if (winner === "help") {
+      hideHelp(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+    if (winner === "prompt") {
+      hidePromptModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+    if (winner === "config") {
+      hideConfigModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
     if (keyName === "?" || event.sequence === "?") {
       showHelp(state);
       if (typeof event.preventDefault === "function") event.preventDefault();
@@ -160,18 +179,6 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
 
     if (keyName === "c") {
       toggleConfigModal(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-
-    // Human gate for permission/question asks. Recovery and the esc confirmation outrank it
-    // (modalFocusWinner owns that order); quit and interrupt stay reachable so a gated run can
-    // always be abandoned. Every other key is held by the gate.
-    const gateHead = state.pendingRequests[0];
-    if (!event.ctrl && keyName !== "q" && gateHead !== undefined && modalFocusWinner(state) === "permission") {
-      const action = gateHead.kind === "permission" ? permissionKeyAction(keyName) : questionKeyAction(keyName);
-      // The broker consumes the claim; deny+skip signals the skip only after its reject lands.
-      if (action !== null) tryClaimPendingRequestDecision(state, { requestID: gateHead.requestID, generation: gateHead.generation, action });
       if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }
