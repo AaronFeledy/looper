@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Event } from "@opencode-ai/sdk/v2";
 
 import { consumeSessionEvents, createSessionEventConsumer, renderSession } from "../src/lib/event-consumer.ts";
+import { OwnedSessionSet } from "../src/lib/owned-session-set.ts";
 import type {
   PermissionAskedPayload,
   PermissionRepliedPayload,
@@ -262,6 +263,81 @@ describe("request lifecycle callbacks", () => {
     );
 
     expect(fired).toBe(0);
+  });
+
+  test("delivers permission and question lifecycle events for an owned child session", async () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+    ownedSessions.addChild("ses_child");
+    const delivered: string[] = [];
+
+    // When
+    await consumeSessionEvents(
+      makeStream([
+        permissionAsked("per_child", "ses_child"),
+        permissionReplied("per_child", "once", "ses_child"),
+        questionAsked("que_child", "ses_child"),
+        questionReplied("que_child", "ses_child"),
+        questionRejected("que_child_rejected", "ses_child"),
+      ]),
+      SID,
+      {
+        pushLine: () => {},
+        ownedSessionIDs: () => ownedSessions.ids(),
+        onPermissionAsked: (payload) => delivered.push(payload.requestID),
+        onPermissionReplied: (payload) => delivered.push(payload.requestID),
+        onQuestionAsked: (payload) => delivered.push(payload.requestID),
+        onQuestionReplied: (payload) => delivered.push(payload.requestID),
+        onQuestionRejected: (payload) => delivered.push(payload.requestID),
+      },
+    );
+
+    // Then
+    expect(delivered).toEqual(["per_child", "per_child", "que_child", "que_child", "que_child_rejected"]);
+  });
+
+  test("keeps non-request events on the strict primary-session filter", async () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+    ownedSessions.addChild("ses_child");
+    let fired = 0;
+
+    // When
+    await consumeSessionEvents(makeStream([sessionIdle("ses_child"), todoUpdated("ses_child")]), SID, {
+      pushLine: () => {},
+      ownedSessionIDs: () => ownedSessions.ids(),
+      onSessionIdle: () => { fired += 1; },
+      onTodoUpdated: () => { fired += 1; },
+    });
+
+    // Then
+    expect(fired).toBe(0);
+  });
+});
+
+describe("OwnedSessionSet", () => {
+  test("seeds the primary session and adds and removes child sessions", () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+
+    // When
+    ownedSessions.addChild("ses_child");
+    ownedSessions.removeChild(SID);
+    ownedSessions.removeChild("ses_child");
+
+    // Then
+    expect([...ownedSessions.ids()]).toEqual([SID]);
+  });
+
+  test("excludes title-purpose child sessions", () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+
+    // When
+    ownedSessions.addChild("ses_title", "title");
+
+    // Then
+    expect([...ownedSessions.ids()]).toEqual([SID]);
   });
 });
 

@@ -40,6 +40,7 @@ export type RunnerEventControllerOptions = {
   pushLine: (line: string) => void;
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
+  ownedSessionIDs?: () => ReadonlySet<string>;
 };
 
 export function createRunnerEventController({
@@ -51,6 +52,7 @@ export function createRunnerEventController({
   pushLine,
   permissionPolicy,
   questionPolicy,
+  ownedSessionIDs,
 }: RunnerEventControllerOptions): Pick<
   EventConsumerCallbacks,
   "onPermissionAsked" | "onPermissionReplied" | "onQuestionAsked" | "onQuestionReplied" | "onQuestionRejected" | "onTodoUpdated"
@@ -75,9 +77,10 @@ export function createRunnerEventController({
   };
 
   const alreadyHandling = (requestID: string): boolean => handledRequestIDs.has(requestID) || inFlightReplies.has(requestID);
+  const ownsRequestSession = (sessionID: string): boolean => sessionID === activeSessionID || ownedSessionIDs?.().has(sessionID) === true;
 
   const onPermissionAsked = (payload: PermissionAskedPayload): void => {
-    if (payload.sessionID !== activeSessionID) return;
+    if (!ownsRequestSession(payload.sessionID)) return;
     if (alreadyHandling(payload.requestID)) return;
 
     // Pending state is set for the "ask" path too (and left set until the
@@ -113,7 +116,7 @@ export function createRunnerEventController({
   };
 
   const onQuestionAsked = (payload: QuestionAskedPayload): void => {
-    if (payload.sessionID !== activeSessionID) return;
+    if (!ownsRequestSession(payload.sessionID)) return;
     if (alreadyHandling(payload.requestID)) return;
 
     enqueuePendingQuestion(state, {
@@ -145,14 +148,14 @@ export function createRunnerEventController({
   return {
     onPermissionAsked,
     onPermissionReplied: (payload) => {
-      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
+      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onQuestionAsked,
     onQuestionReplied: (payload) => {
-      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
+      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onQuestionRejected: (payload) => {
-      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
+      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onTodoUpdated: (payload) => {
       if (payload.sessionID === activeSessionID) setTodos(state, payload.todos);

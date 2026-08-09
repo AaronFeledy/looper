@@ -5,6 +5,7 @@ import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../
 import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
+import { OwnedSessionSet } from "../lib/owned-session-set.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
@@ -146,12 +147,14 @@ export async function runOpenCodeStep({
     }
     pushLine(`[looper] session=${sid}`);
     const boundSessionID = sid;
+    const ownedSessions = new OwnedSessionSet(boundSessionID);
     const hiddenUserMessageIDs = new Set<string>(activeStep.looperMessageIDs ?? []);
     setStepPromptText(state, stepIndex, prompt);
 
     const consumer = createSessionEventConsumer(boundSessionID, {
       pushLine,
       pushLines,
+      ownedSessionIDs: () => ownedSessions.ids(),
       onEvent: (event, at) => {
         pushAgentEvent(state, event, at);
         pushStepOutputEvent(state, stepIndex, event, at);
@@ -162,6 +165,7 @@ export async function runOpenCodeStep({
         repoDir,
         step,
         activeSessionID: boundSessionID,
+        ownedSessionIDs: () => ownedSessions.ids(),
         pushLine,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
         ...(questionPolicy !== undefined ? { questionPolicy } : {}),

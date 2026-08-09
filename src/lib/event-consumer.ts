@@ -44,6 +44,7 @@ export type EventConsumerCallbacks = {
   onQuestionRejected?: (payload: QuestionRejectedPayload) => void;
   onSessionIdle?: (payload: SessionIdlePayload) => void;
   onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
+  ownedSessionIDs?: () => ReadonlySet<string>;
   /**
    * User message IDs that should not be printed (e.g. looper's own step prompt).
    * Mutable: callers may add IDs after the consumer is constructed (prompt is
@@ -51,6 +52,14 @@ export type EventConsumerCallbacks = {
    */
   hiddenUserMessageIDs?: Set<string>;
 };
+
+function isOwnedRequestEvent(type: Event["type"]): boolean {
+  return type === "permission.asked" ||
+    type === "permission.replied" ||
+    type === "question.asked" ||
+    type === "question.replied" ||
+    type === "question.rejected";
+}
 
 type TextPartKind = "text" | "reasoning" | "user";
 
@@ -429,7 +438,11 @@ export function createSessionEventConsumer(
   const handleEvent = (event: Event): void => {
     const evSid = eventSessionID(event);
     if (debug) emitAt(Date.now(), { kind: "debug.event", eventType: event.type, ...(evSid !== undefined ? { sessionID: evSid } : {}) });
-    if (evSid !== undefined && evSid !== sessionID) return;
+    if (
+      evSid !== undefined &&
+      evSid !== sessionID &&
+      (!isOwnedRequestEvent(event.type) || callbacks.ownedSessionIDs?.().has(evSid) !== true)
+    ) return;
 
     switch (event.type) {
       case "message.updated": {
