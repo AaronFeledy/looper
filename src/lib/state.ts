@@ -477,8 +477,16 @@ export function createLoopState({
 
 function enqueuePendingRequest(state: LoopState, pending: PendingRequest): void {
   const index = state.pendingRequests.findIndex(({ requestID }) => requestID === pending.requestID);
-  if (index === -1) state.pendingRequests.push(pending);
-  else state.pendingRequests[index] = pending;
+  if (index === -1) {
+    state.pendingRequests.push(pending);
+    notifyStateChange();
+    return;
+  }
+  const existing = state.pendingRequests[index];
+  // Same generation already tracks this id (possibly claimed). Reconcile re-feeds open
+  // lists through enqueue; never clobber status/decision/askedAt for that generation.
+  if (existing !== undefined && existing.generation === pending.generation) return;
+  state.pendingRequests[index] = pending;
   notifyStateChange();
 }
 

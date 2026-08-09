@@ -225,6 +225,55 @@ describe("permission gate keys", () => {
     expect(state.pendingRequests[0]).toMatchObject({ status: "open" });
   });
 
+
+  test("permission keys win over a still-open help overlay", () => {
+    // Given help was left open when a permission ask arrived (help flag still true).
+    const state = gatedState();
+    state.helpVisible = true;
+    const fake = fakeRenderer();
+    bindKeys(fake.renderer, state, noopHooks());
+
+    // When the operator presses once-allow.
+    fake.press({ name: "y" });
+
+    // Then the gate claims the decision instead of only dismissing help.
+    expect(state.pendingRequests[0]).toMatchObject({ requestID: "per_1", status: "resolving", decision: "once" });
+    expect(state.helpVisible).toBe(true);
+  });
+
+  test("permission keys win over a still-open prompt modal", () => {
+    // Given the prompt modal flag is still true under the permission gate.
+    const state = gatedState();
+    state.promptModalVisible = true;
+    const fake = fakeRenderer();
+    bindKeys(fake.renderer, state, noopHooks());
+
+    // When deny is pressed.
+    fake.press({ name: "d" });
+
+    // Then the gate claims reject rather than only closing the prompt modal.
+    expect(state.pendingRequests[0]).toMatchObject({ status: "resolving", decision: "reject" });
+    expect(state.promptModalVisible).toBe(true);
+  });
+
+  test("help/prompt/config toggles stay blocked while the gate owns focus", () => {
+    // Given a permission request gating the run.
+    const state = gatedState();
+    const fake = fakeRenderer();
+    bindKeys(fake.renderer, state, noopHooks());
+
+    // When overlay toggle keys are pressed.
+    fake.press({ name: "?", sequence: "?" });
+    fake.press({ name: "v" });
+    fake.press({ name: "c" });
+
+    // Then no lower modal opens under the gate.
+    expect(state.helpVisible).toBe(false);
+    expect(state.promptModalVisible).toBe(false);
+    expect(state.configModalVisible).toBe(false);
+    expect(state.pendingRequests[0]).toMatchObject({ status: "open" });
+  });
+
   test("unrelated keys are swallowed while the gate is open", () => {
     // Given a queued permission.
     const state = gatedState();

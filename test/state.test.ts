@@ -249,6 +249,67 @@ describe("pending request queue", () => {
     expect(state.pendingRequests[0]).toMatchObject({ requestID: "req_perm", status: "open" });
   });
 
+
+  test("re-enqueue of the same generation preserves a claimed decision", () => {
+    // Given a claimed permission head.
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: [],
+      generation: 5,
+      askedAt: 1000,
+    });
+    tryClaimPendingRequestDecision(state, { requestID: "req_perm", action: "once", generation: 5 });
+
+    // When the same id is enqueued again for the same generation (reconcile path).
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: ["src/**"],
+      generation: 5,
+      askedAt: 9999,
+    });
+
+    // Then status, decision, and original askedAt survive.
+    expect(state.pendingRequests[0]).toMatchObject({
+      requestID: "req_perm",
+      status: "resolving",
+      decision: "once",
+      generation: 5,
+      askedAt: 1000,
+      patterns: [],
+    });
+  });
+
+  test("re-enqueue with a new generation replaces the prior entry", () => {
+    // Given a prior-generation open request.
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: [],
+      generation: 1,
+    });
+
+    // When a later broker generation reuses the id.
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "bash",
+      patterns: ["*"],
+      generation: 2,
+    });
+
+    // Then the new generation entry replaces it.
+    expect(state.pendingRequests).toMatchObject([
+      { requestID: "req_perm", permission: "bash", generation: 2, status: "open", patterns: ["*"] },
+    ]);
+  });
+
   test("consumes a claimed decision and clears a request by identity", () => {
     // Given
     const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
