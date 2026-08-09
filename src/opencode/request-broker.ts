@@ -146,12 +146,16 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
   };
 
   const armDeadline = (requestID: string, askedAt: number): void => {
+    clearDeadline(requestID);
     const remaining = Math.max(1, askedAt + gateMaxMs - (options.now?.() ?? Date.now()));
     deadlines.set(requestID, scheduler.setTimeout(() => onDeadline(requestID), remaining));
   };
 
   const permissionAsked = (payload: Parameters<NonNullable<RequestBroker["callbacks"]["onPermissionAsked"]>>[0]): void => {
     if (!ownsSession(payload.sessionID) || handled.has(payload.requestID) || inFlight.has(payload.requestID)) return;
+    // Reconcile re-lists open requests; keep an existing same-generation entry intact
+    // (including a human claim the poller has not consumed yet).
+    if (options.state.pendingRequests.some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
     const askedAt = options.now?.() ?? Date.now();
     enqueuePendingPermission(options.state, {
       requestID: payload.requestID,
@@ -177,6 +181,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
 
   const questionAsked = (payload: Parameters<NonNullable<RequestBroker["callbacks"]["onQuestionAsked"]>>[0]): void => {
     if (!ownsSession(payload.sessionID) || handled.has(payload.requestID) || inFlight.has(payload.requestID)) return;
+    if (options.state.pendingRequests.some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
     const askedAt = options.now?.() ?? Date.now();
     enqueuePendingQuestion(options.state, { requestID: payload.requestID, sessionID: payload.sessionID, questions: payload.questions, generation, askedAt });
     armDeadline(payload.requestID, askedAt);
