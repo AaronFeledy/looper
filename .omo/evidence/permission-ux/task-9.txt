@@ -1,0 +1,53 @@
+task 9 - TUI wire modal + keys + bell + help/footer
+====================================================
+
+Implementation
+- src/tui/permission-dialog.ts (new) - createPermissionDialog: floating gate modal,
+  zIndex 300 (above help/prompt/config), visible only while modalFocusWinner(state) === "permission".
+- src/tui/permission-gate.ts - gateModalContent(requests) + queueSummaryLine(count): head details,
+  lastError (D-error reclaim), decision keys, queue depth. Pure, no renderer/client imports.
+- src/tui/keys.ts - gate key block placed after the esc branch and before the escConfirm dismissal so
+  modalFocusWinner precedence (recovery > escConfirm > permission) is the single source of truth.
+  y/a/d/s -> tryClaimPendingRequestDecision({requestID, generation, action}) against the queue head
+  (permission) / d,s (question). q passes through to quit; ctrl-c interrupt handled earlier; every
+  other key is swallowed by the gate. The TUI never calls onSkip - the broker fires skip only after
+  its reject lands (src/opencode/request-broker.ts:108).
+- src/config/tunables.ts - permissionBellEnabled(): LOOPER_PERMISSION_BELL, default ON,
+  "0"/"false"/"off"/"no" opt out.
+- src/tui/permission-bell.ts (new) - createPermissionBell(state, {enabled, isTTY, write}); one BEL
+  (\u0007) per batch of newly gated requests, never when disabled or off-TTY, forgets resolved ids so a
+  re-ask alerts again, returns a detach fn.
+- src/tui/help-overlay.ts - "y/a/d/s answer permission ask" + "d/s reject/skip a question";
+  dialog maxHeight 18 -> 20 so all 17 bindings still render at 40x24.
+- src/tui/footer.ts - gate hint after the recovery branch: "agent is waiting on you - [y] once
+  [a] always  [d] deny  [s] deny + skip  (+N waiting)  [q]uit" (question head shows [d]/[s]).
+- src/tui/pending-request-panel.ts - per-request in-looper keys + queue-depth summary line.
+- src/main.ts - dialog composed above the pending-request panel; bell created next to bindKeys and
+  detached on both the normal finally and the force-kill path.
+
+Tests (TDD: red first - "Cannot find module ../src/tui/permission-bell.ts")
+- test/permission-gate-ui.test.ts (28 tests, synthetic keys + createTestRenderer frames):
+  y/a/d/s claim the head with its generation and do NOT call onSkip; q quits during the gate;
+  a second decision key cannot overwrite a claim; the follower is only claimable after the head
+  leaves the queue; question head takes d/s only; recovery and an armed esc confirmation outrank the
+  gate; esc still arms the stop confirmation; ctrl+key never claims; p/h are swallowed while gated;
+  bell rings once per new request, re-rings on a re-asked id, silent when disabled/non-TTY, silent
+  after detach; LOOPER_PERMISSION_BELL parse table; help/footer/panel/dialog surfaces, dialog hidden
+  while recovery owns focus.
+
+Verification
+- bun run typecheck -> exit 0
+- bun test -> 1196 pass, 0 fail, 107 files (105.67s)
+- bun test (gate-affected files) -> 98 pass, 0 fail
+- lsp diagnostics src/tui -> 0 errors (2 pre-existing hints in agent-stream.ts, untouched)
+
+Scope guards
+- No free-text / option-choice question UI: questions expose reject/skip only, plus the existing
+  "use an attached OpenCode client" hint.
+- Quit is always reachable during the gate (test: "q still quits while the gate is open").
+- No OpencodeClient import under src/tui (rg clean); no `as any` / `@ts-ignore` in touched files.
+- README/AGENTS.md docs for LOOPER_PERMISSION_BELL are deliberately left to todo 11 (docs todo).
+
+Known size debt (pre-existing, not introduced here)
+- src/main.ts 835 pure LOC (was ~826; +10 lines of compose/cleanup wiring).
+- src/tui/keys.ts 236 pure LOC (was ~228) - warning band; the next addition should split the handler.

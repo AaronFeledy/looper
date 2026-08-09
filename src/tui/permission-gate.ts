@@ -1,4 +1,4 @@
-import type { PendingPermission, PendingQuestion } from "../lib/state.ts";
+import type { PendingPermission, PendingQuestion, PendingRequest } from "../lib/state.ts";
 
 export type PermissionKeyAction = "once" | "always" | "reject" | "skip";
 export type QuestionKeyAction = "reject" | "skip";
@@ -72,4 +72,23 @@ export function modalFocusWinner(state: ModalFocusState): ModalFocusWinner {
   if (state.promptModalVisible) return "prompt";
   if (state.configModalVisible) return "config";
   return "none";
+}
+
+export type GateModalContent = { readonly title: string; readonly body: string };
+
+/** One line naming how deep the human gate queue is, or null when only the head is waiting. */
+export function queueSummaryLine(count: number): string | null {
+  return count > 1 ? `${count} requests waiting - answered in order, starting with the first` : null;
+}
+
+export function gateModalContent(requests: readonly PendingRequest[]): GateModalContent | null {
+  const head = requests[0];
+  if (head === undefined) return null;
+  const failure = head.lastError === undefined ? [] : [`Last attempt failed: ${head.lastError}`];
+  const summary = queueSummaryLine(requests.length);
+  const lines = head.kind === "permission" ? permissionModalLines(head) : questionModalLines(head);
+  return {
+    title: head.kind === "permission" ? "permission" : "question",
+    body: [...failure, ...lines, ...(summary === null ? [] : [summary])].join("\n"),
+  };
 }

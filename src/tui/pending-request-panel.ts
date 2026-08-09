@@ -2,6 +2,7 @@ import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } fro
 
 import type { LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
+import { queueSummaryLine } from "./permission-gate.ts";
 import { truncateDisplay } from "./text-layout.ts";
 
 const QUESTION_TEXT_MAX_WIDTH = 100;
@@ -21,13 +22,15 @@ export function pendingRequestLines(state: LoopState): string[] {
     if (request.kind === "permission") {
       const patterns = request.patterns.length > 0 ? ` — ${request.patterns.join(", ")}` : "";
       lines.push(`Agent is waiting on permission '${request.permission}'${patterns}`);
-      lines.push(`Reply from an attached opencode client, or set permissionPolicy.${request.permission} in looper.yml`);
+      lines.push(`[y] once  [a] always  [d] deny  [s] deny + skip  -  or an attached opencode client / permissionPolicy.${request.permission}`);
     } else {
       const text = firstQuestionText(request.questions);
       lines.push(text === undefined ? "Agent asked a question" : `Agent asked: ${text}`);
-      lines.push("Answer from an attached opencode client, or set questionPolicy: reject in looper.yml");
+      lines.push("[d] reject  [s] skip  -  richer answers need an attached opencode client / questionPolicy: reject");
     }
   }
+  const summary = queueSummaryLine(state.pendingRequests.length);
+  if (summary !== null) lines.push(summary);
   return lines;
 }
 

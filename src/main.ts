@@ -16,7 +16,7 @@ import { startAgentRegistry, type AgentRegistry } from "./opencode/agent-registr
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import { computeRunResumePlan, runEngine, type RunResumePlan } from "./engine/run-engine.ts";
-import { stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
+import { permissionBellEnabled, stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
@@ -55,6 +55,8 @@ import { createConfigOverlay } from "./tui/config-overlay.ts";
 import { createHelpOverlay } from "./tui/help-overlay.ts";
 import { createPromptOverlay } from "./tui/prompt-overlay.ts";
 import { createPendingRequestPanel } from "./tui/pending-request-panel.ts";
+import { createPermissionBell } from "./tui/permission-bell.ts";
+import { createPermissionDialog } from "./tui/permission-dialog.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
@@ -319,6 +321,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let server: ServerHandle | undefined;
   let cleanupBootInterrupt: (() => void) | undefined;
   let cleanupKeys: (() => void) | undefined;
+  let cleanupBell: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let agentRegistry: AgentRegistry | undefined;
   let agentRegistryController: { stop: () => void } | undefined;
@@ -365,6 +368,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       try {
         cleanupBootInterrupt?.();
         cleanupKeys?.();
+        cleanupBell?.();
       } catch (error) { // no-excuse-ok: catch -- force-kill cleanup must not block the hard exit
         ignoreForceKillCleanupError(error);
       }
@@ -547,6 +551,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     root.add(createHelpOverlay(renderer, state));
     root.add(createPromptOverlay(renderer, state));
     root.add(createConfigOverlay(renderer, state, configDir));
+    root.add(createPermissionDialog(renderer, state));
     root.add(createPendingRequestPanel(renderer, state));
     root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));
@@ -664,6 +669,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     cleanupBootInterrupt?.();
     cleanupBootInterrupt = undefined;
+
+    cleanupBell = createPermissionBell(state, {
+      enabled: permissionBellEnabled(),
+      isTTY: process.stdout.isTTY === true,
+      write: (text) => {
+        process.stdout.write(text);
+      },
+    });
 
     cleanupKeys = bindKeys(renderer, state, {
       onEscape: () => {
@@ -810,6 +823,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   } finally {
     cleanupBootInterrupt?.();
     cleanupKeys?.();
+    cleanupBell?.();
     agentRegistryController?.stop();
     agentRegistry?.stop();
     backgroundAgentStreamer?.stop();

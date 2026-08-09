@@ -11,6 +11,8 @@ export function helpLines(): string[] {
     "s       skip active step",
     "r       restart in fresh session",
     "e       end after this iteration",
+    "y/a/d/s answer permission ask",
+    "d/s     reject/skip a question",
     "esc esc stop; pre-run reset ckpt",
     "ctrl-c  copy/stop; 2x: force kill",
     "h history; L/R iter, U/D step",
@@ -29,7 +31,7 @@ export function createHelpOverlay(renderer: CliRenderer, state: LoopState): BoxR
     borderColor: "#89b4fa",
     width: "95%",
     maxWidth: 88,
-    maxHeight: 18,
+    maxHeight: 20,
     isVisible: (s) => s.helpVisible,
     content: () => ({
       title: "keys",

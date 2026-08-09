@@ -17,6 +17,19 @@ function requiredPositiveIntegerEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+const FALSE_ENV_VALUES = new Set(["0", "false", "off", "no"]);
+
+function booleanEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (value === undefined || value === "") return fallback;
+  return !FALSE_ENV_VALUES.has(value);
+}
+
+export function permissionBellEnabled(): boolean {
+  // Terminal bell when a request starts waiting on a human. On by default; the TUI only writes it on a TTY.
+  return booleanEnv("LOOPER_PERMISSION_BELL", true);
+}
+
 export function permissionGateMaxMs(): number {
   return requiredPositiveIntegerEnv("LOOPER_PERMISSION_GATE_MAX_MS", DEFAULT_PERMISSION_GATE_MAX_MS);
 }
