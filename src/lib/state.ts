@@ -13,6 +13,7 @@ import type {
   PendingRequestDecisionAction,
   PendingRequestIdentity,
 } from "../core/pending-request.ts";
+import { createRunControl, type RunControl } from "../engine/run-control.ts";
 
 export type {
   FinalizeStepStatus,
@@ -230,6 +231,7 @@ export type LoopState = {
   manualStepSelection: boolean;
   activeStepIndex: number | null;
   started: boolean;
+  control: RunControl;
   paused: boolean;
   quitting: boolean;
   stopAfterIteration: boolean;
@@ -394,9 +396,11 @@ function notifyStateChange(): void {
 export function createLoopState({
   maxIterations,
   stepNames,
+  control = createRunControl(),
 }: {
   maxIterations: number;
   stepNames: string[];
+  control?: RunControl;
 }): LoopState {
   return {
     iteration: 0,
@@ -411,12 +415,43 @@ export function createLoopState({
     manualStepSelection: false,
     activeStepIndex: null,
     started: false,
-    paused: false,
-    quitting: false,
-    stopAfterIteration: false,
-    skipRequested: false,
-    restartRequested: false,
-    restartReason: undefined,
+    control,
+    get paused() {
+      return control.paused;
+    },
+    set paused(value: boolean) {
+      control.setPaused(value);
+    },
+    get quitting() {
+      return control.quitting;
+    },
+    set quitting(value: boolean) {
+      control.setQuitting(value);
+    },
+    get stopAfterIteration() {
+      return control.stopAfterIteration;
+    },
+    set stopAfterIteration(value: boolean) {
+      control.setStopAfterIteration(value);
+    },
+    get skipRequested() {
+      return control.skipRequested;
+    },
+    set skipRequested(value: boolean) {
+      control.setSkipRequested(value);
+    },
+    get restartRequested() {
+      return control.restartRequested;
+    },
+    set restartRequested(value: boolean) {
+      control.setRestartRequested(value);
+    },
+    get restartReason() {
+      return control.restartReason;
+    },
+    set restartReason(value: StepRestartReason | undefined) {
+      control.setRestartReason(value);
+    },
     recovery: null,
     pendingRequests: [],
     todos: [],

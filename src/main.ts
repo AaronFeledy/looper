@@ -16,6 +16,7 @@ import { startAgentRegistry, type AgentRegistry } from "./opencode/agent-registr
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import { computeRunResumePlan, runEngine, type RunResumePlan } from "./engine/run-engine.ts";
+import { createRunControl } from "./engine/run-control.ts";
 import { permissionBellEnabled, stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
 import {
   applyManagedOpencodeResources,
@@ -143,9 +144,7 @@ function resetIterationState(
   state.iterationStartedAt = Date.now();
   state.activeStepIndex = null;
   state.started = true;
-  state.skipRequested = false;
-  state.restartRequested = false;
-  state.restartReason = undefined;
+  state.control.clearStepRequests();
   state.agentLines = [];
   state.agentEvents = [];
   state.agentEventTimes = [];
@@ -157,14 +156,14 @@ function resetIterationState(
 }
 
 async function waitForStart(state: ReturnType<typeof createLoopState>): Promise<void> {
-  while (!state.started && !state.quitting && !state.stopAfterIteration) {
+  while (!state.started && !state.control.quitting && !state.control.stopAfterIteration) {
     notify();
     await Bun.sleep(100);
   }
 }
 
 async function waitForRecoveryChoice(state: ReturnType<typeof createLoopState>, runStateStore: RunStateStore): Promise<"restart" | "nudge" | "quit"> {
-  while (state.recoveryChoice === null && !state.quitting && !runStateStore.stopFileExists() && !runStateStore.stopAfterIterationFileExists()) {
+  while (state.recoveryChoice === null && !state.control.quitting && !runStateStore.stopFileExists() && !runStateStore.stopAfterIterationFileExists()) {
     notify();
     await Bun.sleep(100);
   }
@@ -202,7 +201,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   }
   let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
 
-  const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name) });
+  const control = createRunControl();
+  const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name), control });
   state.branch = await currentBranch();
   state.started = options.start;
 
@@ -338,16 +338,16 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   };
 
   const requestQuit = (reason: string) => {
-    if (state.quitting) return;
-    state.quitting = true;
+    if (control.quitting) return;
+    control.setQuitting(true);
     exitReason = reason;
     runStateStore.writeStop(reason);
     notify();
   };
 
   const requestStopAfterIteration = (reason: string) => {
-    if (state.stopAfterIteration) return;
-    state.stopAfterIteration = true;
+    if (control.stopAfterIteration) return;
+    control.setStopAfterIteration(true);
     exitReason = reason;
     runStateStore.writeStopAfterIteration(reason);
     notify();
@@ -383,7 +383,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     const now = Date.now();
     const doublePress = now - lastInterruptAt <= FORCE_KILL_WINDOW_MS;
     lastInterruptAt = now;
-    if (doublePress || state.quitting) {
+    if (doublePress || control.quitting) {
       forceKill();
       return;
     }
@@ -660,8 +660,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         }
       }
       state.started = true;
-      state.stopAfterIteration = false;
-      state.quitting = false;
+      control.setStopAfterIteration(false);
+      control.setQuitting(false);
       notify();
     };
 
@@ -694,7 +694,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       },
       onSkip: () => {
         if (state.activeStepIndex === null) return;
-        state.skipRequested = true;
+        control.requestSkip();
         notify();
       },
       onStart: () => {
@@ -702,15 +702,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       },
       onRestart: () => {
         if (state.activeStepIndex === null) return;
-        state.restartRequested = true;
-        state.restartReason = "manual";
+        control.requestRestart("manual");
         notify();
       },
       onStopAfterIteration: () => {
         requestStopAfterIteration("finish current iteration, then stop");
       },
       onTogglePause: () => {
-        state.paused = !state.paused;
+        control.togglePaused();
         notify();
       },
     });
@@ -778,7 +777,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         },
         onStepFailure: async ({ error }) => {
           state.started = false;
-          state.paused = false;
+          control.setPaused(false);
           state.recovery = {
             stepName: error.stepName ?? "step",
             reason: error.message,
@@ -790,7 +789,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           state.recovery = null;
           state.recoveryChoice = null;
           notify();
-          if (choice === "quit" || state.quitting || state.stopAfterIteration || runStateStore.stopFileExists() || runStateStore.stopAfterIterationFileExists()) {
+          if (choice === "quit" || control.quitting || control.stopAfterIteration || runStateStore.stopFileExists() || runStateStore.stopAfterIterationFileExists()) {
             recoveryExitReason = exitReason ?? error.message;
             return "quit";
           }
@@ -801,13 +800,11 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           disarmEscConfirm();
           state.resumable = false;
           state.started = true;
-          state.paused = false;
-          state.stopAfterIteration = false;
-          state.quitting = false;
+          control.clearRunRequests();
           notify();
         },
         waitBetweenIterations: async ({ seconds, label: waitLabel }) => {
-          await waitWithCountdown(state, seconds, waitLabel, true);
+          await waitWithCountdown(control, seconds, waitLabel, true);
         },
       },
     });

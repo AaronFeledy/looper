@@ -1,4 +1,5 @@
-import { notify, type LoopState } from "./state.ts";
+import type { RunControlView } from "../engine/run-control.ts";
+import { notify } from "./state.ts";
 import { stopFileExists } from "./state-files.ts";
 
 function elapsedSeconds(startedAt: number): number {
@@ -44,9 +45,9 @@ export function divider(title: string, colorize: (text: string) => string = ui.c
   return `${colorize(prefix)}${ui.dim(dashes)} ${ui.dim(timestamp)}\n`;
 }
 
-export async function waitWithCountdown(state: LoopState, seconds: number, labelText: string, isTty = false): Promise<void> {
+export async function waitWithCountdown(control: RunControlView, seconds: number, labelText: string, isTty = false): Promise<void> {
   const startedAt = Date.now();
-  while (elapsedSeconds(startedAt) < seconds && !state.quitting && !stopFileExists()) {
+  while (elapsedSeconds(startedAt) < seconds && !control.quitting && !stopFileExists()) {
     if (!isTty) {
       const remaining = Math.max(0, seconds - elapsedSeconds(startedAt));
       process.stderr.write(`${ui.yellow("⏳ waiting")} ${remaining}s ${ui.dim("·")} ${labelText} ${ui.dim("· resumes")} ${resumeTime(remaining)}\n`);
