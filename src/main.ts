@@ -29,12 +29,12 @@ import { lookupServerVersion } from "./lib/server-version.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import {
+  applyResumableBootUi,
   cancelPendingNotify,
   createLoopState,
   createStepRow,
   dismissEscConfirm,
   type EscConfirmMode,
-  hydrateResumableBootStep,
   notify,
   pushAgentLine,
   resetIterationNavigationState,
@@ -281,38 +281,31 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let firstIterationWasResumed = firstIterationResumed;
   let firstIterationResumePoint = firstIterationStartStepIndex;
 
-  // Make a resumable boot look like the prior run never exited: mark the
-  // already-completed steps of the resume iteration as done and pre-select the
-  // step we will resume on. On a clean slate, pre-select the first step so it is
-  // obvious that pressing enter starts it. Also rehydrate in-flight checkpoint
-  // fields (promptText/session/title) onto that row so idle-TUI actions like `v`
-  // work before [g]o starts the engine.
+  // Make a resumable boot look like the prior run never exited: mark prior
+  // steps done, attach stepSessions, hydrate the resume target, and select it.
+  // On a clean slate, pre-select the first step so enter obviously starts it.
   if (!state.started) {
     if (firstIterationResumed) {
-      state.resumable = true;
-      for (const step of state.steps.slice(0, firstIterationStartStepIndex)) {
-        step.status = "done";
-        step.finishedAt ??= Date.now();
-      }
-      if (state.steps.length > 0) {
-        const resumeStepIndex = Math.min(firstIterationStartStepIndex, state.steps.length - 1);
-        const resumeStep = state.steps[resumeStepIndex];
-        if (resumeStep !== undefined) {
-          hydrateResumableBootStep(resumeStep, {
-            ...(firstIterationResume?.promptText !== undefined ? { promptText: firstIterationResume.promptText } : {}),
-            ...(firstIterationResume?.sessionID !== undefined ? { sessionID: firstIterationResume.sessionID } : {}),
-            ...(firstIterationResume?.looperMessageIDs !== undefined
-              ? { looperMessageIDs: firstIterationResume.looperMessageIDs }
-              : {}),
-            ...(firstIterationTitle !== undefined ? { title: firstIterationTitle } : {}),
-          });
-        }
-      }
-    }
-    if (state.steps.length > 0) {
-      state.selectedStepIndex = firstIterationResumed
-        ? Math.min(firstIterationStartStepIndex, state.steps.length - 1)
-        : 0;
+      applyResumableBootUi(state, {
+        resumed: true,
+        startIteration,
+        startStepIndex: firstIterationStartStepIndex,
+        ...(firstIterationResume !== undefined
+          ? {
+              resume: {
+                ...(firstIterationResume.promptText !== undefined ? { promptText: firstIterationResume.promptText } : {}),
+                ...(firstIterationResume.sessionID !== undefined ? { sessionID: firstIterationResume.sessionID } : {}),
+                ...(firstIterationResume.looperMessageIDs !== undefined
+                  ? { looperMessageIDs: firstIterationResume.looperMessageIDs }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(firstIterationTitle !== undefined ? { title: firstIterationTitle } : {}),
+        ...(iterationStepSessions.length > 0 ? { stepSessions: iterationStepSessions } : {}),
+      });
+    } else if (state.steps.length > 0) {
+      state.selectedStepIndex = 0;
       state.selectedBackgroundSessionID = null;
     }
   }
@@ -606,6 +599,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       state.manualStepSelection = false;
       state.activeStepIndex = null;
       state.resumable = false;
+      state.iteration = 0;
       notify();
     };
     const handleEscape = () => {

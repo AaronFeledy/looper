@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  applyResumableBootUi,
   cancelPendingNotify,
   clearPendingRequest,
   consumePendingRequestDecision,
@@ -327,5 +328,78 @@ describe("hydrateResumableBootStep", () => {
     ids.push("msg_b");
 
     expect(step.looperMessageIDs).toEqual(["msg_a"]);
+  });
+});
+
+describe("applyResumableBootUi", () => {
+  test("marks prior steps done, hydrates the resume target, and selects it before start", () => {
+    const state = createLoopState({ maxIterations: 5, stepNames: ["build", "review", "publish"] });
+
+    applyResumableBootUi(state, {
+      resumed: true,
+      startIteration: 2,
+      startStepIndex: 1,
+      resume: {
+        promptText: "continue review",
+        sessionID: "ses_review",
+        looperMessageIDs: ["msg_looper"],
+      },
+      title: "Widget export",
+      stepSessions: [
+        { stepIndex: 0, sessionID: "ses_build" },
+        { stepIndex: 1, sessionID: "ses_review_stale" },
+      ],
+    });
+
+    expect(state.resumable).toBe(true);
+    expect(state.iteration).toBe(2);
+    expect(state.selectedStepIndex).toBe(1);
+    expect(state.selectedBackgroundSessionID).toBeNull();
+
+    expect(state.steps[0]?.status).toBe("done");
+    expect(state.steps[0]?.finishedAt).toBeDefined();
+    expect(state.steps[0]?.sessionID).toBe("ses_build");
+    expect(state.steps[0]?.title).toBe("Widget export");
+
+    expect(state.steps[1]?.status).toBe("pending");
+    expect(state.steps[1]?.promptText).toBe("continue review");
+    expect(state.steps[1]?.sessionID).toBe("ses_review");
+    expect(state.steps[1]?.looperMessageIDs).toEqual(["msg_looper"]);
+    expect(state.steps[1]?.title).toBe("Widget export");
+
+    expect(state.steps[2]?.status).toBe("pending");
+    expect(state.steps[2]?.sessionID).toBeUndefined();
+  });
+
+  test("is a no-op when not resumed or already started", () => {
+    const fresh = createLoopState({ maxIterations: 3, stepNames: ["a", "b"] });
+    applyResumableBootUi(fresh, { resumed: false, startIteration: 1, startStepIndex: 1 });
+    expect(fresh.resumable).toBe(false);
+    expect(fresh.steps[0]?.status).toBe("pending");
+    expect(fresh.selectedStepIndex).toBeNull();
+
+    const started = createLoopState({ maxIterations: 3, stepNames: ["a", "b"] });
+    started.started = true;
+    applyResumableBootUi(started, { resumed: true, startIteration: 1, startStepIndex: 1 });
+    expect(started.resumable).toBe(false);
+    expect(started.steps[0]?.status).toBe("pending");
+  });
+
+  test("selects step 0 when resuming the first step of an iteration", () => {
+    const state = createLoopState({ maxIterations: 3, stepNames: ["build", "review"] });
+
+    applyResumableBootUi(state, {
+      resumed: true,
+      startIteration: 4,
+      startStepIndex: 0,
+      resume: { sessionID: "ses_build" },
+    });
+
+    expect(state.resumable).toBe(true);
+    expect(state.iteration).toBe(4);
+    expect(state.selectedStepIndex).toBe(0);
+    expect(state.steps[0]?.sessionID).toBe("ses_build");
+    expect(state.steps[0]?.status).toBe("pending");
+    expect(state.steps[1]?.status).toBe("pending");
   });
 });

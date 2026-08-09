@@ -1317,6 +1317,70 @@ export function hydrateResumableBootStep(
   if (checkpoint.title !== undefined) step.title = checkpoint.title;
 }
 
+/**
+ * Reflect a durable resume checkpoint onto the idle TUI steps list before the
+ * operator presses [g]/enter. Prior steps in the resume iteration show as done
+ * (with any persisted session IDs), the resume target is selected and hydrated
+ * with in-flight checkpoint fields, and `resumable` is set so ESC can reset.
+ * No-op when `started` is already true or the plan is not a resume.
+ */
+export function applyResumableBootUi(
+  state: LoopState,
+  plan: {
+    readonly resumed: boolean;
+    readonly startIteration: number;
+    readonly startStepIndex: number;
+    readonly resume?: {
+      readonly promptText?: string;
+      readonly sessionID?: string;
+      readonly looperMessageIDs?: readonly string[];
+    };
+    readonly title?: string;
+    readonly stepSessions?: readonly { readonly stepIndex: number; readonly sessionID: string }[];
+  },
+): void {
+  if (state.started || !plan.resumed) return;
+
+  state.resumable = true;
+  if (plan.startIteration > 0) state.iteration = plan.startIteration;
+
+  const startStepIndex = Math.max(0, plan.startStepIndex);
+  for (const step of state.steps.slice(0, startStepIndex)) {
+    step.status = "done";
+    step.finishedAt ??= Date.now();
+    if (plan.title !== undefined && step.title === undefined) step.title = plan.title;
+  }
+
+  if (plan.stepSessions !== undefined) {
+    for (const entry of plan.stepSessions) {
+      if (entry.stepIndex >= startStepIndex) continue;
+      const step = state.steps[entry.stepIndex];
+      if (step === undefined) continue;
+      step.sessionID = entry.sessionID;
+      if (step.status === "pending") {
+        step.status = "done";
+        step.finishedAt ??= Date.now();
+      }
+      if (plan.title !== undefined && step.title === undefined) step.title = plan.title;
+    }
+  }
+
+  if (state.steps.length === 0) return;
+
+  const resumeStepIndex = Math.min(startStepIndex, state.steps.length - 1);
+  const resumeStep = state.steps[resumeStepIndex];
+  if (resumeStep !== undefined) {
+    hydrateResumableBootStep(resumeStep, {
+      ...(plan.resume?.promptText !== undefined ? { promptText: plan.resume.promptText } : {}),
+      ...(plan.resume?.sessionID !== undefined ? { sessionID: plan.resume.sessionID } : {}),
+      ...(plan.resume?.looperMessageIDs !== undefined ? { looperMessageIDs: plan.resume.looperMessageIDs } : {}),
+      ...(plan.title !== undefined ? { title: plan.title } : {}),
+    });
+  }
+  state.selectedStepIndex = resumeStepIndex;
+  state.selectedBackgroundSessionID = null;
+}
+
 export function selectedOrActiveStep(state: LoopState): LoopStep | null {
   const index = state.selectedStepIndex ?? state.activeStepIndex;
   if (index === null) return null;

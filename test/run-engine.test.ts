@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { computeRunResumePlan, runEngine } from "../src/engine/run-engine.ts";
-import type { EngineFrontendHooks, RunStateStore } from "../src/engine/engine-ports.ts";
+import type { EngineFrontendHooks, ResumeSession, RunStateStore } from "../src/engine/engine-ports.ts";
 import { StepFailureError } from "../src/lib/orchestrator.ts";
 import type { RunState } from "../src/lib/state-files.ts";
 
@@ -203,6 +203,8 @@ describe("runEngine", () => {
     const store = memoryStore();
     const steps: Step[] = [{ name: "build", prompt: "build.md" }, { name: "review", prompt: "review.md" }, { name: "deploy", prompt: "deploy.md" }];
     const startStepIndexes: number[] = [];
+    const iterationStates: Array<{ readonly attempt: number }> = [];
+    let iterationStarts = 0;
     let attempts = 0;
     await runEngine({
       maxIterations: 1,
@@ -213,7 +215,18 @@ describe("runEngine", () => {
       configDir: "/cfg",
       client: {},
       store,
-      hooks: { createIterationState: () => ({}), onStepFailure: async () => "restart", recoveryResumeForChoice: () => undefined },
+      hooks: {
+        createIterationState: () => {
+          const state = { attempt: iterationStates.length + 1 };
+          iterationStates.push(state);
+          return state;
+        },
+        onIterationStart: () => {
+          iterationStarts += 1;
+        },
+        onStepFailure: async () => "restart",
+        recoveryResumeForChoice: () => undefined,
+      },
       loadSteps: () => steps,
       currentBranch: async () => "main",
       createLooperRunID: () => "run",
@@ -229,5 +242,76 @@ describe("runEngine", () => {
       },
     });
     expect(startStepIndexes).toEqual([0, 2]);
+    expect(iterationStates).toHaveLength(2);
+    expect(iterationStates[1]).not.toBe(iterationStates[0]);
+    expect(iterationStarts).toBe(2);
+  });
+
+  test("recovery nudge reuses the active iteration state for a reusable failed session", async () => {
+    // Given a failed attempt whose recovery decision can reuse its recorded session.
+    const store = memoryStore();
+    const steps: Step[] = [{ name: "build", prompt: "build.md" }];
+    const reusableResume = { sessionID: "ses_failed", messageID: "msg_failed", stepName: "build" } as const;
+    const createdStates: Array<{ readonly attempt: number }> = [];
+    const receivedStates: Array<{ readonly attempt: number }> = [];
+    const receivedResumes: Array<ResumeSession | undefined> = [];
+    const recoveryNudges: boolean[] = [];
+    let iterationStarts = 0;
+    let attempts = 0;
+
+    // When the first attempt fails and manual recovery chooses nudge.
+    await runEngine({
+      maxIterations: 1,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: {},
+      store,
+      hooks: {
+        createIterationState: () => {
+          const state = { attempt: createdStates.length + 1 };
+          createdStates.push(state);
+          return state;
+        },
+        onIterationStart: () => {
+          iterationStarts += 1;
+        },
+        onStepFailure: async () => "nudge",
+        recoveryResumeForChoice: () => reusableResume,
+      },
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run",
+      legacyResumeStepIndex: () => 0,
+      runIteration: async (input) => {
+        receivedStates.push(input.state);
+        receivedResumes.push(input.resume);
+        recoveryNudges.push(input.recoveryNudge === true);
+        attempts += 1;
+        if (attempts === 1) {
+          store.savePosition({
+            iteration: input.iteration,
+            stepIndex: 0,
+            stepName: "build",
+            steps,
+            sessionID: reusableResume.sessionID,
+            messageID: reusableResume.messageID,
+            looperRunID: "run",
+          });
+          throw new StepFailureError("build failed", { stepName: "build", sessionID: reusableResume.sessionID });
+        }
+        return "complete";
+      },
+    });
+
+    // Then recovery continues inside the original iteration state without replaying start hooks.
+    expect(createdStates).toHaveLength(1);
+    expect(iterationStarts).toBe(1);
+    expect(receivedStates).toHaveLength(2);
+    expect(receivedStates[1]).toBe(receivedStates[0]);
+    expect(receivedResumes[1]).toBe(reusableResume);
+    expect(recoveryNudges).toEqual([false, true]);
   });
 });

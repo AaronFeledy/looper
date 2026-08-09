@@ -366,7 +366,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const adjudicating = pendingAdjudicateStep !== undefined;
     if (!adjudicating && index >= steps.length) break;
 
-    if (!adjudicating) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
+    const recoveryRowIndex = state.steps.length - (steps.length - index);
+    const preserveRecoveryRow = !adjudicating
+      && recoveryNudgePending
+      && pendingResume?.sessionID !== undefined
+      && state.steps[recoveryRowIndex]?.name === steps[index]?.name;
+    if (!adjudicating && !preserveRecoveryRow) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
     let currentStepIndex = adjudicating ? state.steps.length - 1 : state.steps.length - (steps.length - index);
 
     if (stopFileExists() || state.quitting) {
@@ -638,7 +643,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (recoveryNudgePending) {
       recoveryNudgePending = false;
       attempt.recoveryNudgeActive = true;
-      attempt.resumePrompt = recoveryNudgePrompt(promptText(step));
     }
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
@@ -788,6 +792,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           } else if (resumeDecision.kind === "nudge-existing") {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
             attempt.resumeSessionID = resumeSession;
+            attempt.resumePrompt = recoveryNudgePrompt();
             if (resumeInfo.promptText !== undefined) setStepPromptText(state, currentStepIndex, resumeInfo.promptText);
             setStepLooperMessageIDs(
               state,
@@ -808,6 +813,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           }
         }
       }
+    }
+    if (
+      attempt.recoveryNudgeActive
+      && attempt.resumeSessionID === undefined
+      && attempt.resumePrompt === undefined
+      && pendingResult === undefined
+    ) {
+      attempt.resumePrompt = cleanRestartPrompt(promptText(step), "manual");
     }
 
     while (true) {

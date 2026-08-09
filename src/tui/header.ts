@@ -21,7 +21,12 @@ function formatElapsed(startedAt: number): string {
 
 function headerContent(state: LoopState): string {
   const branch = state.branch || "detached";
-  if (!state.started) return `Looper · waiting to start  ·  branch ${branch}`;
+  if (!state.started) {
+    if (state.resumable && state.iteration > 0) {
+      return `Looper · resume iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}`;
+    }
+    return `Looper · waiting to start  ·  branch ${branch}`;
+  }
 
   return `Looper · iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}  ·  ${formatElapsed(
     state.iterationStartedAt,

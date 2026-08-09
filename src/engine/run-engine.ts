@@ -7,6 +7,8 @@ import type { EngineFrontendHooks, EngineRunIteration, RunEngineOptions, RunEngi
 import { buildEngineStepHooks } from "./run-engine-step-hooks.ts";
 import type { AdjudicationConfig } from "./adjudication-routing.ts";
 import { createStallObserver, stallDetectionEnabled, type StallLimits, type StallObserver } from "./stall-detector.ts";
+import { createInFlightProbe, runStallCheck } from "./stall-quiescence.ts";
+import { stallConfirmMs } from "../config/tunables.ts";
 
 export type RunResumePlan = {
   readonly startIteration: number;
@@ -49,6 +51,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly storyState?: StoryStatePort;
   readonly adjudication?: AdjudicationConfig;
   readonly stall?: StallLimits;
+  readonly stallConfirmMs?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;
   readonly elapsedSeconds?: (startedAt: number) => number;
   readonly initialPlan?: RunResumePlan;
@@ -158,7 +161,9 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
   if (!persistTitles) firstIterationTitle = undefined;
 
   let recoveryNudgeNext = false;
+  let recoveryStateNext: { readonly state: S } | undefined;
   let stepSessionsIteration: number | undefined;
+  let iterationStartedAt = Date.now();
 
   const stallObserver: StallObserver | undefined =
     input.stall !== undefined && stallDetectionEnabled(input.stall)
@@ -169,6 +174,11 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
           ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
           ...(input.storyState !== undefined ? { readPhase: input.storyState.readPhase } : {}),
           readCompletionsCount: () => input.adjudication?.store.readCompletions().length ?? 0,
+          probeInFlight: createInFlightProbe({
+            repoDir: input.repoDir,
+            client: input.client,
+            currentIteration: () => ({ sessions: iterationStepSessions, startedAt: iterationStartedAt }),
+          }),
         })
       : undefined;
 
@@ -185,18 +195,26 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
 
     const stepsSnapshot = input.loadSteps();
     const startStepIndex = iteration === startIteration ? firstIterationStartStepIndex : 0;
-    const branch = await input.currentBranch();
-    const state = input.hooks.createIterationState({ iteration, maxIterations: input.maxIterations, steps: stepsSnapshot, branch });
-    await input.hooks.onIterationStart?.({
-      state,
-      iteration,
-      maxIterations: input.maxIterations,
-      steps: stepsSnapshot,
-      startStepIndex,
-      resumedPriorSteps: iteration === startIteration && firstIterationResumed,
-    });
+    const recoveryState = recoveryStateNext;
+    recoveryStateNext = undefined;
+    let state: S;
+    if (recoveryState === undefined) {
+      const branch = await input.currentBranch();
+      state = input.hooks.createIterationState({ iteration, maxIterations: input.maxIterations, steps: stepsSnapshot, branch });
+      await input.hooks.onIterationStart?.({
+        state,
+        iteration,
+        maxIterations: input.maxIterations,
+        steps: stepsSnapshot,
+        startStepIndex,
+        resumedPriorSteps: iteration === startIteration && firstIterationResumed,
+      });
+    } else {
+      state = recoveryState.state;
+    }
 
     const startedAt = Date.now();
+    iterationStartedAt = startedAt;
     const resumeForThisIteration = iteration === startIteration ? firstIterationResume : undefined;
     const recoveryNudgeForThisIteration = recoveryNudgeNext;
     recoveryNudgeNext = false;
@@ -250,11 +268,15 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         return { kind: "stopped", reason };
       }
       if (stallObserver !== undefined) {
-        const verdict = await stallObserver.checkIteration(await input.currentBranch());
-        if (verdict.stalled) {
-          input.store.writeStop(verdict.reason);
-          await input.hooks.onStopRequested?.({ iteration, reason: verdict.reason, phase: "after-iteration" });
-          return { kind: "stopped", reason: verdict.reason };
+        const outcome = await runStallCheck({
+          observer: stallObserver,
+          confirmMs: input.stallConfirmMs ?? stallConfirmMs(),
+          store: input.store,
+          currentBranch: input.currentBranch,
+        });
+        if (outcome.stopped) {
+          await input.hooks.onStopRequested?.({ iteration, reason: outcome.reason, phase: "after-iteration" });
+          return { kind: "stopped", reason: outcome.reason };
         }
       }
     } catch (error) {
@@ -265,12 +287,14 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       }
       recoveryNudgeNext = choice === "nudge";
       const recoveryRunState = input.store.read();
-      firstIterationResume = input.hooks.recoveryResumeForChoice({
+      const recoveryResume = input.hooks.recoveryResumeForChoice({
         choice,
         ...(error.sessionID !== undefined ? { failedSessionID: error.sessionID } : {}),
         ...(error.stepName !== undefined ? { failedStepName: error.stepName } : {}),
         runState: recoveryRunState,
       });
+      firstIterationResume = recoveryResume;
+      recoveryStateNext = choice === "nudge" && recoveryResume?.sessionID !== undefined ? { state } : undefined;
       const recoverySteps = input.loadSteps();
       const failedStepIndex = recoveryRunState !== null ? stepIndexFromRunState(recoveryRunState, recoverySteps) : input.legacyResumeStepIndex(recoverySteps);
       startIteration = iteration;
