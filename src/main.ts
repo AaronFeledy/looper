@@ -728,6 +728,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       repoDir,
       configDir,
       client,
+      control,
       store: runStateStore,
       loadSteps: () => loadSteps(configDir),
       currentBranch: async () => state.branch || (await currentBranch()),

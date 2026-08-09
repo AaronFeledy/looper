@@ -228,6 +228,7 @@ describe("runOpenCodeStep headless policy events", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client: harness.client,
@@ -656,6 +657,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -704,6 +706,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -754,6 +757,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -801,6 +805,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -844,6 +849,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -874,6 +880,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,
@@ -921,6 +928,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,
@@ -970,6 +978,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     try {
       const result = await reattachOpenCodeStep({
         state,
+        control: state.control,
         stepIndex: 0,
         client,
         repoDir,
@@ -1020,6 +1029,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,
@@ -1079,6 +1089,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,
@@ -1128,6 +1139,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,
@@ -1183,6 +1195,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -1227,6 +1240,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     const result = await runOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -1300,6 +1314,7 @@ describe("reattachOpenCodeStep session.idle hints", () => {
 
     const result = await reattachOpenCodeStep({
       state,
+      control: state.control,
       stepIndex: 0,
       client,
       repoDir,

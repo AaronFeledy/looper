@@ -14,9 +14,10 @@ import { createOpencodeID } from "./opencode-id.ts";
 import type { RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
-import { createRunnerEventController, parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
+import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
+import type { RunControlView } from "../engine/run-control.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
 export { createRunnerEventController, parseModel } from "./step-runner-types.ts";
@@ -24,6 +25,7 @@ export { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 
 export type RunOpenCodeStepOptions = {
   state: LoopState;
+  control: RunControlView;
   stepIndex: number;
   prompt: string;
   client: OpencodeClient;
@@ -42,6 +44,7 @@ export type RunOpenCodeStepOptions = {
 
 export async function runOpenCodeStep({
   state,
+  control,
   stepIndex,
   prompt,
   client,
@@ -116,14 +119,13 @@ export async function runOpenCodeStep({
 
   const watcher = setInterval(() => {
     if (cancellation.action !== null) return;
-    if (state.restartRequested) requestCancellation(state.restartReason ?? "manual");
-    else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
+    if (control.restartRequested) requestCancellation(control.restartReason ?? "manual");
+    else if (control.skipRequested || control.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
   let timeoutController: ReturnType<typeof createPausableTimeout> | undefined;
   const onTimeout = (): void => {
     if (cancellation.action !== null) return;
-    state.restartRequested = true;
-    state.restartReason = "timeout";
+    control.requestRestart("timeout");
     notify();
     requestCancellation("timeout");
   };
@@ -278,7 +280,7 @@ export async function runOpenCodeStep({
       repoDir,
       sessionID: boundSessionID,
       parentMessageID: sentMessageID,
-      shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+      shouldStop: () => control.quitting || control.skipRequested || control.restartRequested || stopFileExists(),
       log: pushLine,
       onReactivated: () => {
         reactivated = true;

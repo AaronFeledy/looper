@@ -14,6 +14,7 @@ import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
 import { classifyAssistantForMessage, classifyAssistantWithReactivationGrace } from "./assistant-classification.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
+import type { RunControlView } from "../engine/run-control.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
 
@@ -155,6 +156,7 @@ export async function evaluatePriorSession({
 
 export type ReattachStepOptions = {
   state: LoopState;
+  control: RunControlView;
   stepIndex: number;
   client: OpencodeClient;
   repoDir: string;
@@ -172,6 +174,7 @@ export type ReattachStepOptions = {
 
 export async function reattachOpenCodeStep({
   state,
+  control,
   stepIndex,
   client,
   repoDir,
@@ -236,14 +239,13 @@ export async function reattachOpenCodeStep({
 
   const watcher = setInterval(() => {
     if (cancellationAction !== null) return;
-    if (state.restartRequested) requestCancellation("restart");
-    else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
+    if (control.restartRequested) requestCancellation("restart");
+    else if (control.skipRequested || control.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
   const onStepTimeout = (): void => {
     if (cancellationAction !== null) return;
     pushLine(`[looper] reattach exceeded step timeout after ${Math.round(effectiveTimeoutMs / 1000)}s for ${step.name}; aborting session and restarting in a fresh session`);
-    state.restartRequested = true;
-    state.restartReason = "timeout";
+    control.requestRestart("timeout");
     notify();
     requestCancellation("restart");
   };
@@ -444,7 +446,7 @@ export async function reattachOpenCodeStep({
     repoDir,
     sessionID,
     parentMessageID: outcomeMessageID,
-    shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+    shouldStop: () => control.quitting || control.skipRequested || control.restartRequested || stopFileExists(),
     log: pushLine,
   });
   if (classification.kind === "done") {

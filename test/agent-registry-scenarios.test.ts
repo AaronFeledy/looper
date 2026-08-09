@@ -189,6 +189,7 @@ describe("S3 regressions", () => {
       // When
       const result = await waitForLoopContinuationIdle({
         state: fixture.state,
+        control: fixture.state.control,
         client: fixture.client,
         stepIndex: 0,
         repoDir: fixture.repoDir,

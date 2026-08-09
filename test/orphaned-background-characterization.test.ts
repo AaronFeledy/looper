@@ -76,7 +76,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("orphaned");
@@ -90,7 +90,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("idle");
@@ -104,7 +104,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, client: fakeClient("busy"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("busy"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("resumed");
@@ -123,7 +123,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
       Object.assign(state, patch);
 
       // When
-      const result = await waitForLoopContinuationIdle({ state, client: fakeClient("error"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+      const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("error"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
       // Then
       expect(result).toBe(expected);
@@ -140,6 +140,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     // When
     const result = await waitForLoopContinuationIdle({
       state,
+      control: state.control,
       client: fakeClient("error"),
       stepIndex: 0,
       repoDir,

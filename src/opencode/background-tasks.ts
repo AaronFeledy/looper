@@ -7,6 +7,7 @@ import { stopFileExists } from "../lib/state-files.ts";
 import { CONTINUATION_EXIT_GRACE_POLL_MS, CONTINUATION_MAX_WAIT_MS, CONTINUATION_START_SKEW_MS, CONTINUATION_STALE_MS, CONTINUATION_STATUS_POLL_MS, continuationPollMs, continuationTime, isSafeSessionID, readActiveProjectContinuationRecord, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { probeBackgroundLiveness, sessionPendingState, sessionStillPending, type BackgroundLivenessProbe, type SessionPendingState } from "./session-health.ts";
 import { sanitizeLogField, toError } from "./util.ts";
+import type { RunControlView } from "../engine/run-control.ts";
 
 export type ContinuationWaitResult = "idle" | "resumed" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
 
@@ -128,6 +129,7 @@ export function clearContinuationStatus(state: LoopState, stepIndex: number): vo
 
 export async function waitForLoopContinuationIdle({
   state,
+  control,
   client,
   stepIndex,
   repoDir,
@@ -135,6 +137,7 @@ export async function waitForLoopContinuationIdle({
   timeoutMs = DEFAULT_STEP_TIMEOUT_MS,
 }: {
   state: LoopState;
+  control: RunControlView;
   client: OpencodeClient;
   stepIndex: number;
   repoDir: string;
@@ -145,9 +148,9 @@ export async function waitForLoopContinuationIdle({
 
   try {
     while (true) {
-      if (state.restartRequested) return "restart";
-      if (state.skipRequested) return "skipped";
-      if (state.quitting || stopFileExists()) return "stopped";
+      if (control.restartRequested) return "restart";
+      if (control.skipRequested) return "skipped";
+      if (control.quitting || stopFileExists()) return "stopped";
 
       let record: RunContinuationRecord | null;
       try {

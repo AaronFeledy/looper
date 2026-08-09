@@ -371,6 +371,7 @@ test("session error events fail the current step", async () => {
 
   const result = await runOpenCodeStep({
     state,
+    control: state.control,
     stepIndex: 0,
     prompt: "run",
     client,
@@ -509,6 +510,7 @@ test("reattach honors an older session-scoped active continuation record", async
 
   const result = await reattachOpenCodeStep({
     state,
+    control: state.control,
     stepIndex: 0,
     client,
     repoDir,
@@ -576,6 +578,7 @@ test("session-scoped continuation lookup rejects path traversal session IDs", as
 
   const result = await reattachOpenCodeStep({
     state,
+    control: state.control,
     stepIndex: 0,
     client,
     repoDir,

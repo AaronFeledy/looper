@@ -81,6 +81,7 @@ describe("continuation indicator", () => {
     // When
     const result = await waitForLoopContinuationIdle({
       state: loopState,
+      control: loopState.control,
       client: client(),
       stepIndex: 0,
       repoDir: "/tmp",

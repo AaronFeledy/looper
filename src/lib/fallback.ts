@@ -224,6 +224,7 @@ export async function runNonTtyIterations({
     repoDir,
     configDir,
     client,
+    control,
     store: runStateStore,
     loadSteps: () => loadSteps(configDir),
     currentBranch,

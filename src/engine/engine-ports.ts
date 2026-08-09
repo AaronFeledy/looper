@@ -10,6 +10,7 @@ import type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 import type { StoryPhase } from "../lib/story-state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { AdjudicationRuntime } from "./adjudication-routing.ts";
+import type { RunControl } from "./run-control.ts";
 
 export type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 export type { PendingRequestPort, RunStepContext, StepLifecyclePort, StepOutputSink, StepReporter } from "./step-reporter.ts";
@@ -134,6 +135,7 @@ export type EngineFrontendHooks<S, Step = RunStateStoreStep> = {
 
 export type EngineRunIterationInput<S, Step, Client> = {
   readonly state: S;
+  readonly control?: RunControl;
   readonly iteration: number;
   readonly client: Client;
   readonly repoDir: string;

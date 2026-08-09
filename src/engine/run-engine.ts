@@ -9,6 +9,7 @@ import type { AdjudicationConfig } from "./adjudication-routing.ts";
 import { createStallObserver, stallDetectionEnabled, type StallLimits, type StallObserver } from "./stall-detector.ts";
 import { createInFlightProbe, runStallCheck } from "./stall-quiescence.ts";
 import { stallConfirmMs } from "../config/tunables.ts";
+import type { RunControl } from "./run-control.ts";
 
 export type RunResumePlan = {
   readonly startIteration: number;
@@ -30,6 +31,7 @@ export type ComputeRunResumePlanInput<StepLike extends RunStateStoreStep> = {
 };
 
 export type RunEngineInput<S, Client> = RunEngineOptions & {
+  readonly control?: RunControl;
   readonly repoDir: string;
   readonly configDir: string;
   readonly client: Client;
@@ -159,6 +161,11 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
   if (initialPlan.resetToFreshRun) looperRunID = input.createLooperRunID();
   const persistTitles = input.persistTitles ?? true;
   if (!persistTitles) firstIterationTitle = undefined;
+  const stopRequested = (): boolean =>
+    input.control?.quitting === true ||
+    input.control?.stopAfterIteration === true ||
+    input.store.stopFileExists() ||
+    input.store.stopAfterIterationFileExists();
 
   let recoveryNudgeNext = false;
   let recoveryStateNext: { readonly state: S } | undefined;
@@ -183,7 +190,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       : undefined;
 
   for (let iteration = startIteration; iteration <= input.maxIterations; iteration += 1) {
-    if (input.store.stopFileExists() || input.store.stopAfterIterationFileExists()) {
+    if (stopRequested()) {
       const reason = input.store.stopReason();
       await input.hooks.onStopRequested?.({ iteration, reason, phase: "before-iteration" });
       return { kind: "stopped", reason };
@@ -222,6 +229,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
     try {
       const result = await input.runIteration({
         state,
+        ...(input.control !== undefined ? { control: input.control } : {}),
         iteration,
         client: input.client,
         repoDir: input.repoDir,
@@ -262,7 +270,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         }),
       });
 
-      if (result === "stopped" || input.store.stopFileExists() || input.store.stopAfterIterationFileExists()) {
+      if (result === "stopped" || stopRequested()) {
         const reason = input.store.stopReason();
         await input.hooks.onStopRequested?.({ iteration, reason, phase: "after-iteration" });
         return { kind: "stopped", reason };
@@ -282,7 +290,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
     } catch (error) {
       if (!(error instanceof StepFailureError) || input.hooks.onStepFailure === undefined || input.hooks.recoveryResumeForChoice === undefined) throw error;
       const choice = await input.hooks.onStepFailure({ state, error: errorToFailure(error) });
-      if (choice === "quit" || input.store.stopFileExists() || input.store.stopAfterIterationFileExists()) {
+      if (choice === "quit" || stopRequested()) {
         return { kind: "stopped", reason: input.store.stopReason() };
       }
       recoveryNudgeNext = choice === "nudge";
