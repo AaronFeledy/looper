@@ -1,6 +1,7 @@
 import { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { describe, expect, test } from "bun:test";
 
+import { createLoopStateStepReporter } from "../src/lib/loop-state-reporter.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { createRequestBroker } from "../src/opencode/request-broker.ts";
 import { teardownRequests, type TeardownClock } from "../src/opencode/request-teardown.ts";
@@ -44,7 +45,7 @@ function harness(options: { readonly abort?: () => Promise<unknown>; readonly re
     question: { value: { reject: async () => ({ data: true }), list: async () => ({ data: [] }) } },
   });
   const broker = createRequestBroker({
-    state,
+    requests: createLoopStateStepReporter(state).requests,
     client,
     repoDir: "/repo",
     step: { name: "Build", prompt: "build" },

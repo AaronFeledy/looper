@@ -6,7 +6,7 @@ import type { FinalizeStepStatus } from "../core/step-view.ts";
 import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { stopFileExists } from "../lib/state-files.ts";
+import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";

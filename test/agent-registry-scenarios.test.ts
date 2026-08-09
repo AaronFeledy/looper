@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { setStepContinuation } from "../src/lib/agent-tree-state.ts";
 import { startAgentRegistryController } from "../src/lib/agent-registry-controller.ts";
 import { startBackgroundAgentStreamer } from "../src/lib/background-agent-stream.ts";
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import {
   cancelPendingNotify,
@@ -188,8 +189,7 @@ describe("S3 regressions", () => {
 
       // When
       const result = await waitForLoopContinuationIdle({
-        state: fixture.state,
-        control: fixture.state.control,
+        ctx: loopStateRunStepContext(fixture.state, fixture.state.control),
         client: fixture.client,
         stepIndex: 0,
         repoDir: fixture.repoDir,

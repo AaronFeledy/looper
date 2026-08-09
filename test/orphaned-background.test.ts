@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { resumeSessionWorkState, waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
@@ -96,9 +97,9 @@ function state(): LoopState {
   return s;
 }
 
-function waitState(): { state: LoopState; control: LoopState["control"] } {
+function waitState() {
   const loopState = state();
-  return { state: loopState, control: loopState.control };
+  return { ctx: loopStateRunStepContext(loopState, loopState.control) };
 }
 
 describe("waitForLoopContinuationIdle — stale marker no longer means dead", () => {

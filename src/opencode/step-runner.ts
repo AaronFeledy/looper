@@ -4,7 +4,7 @@ import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import type { StepRestartReason } from "../core/step-view.ts";
 import type { RunStepContext } from "../engine/step-reporter.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { stopFileExists } from "../lib/state-files.ts";
+import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, syncStepBackgroundAgents, type LoopState } from "../src/lib/state.ts";
@@ -76,7 +77,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ ctx: loopStateRunStepContext(state, state.control), client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("orphaned");
@@ -90,7 +91,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ ctx: loopStateRunStepContext(state, state.control), client: fakeClient("idle"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("idle");
@@ -104,7 +105,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
     const state = waitingState();
 
     // When
-    const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("busy"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+    const result = await waitForLoopContinuationIdle({ ctx: loopStateRunStepContext(state, state.control), client: fakeClient("busy"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
     // Then
     expect(result).toBe("resumed");
@@ -123,7 +124,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
       Object.assign(state, patch);
 
       // When
-      const result = await waitForLoopContinuationIdle({ state, control: state.control, client: fakeClient("error"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
+      const result = await waitForLoopContinuationIdle({ ctx: loopStateRunStepContext(state, state.control), client: fakeClient("error"), stepIndex: 0, repoDir, sessionID: SESSION_ID });
 
       // Then
       expect(result).toBe(expected);
@@ -139,8 +140,7 @@ describe("waitForLoopContinuationIdle characterization", () => {
 
     // When
     const result = await waitForLoopContinuationIdle({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       client: fakeClient("error"),
       stepIndex: 0,
       repoDir,

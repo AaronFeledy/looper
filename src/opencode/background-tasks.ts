@@ -2,23 +2,14 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { CONTINUATION_EXIT_GRACE_MS, DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import type { RunStepContext } from "../engine/step-reporter.ts";
-import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
-import type { LoopState } from "../lib/state.ts";
-import { stopFileExists } from "../lib/state-files.ts";
+import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { CONTINUATION_EXIT_GRACE_POLL_MS, CONTINUATION_MAX_WAIT_MS, CONTINUATION_START_SKEW_MS, CONTINUATION_STALE_MS, CONTINUATION_STATUS_POLL_MS, continuationPollMs, continuationTime, isSafeSessionID, readActiveProjectContinuationRecord, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { probeBackgroundLiveness, sessionPendingState, sessionStillPending, type BackgroundLivenessProbe, type SessionPendingState } from "./session-health.ts";
 import { sanitizeLogField, toError } from "./util.ts";
-import type { RunControlView } from "../engine/run-control.ts";
 
 export type ContinuationWaitResult = "idle" | "resumed" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
 
 export { probeBackgroundLiveness };
-
-type ContinuationReporterInput = RunStepContext | LoopState;
-
-function continuationContext(input: ContinuationReporterInput): RunStepContext {
-  return "reporter" in input ? input : loopStateRunStepContext(input, input.control);
-}
 
 export async function waitForActiveLoopContinuationRecord({
   client,
@@ -114,16 +105,14 @@ export async function waitForSessionLoopContinuationRecord({
   return null;
 }
 
-export function logContinuationState(input: ContinuationReporterInput, stepIndex: number, record: RunContinuationRecord, prefix: string): void {
-  const ctx = continuationContext(input);
+export function logContinuationState(ctx: RunStepContext, stepIndex: number, record: RunContinuationRecord, prefix: string): void {
   const reason = record.source.reason ? ` reason=${sanitizeLogField(record.source.reason)}` : "";
   const line = `[looper] ${prefix}: session=${sanitizeLogField(record.sessionID)} state=${record.source.state}${reason} updatedAt=${sanitizeLogField(record.source.updatedAt)}`;
   ctx.reporter.out.line(stepIndex, line);
   ctx.reporter.notify();
 }
 
-export function setContinuationStatus(input: ContinuationReporterInput, stepIndex: number, record: RunContinuationRecord): void {
-  const { reporter } = continuationContext(input);
+export function setContinuationStatus({ reporter }: RunStepContext, stepIndex: number, record: RunContinuationRecord): void {
   reporter.steps.markWaiting(stepIndex);
   reporter.steps.setContinuation(stepIndex, {
     reason: record.source.reason ?? "background tasks active",
@@ -131,15 +120,12 @@ export function setContinuationStatus(input: ContinuationReporterInput, stepInde
   });
 }
 
-export function clearContinuationStatus(input: ContinuationReporterInput, stepIndex: number): void {
-  continuationContext(input).reporter.steps.setContinuation(stepIndex, null);
+export function clearContinuationStatus({ reporter }: RunStepContext, stepIndex: number): void {
+  reporter.steps.setContinuation(stepIndex, null);
 }
 
-type ContinuationWaitContext =
-  | { readonly ctx: RunStepContext }
-  | { readonly state: LoopState; readonly control: RunControlView };
-
-export async function waitForLoopContinuationIdle(options: ContinuationWaitContext & {
+export async function waitForLoopContinuationIdle(options: {
+  readonly ctx: RunStepContext;
   readonly client: OpencodeClient;
   readonly stepIndex: number;
   readonly repoDir: string;
@@ -153,7 +139,7 @@ export async function waitForLoopContinuationIdle(options: ContinuationWaitConte
     sessionID,
     timeoutMs = DEFAULT_STEP_TIMEOUT_MS,
   } = options;
-  const ctx = "ctx" in options ? options.ctx : loopStateRunStepContext(options.state, options.control);
+  const { ctx } = options;
   const startedAt = Date.now();
 
   try {

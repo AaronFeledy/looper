@@ -1,6 +1,5 @@
 import { resolvePermissionAction } from "../lib/config.ts";
 import type { PendingRequest, PendingRequestDecisionAction } from "../core/pending-request.ts";
-import { createLoopStateStepReporter } from "../lib/loop-state-reporter.ts";
 import { formatRequestError, toError } from "./util.ts";
 import { AlreadyResolvedRequestError, createRequestBrokerScheduler, DEFAULT_CLAIM_POLL_MS, DEFAULT_GATE_MAX_MS, FRICTION_LIMIT, HANDLED_REQUEST_LIMIT, isAlreadyResolvedRequest } from "./request-broker-support.ts";
 import type { PermissionAuditOrigin } from "./permission-audit.ts";
@@ -23,7 +22,7 @@ export type {
 let nextGeneration = 1;
 
 export function createRequestBroker(options: RequestBrokerOptions): RequestBroker {
-  const requests = "requests" in options ? options.requests : createLoopStateStepReporter(options.state).requests;
+  const requests = options.requests;
   const generation = nextGeneration++;
   const scheduler = options.scheduler ?? createRequestBrokerScheduler();
   const gateMaxMs = options.gateMaxMs ?? DEFAULT_GATE_MAX_MS;

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { createLoopStateStepReporter } from "../src/lib/loop-state-reporter.ts";
 import { createLoopState, tryClaimPendingRequestDecision, type LoopState } from "../src/lib/state.ts";
 import { appendPermissionAudit } from "../src/opencode/permission-audit.ts";
 import { createRequestBroker, type RequestBroker, type RequestBrokerScheduler } from "../src/opencode/request-broker.ts";
@@ -107,7 +108,7 @@ function harness(options: {
   const scheduler = new FakeScheduler();
   const configDir = options.configDir;
   const broker = createRequestBroker({
-    state,
+    requests: createLoopStateStepReporter(state).requests,
     client: fake.client,
     repoDir: REPO_DIR,
     step: { name: "Build", prompt: "build" },
