@@ -8,11 +8,14 @@ import { createRequestBroker, type RequestBroker, type RequestFrictionState } fr
 import { reconcileOpenRequests } from "./request-reconcile.ts";
 import { teardownRequests, type TeardownClock, type TeardownResult } from "./request-teardown.ts";
 import type { Step } from "./step-runner-types.ts";
+import { appendPermissionAudit } from "./permission-audit.ts";
 
 type RequestBrokerOwnerOptions = {
   readonly state: LoopState;
   readonly client: OpencodeClient;
   readonly repoDir: string;
+  readonly configDir?: string;
+  readonly stepIndex?: number;
   readonly step: Step;
   readonly pushLine: (line: string) => void;
   readonly unattended: boolean;
@@ -55,6 +58,7 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
   if (options.onHumanGateChange !== undefined) humanGateListeners.add(options.onHumanGateChange);
   const gateMaxMs = options.gateMaxMs ?? permissionGateMaxMs();
   const stepTimeoutMs = options.step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
+  const auditConfigDir = options.configDir;
   if (gateMaxMs >= stepTimeoutMs) options.pushLine(`[looper] permission gate maximum ${gateMaxMs}ms is not shorter than step timeout ${stepTimeoutMs}ms`);
 
   return {
@@ -81,6 +85,13 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
         onHumanGateChange: (open) => {
           for (const listener of humanGateListeners) listener(open);
         },
+        ...(auditConfigDir === undefined ? {} : {
+          auditDecision: (decision) => appendPermissionAudit(
+            auditConfigDir,
+            { ...decision, ...(options.stepIndex !== undefined ? { stepIndex: options.stepIndex } : {}) },
+            options.pushLine,
+          ),
+        }),
       });
       activeSessionID = sessionID;
       bound = { broker, ownedSessions };

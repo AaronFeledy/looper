@@ -19,6 +19,7 @@ import { createAdjudicationStore, type AdjudicationStore } from "../persistence/
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
+import { clearPermissionAudit } from "../opencode/permission-audit.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -77,6 +78,7 @@ export async function runNonTty({
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
     storyStateStore.clear();
+    clearPermissionAudit(configDir);
   }
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));

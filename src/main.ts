@@ -72,6 +72,7 @@ import type { PrdWatcher } from "./watchers/prd.ts";
 import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 import { createStoryStateStore } from "./persistence/story-state-store.ts";
+import { clearPermissionAudit } from "./opencode/permission-audit.ts";
 import { handleSignal } from "./lib/signal.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
@@ -197,6 +198,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
     storyStateStore.clear();
+    clearPermissionAudit(configDir);
   }
   let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
 
@@ -585,6 +587,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       adjudicationStore.clearMarker();
       adjudicationStore.clearSession();
       storyStateStore.clear();
+      clearPermissionAudit(configDir);
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
@@ -641,6 +644,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         adjudicationStore.clearMarker();
         adjudicationStore.clearSession();
         storyStateStore.clear();
+        clearPermissionAudit(configDir);
       }
       if (!state.started) {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {

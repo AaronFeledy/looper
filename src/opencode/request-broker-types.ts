@@ -4,6 +4,7 @@ import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import type { EventConsumerCallbacks } from "../lib/event-consumer.ts";
 import type { LoopState } from "../lib/state.ts";
 import type { Step } from "./step-runner-types.ts";
+import type { PermissionAuditDecision } from "./permission-audit.ts";
 
 export type AutomatedRejectOrigin = "nontty_ask" | "gate_timeout" | "unattended_always_fail_closed";
 
@@ -38,6 +39,7 @@ export type RequestBrokerOptions = {
   readonly scheduler?: RequestBrokerScheduler;
   readonly now?: () => number;
   readonly onHumanGateChange?: (open: boolean) => void;
+  readonly auditDecision?: (decision: PermissionAuditDecision) => void;
 };
 
 export type RequestListResults = {

@@ -1,12 +1,18 @@
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import { createLoopState, tryClaimPendingRequestDecision, type LoopState } from "../src/lib/state.ts";
+import { appendPermissionAudit } from "../src/opencode/permission-audit.ts";
 import { createRequestBroker, type RequestBroker, type RequestBrokerScheduler } from "../src/opencode/request-broker.ts";
 
 const SESSION_ID = "ses_broker";
 const REPO_DIR = "/repo";
 const TOOL = { messageID: "msg_broker", callID: "call_broker" };
+const scratchDirs: string[] = [];
 
 type Reply = { readonly requestID: string; readonly reply?: "once" | "always" | "reject"; readonly directory?: string };
 
@@ -90,6 +96,8 @@ function harness(options: {
   readonly permissionPolicy?: Record<string, "ask" | "always" | "once" | "reject">;
   readonly questionPolicy?: "ask" | "reject";
   readonly outcomes?: ("success" | "throw" | "already-resolved")[];
+  readonly configDir?: string;
+  readonly stepIndex?: number;
 } = {}): Harness {
   const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
   const fake = new FakeClient(options.outcomes);
@@ -97,6 +105,7 @@ function harness(options: {
   const stops: string[] = [];
   const friction = { counts: new Map<string, number>(), requestIDs: new Set<string>() };
   const scheduler = new FakeScheduler();
+  const configDir = options.configDir;
   const broker = createRequestBroker({
     state,
     client: fake.client,
@@ -108,6 +117,13 @@ function harness(options: {
     friction,
     writeStop: (reason) => stops.push(reason),
     scheduler,
+    ...(configDir === undefined ? {} : {
+      auditDecision: (decision) => appendPermissionAudit(
+        configDir,
+        { ...decision, ...(options.stepIndex === undefined ? {} : { stepIndex: options.stepIndex }) },
+        (line) => lines.push(line),
+      ),
+    }),
     ...(options.permissionPolicy === undefined ? {} : { permissionPolicy: options.permissionPolicy }),
     ...(options.questionPolicy === undefined ? {} : { questionPolicy: options.questionPolicy }),
   });
@@ -130,7 +146,50 @@ async function settle(): Promise<void> {
   for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
 }
 
+afterEach(() => {
+  for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 describe("createRequestBroker", () => {
+  test("appends redacted permission decisions to a private audit JSONL", async () => {
+    // Given a broker with an audit directory and payload patterns that must stay private.
+    const configDir = mkdtempSync(join(tmpdir(), "looper-permission-audit-"));
+    scratchDirs.push(configDir);
+    const target = harness({ configDir, stepIndex: 2, permissionPolicy: { edit: "once", bash: "reject" } });
+
+    // When two policy decisions are issued.
+    askPermission(target, "perm-edit", "edit");
+    askPermission(target, "perm-bash", "bash");
+    await settle();
+
+    // Then each decision is one bounded JSON line without request patterns, and the file is private.
+    const auditPath = join(configDir, ".looper-permission-log.jsonl");
+    const records = readFileSync(auditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    expect(records).toEqual([
+      { at: records[0]?.at, requestID: "perm-edit", sessionID: SESSION_ID, kind: "permission", permission: "edit", action: "once", origin: "policy", stepIndex: 2 },
+      { at: records[1]?.at, requestID: "perm-bash", sessionID: SESSION_ID, kind: "permission", permission: "bash", action: "reject", origin: "policy", stepIndex: 2 },
+    ]);
+    expect(records.every((record) => typeof record.at === "string" && !("patterns" in record))).toBe(true);
+    expect(statSync(auditPath).mode & 0o777).toBe(0o600);
+  });
+
+  test("continues broker replies when audit persistence fails", async () => {
+    // Given a config path that is a file, so the audit child cannot be created.
+    const scratch = mkdtempSync(join(tmpdir(), "looper-permission-audit-failure-"));
+    scratchDirs.push(scratch);
+    const configDir = join(scratch, "not-a-directory");
+    writeFileSync(configDir, "occupied");
+    const target = harness({ configDir, permissionPolicy: { edit: "once" } });
+
+    // When the broker decides and replies.
+    askPermission(target, "perm-write-failure");
+    await settle();
+
+    // Then audit failure is diagnostic only and the server reply still succeeds.
+    expect(target.fake.permissionReplies).toEqual([{ requestID: "perm-write-failure", reply: "once", directory: REPO_DIR }]);
+    expect(target.lines.some((line) => line.includes("permission audit write failed"))).toBe(true);
+  });
+
   test("fails closed instead of sending always when unattended", async () => {
     const target = harness({ unattended: true, permissionPolicy: { edit: "always" } });
 

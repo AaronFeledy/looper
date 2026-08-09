@@ -647,6 +647,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       state,
       client,
       repoDir,
+      configDir,
+      stepIndex: index,
       step,
       pushLine: (line) => logStepLine(currentStepIndex, line),
       unattended,

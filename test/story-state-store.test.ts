@@ -68,6 +68,8 @@ describe("story state store", () => {
     const fixture = setupCliScratch();
     scratch = fixture.repoDir;
     writeFileSync(fixture.statePath, JSON.stringify({ stories: { "US-074": { phase: "reviewed", updatedAt: "2026-07-20T00:00:00.000Z" } } }));
+    const auditPath = join(fixture.configDir, ".looper-permission-log.jsonl");
+    writeFileSync(auditPath, "persisted audit\n");
 
     // When a fresh run reaches the deliberately failing server startup.
     const exitCode = await runFreshCli(fixture.repoDir, tty);
@@ -75,5 +77,6 @@ describe("story state store", () => {
     // Then fresh state was cleared before startup failed.
     expect(exitCode).toBe(1);
     expect(existsSync(fixture.statePath)).toBe(false);
+    expect(existsSync(auditPath)).toBe(false);
   });
 });

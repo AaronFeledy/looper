@@ -12,6 +12,7 @@ import {
 } from "../lib/state.ts";
 import { formatRequestError, toError } from "./util.ts";
 import { AlreadyResolvedRequestError, createRequestBrokerScheduler, DEFAULT_CLAIM_POLL_MS, DEFAULT_GATE_MAX_MS, FRICTION_LIMIT, HANDLED_REQUEST_LIMIT, isAlreadyResolvedRequest } from "./request-broker-support.ts";
+import type { PermissionAuditOrigin } from "./permission-audit.ts";
 import type {
   AutomatedRejectOrigin,
   RequestBroker,
@@ -77,6 +78,9 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     options.pushLine(`[looper] permission '${request.permission}' automated reject origin=${origin}`);
   };
 
+  const isAutomatedRejectOrigin = (origin: PermissionAuditOrigin): origin is AutomatedRejectOrigin =>
+    origin === "nontty_ask" || origin === "gate_timeout" || origin === "unattended_always_fail_closed";
+
   const permissionReply = async (requestID: string, action: "once" | "always" | "reject"): Promise<void> => {
     const result = await options.client.permission.reply({ requestID, reply: action, directory: options.repoDir });
     if (result.error !== undefined) {
@@ -93,7 +97,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     }
   };
 
-  const runWithRetry = async (request: PendingRequest, action: PendingRequestDecisionAction, origin?: AutomatedRejectOrigin): Promise<void> => {
+  const runWithRetry = async (request: PendingRequest, action: PendingRequestDecisionAction, origin: PermissionAuditOrigin): Promise<void> => {
     const reply = request.kind === "permission"
       ? () => permissionReply(request.requestID, action === "always" || action === "once" ? action : "reject")
       : () => questionReject(request.requestID);
@@ -103,7 +107,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
         await reply();
         if (request.kind === "permission") options.pushLine(`[looper] permission '${request.permission}' -> ${action}`);
         else options.pushLine("[looper] question rejected");
-        if (origin !== undefined && request.kind === "permission") incrementFriction(request, origin);
+        if (request.kind === "permission" && isAutomatedRejectOrigin(origin)) incrementFriction(request, origin);
         dismiss(request.requestID);
         if (action === "skip") options.onSkip?.();
         return;
@@ -120,8 +124,16 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     options.pushLine(`[looper] request ${request.requestID} reply failed after retry: ${lastError}`);
   };
 
-  const submit = (request: PendingRequest, action: PendingRequestDecisionAction, origin?: AutomatedRejectOrigin, cleanup = false): void => {
+  const submit = (request: PendingRequest, action: PendingRequestDecisionAction, origin: PermissionAuditOrigin, cleanup = false): void => {
     if (disposed || (!acceptingDecisions && !cleanup) || inFlight.has(request.requestID) || handled.has(request.requestID)) return;
+    options.auditDecision?.({
+      requestID: request.requestID,
+      sessionID: request.sessionID,
+      kind: request.kind,
+      ...(request.kind === "permission" ? { permission: request.permission } : {}),
+      action,
+      origin,
+    });
     const pending = runWithRetry(request, action, origin).finally(() => inFlight.delete(request.requestID));
     inFlight.set(request.requestID, pending);
   };
@@ -159,7 +171,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     else if (options.unattended && action === "always") {
       options.pushLine(`[error] permission '${payload.permission}' policy always rejected origin=unattended_always_fail_closed; unattended runs never send always`);
       submit(request, "reject", "unattended_always_fail_closed");
-    } else if (action !== "ask") submit(request, action);
+    } else if (action !== "ask") submit(request, action, "policy");
     else options.pushLine(`[looper] permission '${payload.permission}' left pending`);
   };
 
@@ -171,7 +183,8 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     const request = options.state.pendingRequests.find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
     if (request?.kind !== "question") return;
     if (!options.unattended && effectiveQuestionPolicy !== "reject") reportHumanGate();
-    if (options.unattended || effectiveQuestionPolicy === "reject") submit(request, "reject");
+    if (options.unattended) submit(request, "reject", "nontty_ask");
+    else if (effectiveQuestionPolicy === "reject") submit(request, "reject", "policy");
     else options.pushLine("[looper] question left pending");
   };
 
@@ -179,7 +192,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     const resolving = options.state.pendingRequests.filter((request) => request.generation === generation && request.status === "resolving");
     for (const request of resolving) {
       const action = consumePendingRequestDecision(options.state, identity(request.requestID));
-      if (action !== null) submit(request, action);
+      if (action !== null) submit(request, action, "human");
     }
     await Promise.all([...inFlight.values()]);
   };
@@ -226,7 +239,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     async rejectOpen(reason) {
       options.pushLine(`[looper] rejecting open requests: ${reason}`);
       for (const request of [...options.state.pendingRequests]) {
-        if (request.generation === generation && request.status !== "resolving") submit(request, "reject", undefined, true);
+        if (request.generation === generation && request.status !== "resolving") submit(request, "reject", "teardown", true);
       }
       await Promise.all([...inFlight.values()]);
     },
