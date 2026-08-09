@@ -1,0 +1,29 @@
+Task 7: pure permission gate TUI helpers
+
+TDD red:
+  bun test test/permission-gate.test.ts
+  FAIL: Cannot find module '../src/tui/permission-gate.ts'
+
+Focused green:
+  bun test test/permission-gate.test.ts
+  25 pass, 0 fail
+
+Typecheck:
+  bun run typecheck
+  PASS
+
+Diagnostics:
+  test/permission-gate.test.ts: no diagnostics
+  src/tui/permission-gate.ts: no diagnostics before the final type-only input relaxation;
+  tsc passed afterward (the fresh LSP request timed out).
+
+Full suite:
+  bun test
+  1151 pass, 4 fail
+  The four failures are existing in-progress request-broker integration failures in
+  test/runner-reconnect.test.ts (configured permission/question replies were not
+  observed). Task 7 does not touch that runtime path or keys/renderer wiring.
+
+Scope:
+  Added pure modal-line, key-action, and focus-precedence helpers plus table tests.
+  No src/tui/keys.ts or renderer wiring changes.
