@@ -12,6 +12,7 @@ import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } f
 import type { AdjudicationRuntime } from "./adjudication-routing.ts";
 
 export type { RunState, StepSessionEntry } from "../lib/state-files.ts";
+export type { PendingRequestPort, RunStepContext, StepLifecyclePort, StepOutputSink, StepReporter } from "./step-reporter.ts";
 
 export type RunStateStore = {
   readonly read: () => RunState | null;
