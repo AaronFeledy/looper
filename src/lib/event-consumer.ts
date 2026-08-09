@@ -13,6 +13,8 @@ export type PermissionAskedPayload = {
   permission: PermissionAskedProperties["permission"];
   patterns: PermissionAskedProperties["patterns"];
   metadata: PermissionAskedProperties["metadata"];
+  always: PermissionAskedProperties["always"];
+  tool: PermissionAskedProperties["tool"];
 };
 
 export type PermissionRepliedPayload = Extract<Event, { type: "permission.replied" }>["properties"];
@@ -21,6 +23,7 @@ export type QuestionAskedPayload = {
   requestID: QuestionAskedProperties["id"];
   sessionID: QuestionAskedProperties["sessionID"];
   questions: QuestionAskedProperties["questions"];
+  tool: QuestionAskedProperties["tool"];
 };
 
 export type QuestionRepliedPayload = Extract<Event, { type: "question.replied" }>["properties"];
@@ -41,6 +44,7 @@ export type EventConsumerCallbacks = {
   onQuestionRejected?: (payload: QuestionRejectedPayload) => void;
   onSessionIdle?: (payload: SessionIdlePayload) => void;
   onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
+  ownedSessionIDs?: () => ReadonlySet<string>;
   /**
    * User message IDs that should not be printed (e.g. looper's own step prompt).
    * Mutable: callers may add IDs after the consumer is constructed (prompt is
@@ -48,6 +52,14 @@ export type EventConsumerCallbacks = {
    */
   hiddenUserMessageIDs?: Set<string>;
 };
+
+function isOwnedRequestEvent(type: Event["type"]): boolean {
+  return type === "permission.asked" ||
+    type === "permission.replied" ||
+    type === "question.asked" ||
+    type === "question.replied" ||
+    type === "question.rejected";
+}
 
 type TextPartKind = "text" | "reasoning" | "user";
 
@@ -426,7 +438,11 @@ export function createSessionEventConsumer(
   const handleEvent = (event: Event): void => {
     const evSid = eventSessionID(event);
     if (debug) emitAt(Date.now(), { kind: "debug.event", eventType: event.type, ...(evSid !== undefined ? { sessionID: evSid } : {}) });
-    if (evSid !== undefined && evSid !== sessionID) return;
+    if (
+      evSid !== undefined &&
+      evSid !== sessionID &&
+      (!isOwnedRequestEvent(event.type) || callbacks.ownedSessionIDs?.().has(evSid) !== true)
+    ) return;
 
     switch (event.type) {
       case "message.updated": {
@@ -500,6 +516,8 @@ export function createSessionEventConsumer(
           permission: props.permission,
           patterns: props.patterns,
           metadata: props.metadata,
+          always: props.always,
+          tool: props.tool,
         });
         break;
       }
@@ -514,6 +532,7 @@ export function createSessionEventConsumer(
           requestID: props.id,
           sessionID: props.sessionID,
           questions: props.questions,
+          tool: props.tool,
         });
         break;
       }
@@ -669,13 +688,15 @@ export function renderSession(
         messageCreated,
         entry.info.role,
       );
+      // A snapshot part is already materialized: no later delta can extend it, so its
+      // unterminated tail is flushed here, in part order. Live parts stay buffered
+      // because a delta may still arrive for them.
+      const state = partsMap.get(part.id);
+      if (state !== undefined && (state.kind === "text" || state.kind === "reasoning" || state.kind === "user")) {
+        stamp = state.startedAt ?? start;
+        flushRemaining(state, emit);
+      }
     }
-  }
-
-  for (const state of partsMap.values()) {
-    if (state.kind !== "text" && state.kind !== "reasoning" && state.kind !== "user") continue;
-    stamp = state.startedAt ?? Date.now();
-    flushRemaining(state, emit);
   }
 
   return { events, eventTimes, lines, lineTimes };

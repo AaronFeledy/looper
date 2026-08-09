@@ -2,6 +2,7 @@ import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } fro
 
 import type { LoopState } from "../lib/state.ts";
 import { subscribe } from "../lib/state.ts";
+import { queueSummaryLine } from "./permission-gate.ts";
 import { truncateDisplay } from "./text-layout.ts";
 
 const QUESTION_TEXT_MAX_WIDTH = 100;
@@ -17,18 +18,19 @@ function firstQuestionText(questions: readonly unknown[]): string | undefined {
 
 export function pendingRequestLines(state: LoopState): string[] {
   const lines: string[] = [];
-  const permission = state.pendingPermission;
-  if (permission !== null) {
-    const patterns = permission.patterns.length > 0 ? ` — ${permission.patterns.join(", ")}` : "";
-    lines.push(`Agent is waiting on permission '${permission.permission}'${patterns}`);
-    lines.push(`Reply from an attached opencode client, or set permissionPolicy.${permission.permission} in looper.yml`);
+  for (const request of state.pendingRequests) {
+    if (request.kind === "permission") {
+      const patterns = request.patterns.length > 0 ? ` — ${request.patterns.join(", ")}` : "";
+      lines.push(`Agent is waiting on permission '${request.permission}'${patterns}`);
+      lines.push(`[y] once  [a] always  [d] deny  [s] deny + skip  -  or an attached opencode client / permissionPolicy.${request.permission}`);
+    } else {
+      const text = firstQuestionText(request.questions);
+      lines.push(text === undefined ? "Agent asked a question" : `Agent asked: ${text}`);
+      lines.push("[d] reject  [s] skip  -  richer answers need an attached opencode client / questionPolicy: reject");
+    }
   }
-  const question = state.pendingQuestion;
-  if (question !== null) {
-    const text = firstQuestionText(question.questions);
-    lines.push(text === undefined ? "Agent asked a question" : `Agent asked: ${text}`);
-    lines.push("Answer from an attached opencode client, or set questionPolicy: reject in looper.yml");
-  }
+  const summary = queueSummaryLine(state.pendingRequests.length);
+  if (summary !== null) lines.push(summary);
   return lines;
 }
 

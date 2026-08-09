@@ -2,15 +2,18 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
 import type { RunContinuationRecord } from "./continuation-records.ts";
-import { classifyAssistantForMessage } from "./assistant-classification.ts";
+import { classifyAssistantWithReactivationGrace, sessionReactivatedMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
+import type { RequestBroker } from "./request-broker.ts";
+import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
+import { createPausableTimeout } from "./pausable-timeout.ts";
 import { createRunnerEventController, parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
@@ -34,6 +37,7 @@ export type RunOpenCodeStepOptions = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
+  requestBrokerOwner?: RequestBrokerOwner;
 };
 
 export async function runOpenCodeStep({
@@ -50,6 +54,7 @@ export async function runOpenCodeStep({
   sessionMetadata,
   permissionPolicy,
   questionPolicy,
+  requestBrokerOwner,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -114,17 +119,23 @@ export async function runOpenCodeStep({
     if (state.restartRequested) requestCancellation(state.restartReason ?? "manual");
     else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
-  const timeout = setTimeout(() => {
+  let timeoutController: ReturnType<typeof createPausableTimeout> | undefined;
+  const onTimeout = (): void => {
     if (cancellation.action !== null) return;
     state.restartRequested = true;
     state.restartReason = "timeout";
     notify();
     requestCancellation("timeout");
-  }, effectiveTimeoutMs);
+  };
 
   let eventStream: PromptEventStream | undefined;
+  let requestBroker: RequestBroker | undefined;
+  let localBrokerOwner: RequestBrokerOwner | undefined;
+  let unsubscribeHumanGate: (() => void) | undefined;
+  let teardownError: string | undefined;
   let sessionEventError: Error | undefined;
   let finalError: Error | undefined;
+  timeoutController = createPausableTimeout({ durationMs: effectiveTimeoutMs, onElapsed: onTimeout });
 
   try {
     let sid = cancellation.activeSessionID;
@@ -146,26 +157,34 @@ export async function runOpenCodeStep({
     }
     pushLine(`[looper] session=${sid}`);
     const boundSessionID = sid;
+    const brokerOwner = requestBrokerOwner ?? createRequestBrokerOwner({
+      state,
+      client,
+      repoDir,
+      step,
+      pushLine,
+      unattended: false,
+      friction: { counts: new Map(), requestIDs: new Set() },
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    });
+    if (requestBrokerOwner === undefined) localBrokerOwner = brokerOwner;
+    unsubscribeHumanGate = brokerOwner.subscribeHumanGate(timeoutController.setGateOpen);
+    const boundBroker = brokerOwner.bind(boundSessionID);
+    const ownedSessions = boundBroker.ownedSessions;
     const hiddenUserMessageIDs = new Set<string>(activeStep.looperMessageIDs ?? []);
     setStepPromptText(state, stepIndex, prompt);
 
+    requestBroker = boundBroker.broker;
     const consumer = createSessionEventConsumer(boundSessionID, {
       pushLine,
       pushLines,
+      ownedSessionIDs: () => ownedSessions.ids(),
       onEvent: (event, at) => {
         pushAgentEvent(state, event, at);
         pushStepOutputEvent(state, stepIndex, event, at);
       },
-      ...createRunnerEventController({
-        state,
-        client,
-        repoDir,
-        step,
-        activeSessionID: boundSessionID,
-        pushLine,
-        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-        ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-      }),
+      ...requestBroker.callbacks,
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
@@ -182,6 +201,7 @@ export async function runOpenCodeStep({
       cancellationActive: () => cancellation.action !== null,
       pushLine,
       consumer,
+      reconcileRequests: brokerOwner.reconcile,
     });
     await eventStream.start();
 
@@ -228,13 +248,19 @@ export async function runOpenCodeStep({
     }
   } finally {
     clearInterval(watcher);
-    clearTimeout(timeout);
+    unsubscribeHumanGate?.();
+    timeoutController?.dispose();
     subscription.ctrl?.abort();
     ctrl.abort();
     await eventStream?.stop();
     eventStream?.flush();
-    setPendingPermission(state, null);
-    setPendingQuestion(state, null);
+    if (cancellation.action !== null && cancellation.activeSessionID !== undefined) {
+      const brokerOwner = requestBrokerOwner ?? localBrokerOwner;
+      const teardown = await brokerOwner?.teardown(cancellation.activeSessionID);
+      if (teardown?.safeToProceed === false) teardownError = teardown.reason;
+    }
+    localBrokerOwner?.dispose();
+    if (requestBrokerOwner === undefined) clearPendingRequests(state);
   }
 
   const consumerError = eventStream?.consumerError();
@@ -245,11 +271,28 @@ export async function runOpenCodeStep({
     finalError = sessionEventError;
   }
   if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
-    const classification = await classifyAssistantForMessage(client, repoDir, cancellation.activeSessionID, sentMessageID);
+    const boundSessionID = cancellation.activeSessionID;
+    let reactivated = false;
+    const classification = await classifyAssistantWithReactivationGrace({
+      client,
+      repoDir,
+      sessionID: boundSessionID,
+      parentMessageID: sentMessageID,
+      shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+      log: pushLine,
+      onReactivated: () => {
+        reactivated = true;
+      },
+    });
     if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
+    // A reactivated session must NOT complete the step: opencode is generating
+    // again, and the reattach path owns that session from here.
+    else if (reactivated) finalError = new Error(`${sessionReactivatedMessage(boundSessionID)}; reattaching instead of completing the step`);
   }
 
+  if (teardownError !== undefined) finalError = new Error(teardownError);
   const status: StepResult =
+    teardownError !== undefined ? "failed" :
     cancellation.action === "restart" ? "restart" :
     cancellation.action === "skip" ? "skipped" :
     finalError ? "failed" : "done";

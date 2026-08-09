@@ -210,8 +210,10 @@ describe("runNonTtyIterations resume wiring", () => {
     scratch = repoDir;
     const { client } = makeClient({ repoDir, sessionIDs: [] });
     let receivedPattern: string | undefined;
+    let receivedUnattended: boolean | undefined;
     spyOn(orchestrator, "runIteration").mockImplementation(async (input) => {
       receivedPattern = input.storyIdPattern;
+      receivedUnattended = input.unattended;
       return "complete";
     });
     const priorExitCode = process.exitCode ?? 0;
@@ -233,6 +235,7 @@ describe("runNonTtyIterations resume wiring", () => {
 
     // Then RunIterationOptions receives the configured pattern unchanged.
     expect(receivedPattern).toBe("^story/([a-z]+-[0-9]+)$");
+    expect(receivedUnattended).toBe(true);
   });
 
   test(

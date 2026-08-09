@@ -148,6 +148,8 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly recoverySnapshots?: RecoverySnapshotsConfig;
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
+  readonly unattended?: boolean;
+  readonly writeStop: (reason: string) => void;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
   readonly storyIdPattern?: string;

@@ -4,13 +4,15 @@ import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeT
 import type { PriorSessionEvaluation } from "../core/session-types.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
+import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
-import { createRunnerEventController, type Step, type StepRunResult } from "./step-runner-types.ts";
+import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
+import { createPausableTimeout } from "./pausable-timeout.ts";
+import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
-import { classifyAssistantForMessage, type AssistantClassification } from "./assistant-classification.ts";
+import { classifyAssistantForMessage, classifyAssistantWithReactivationGrace } from "./assistant-classification.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
@@ -165,6 +167,7 @@ export type ReattachStepOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   timeoutMsOverride?: number;
+  requestBrokerOwner?: RequestBrokerOwner;
 };
 
 export async function reattachOpenCodeStep({
@@ -181,6 +184,7 @@ export async function reattachOpenCodeStep({
   questionPolicy,
   useSessionIdle,
   timeoutMsOverride,
+  requestBrokerOwner,
 }: ReattachStepOptions): Promise<StepRunResult> {
   const activeStep = state.steps[stepIndex];
   if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
@@ -235,14 +239,14 @@ export async function reattachOpenCodeStep({
     if (state.restartRequested) requestCancellation("restart");
     else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
-  const stepTimeout = setTimeout(() => {
+  const onStepTimeout = (): void => {
     if (cancellationAction !== null) return;
     pushLine(`[looper] reattach exceeded step timeout after ${Math.round(effectiveTimeoutMs / 1000)}s for ${step.name}; aborting session and restarting in a fresh session`);
     state.restartRequested = true;
     state.restartReason = "timeout";
     notify();
     requestCancellation("restart");
-  }, effectiveTimeoutMs);
+  };
   let consumerPromise: Promise<void> | undefined;
   let sessionEventError: Error | undefined;
   let timedOut = false;
@@ -277,6 +281,21 @@ export async function reattachOpenCodeStep({
     }
   };
   const hiddenUserMessageIDs = new Set<string>(looperMessageIDs ?? activeStep.looperMessageIDs ?? []);
+  const brokerOwner = requestBrokerOwner ?? createRequestBrokerOwner({
+    state,
+    client,
+    repoDir,
+    step,
+    pushLine,
+    unattended: false,
+    friction: { counts: new Map(), requestIDs: new Set() },
+    ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+    ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+  });
+  const localBrokerOwner = requestBrokerOwner === undefined ? brokerOwner : undefined;
+  const requestBroker = brokerOwner.bind(sessionID).broker;
+  const stepTimeout = createPausableTimeout({ durationMs: effectiveTimeoutMs, onElapsed: onStepTimeout });
+  const unsubscribeHumanGate = brokerOwner.subscribeHumanGate(stepTimeout.setGateOpen);
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
@@ -285,16 +304,7 @@ export async function reattachOpenCodeStep({
       pushAgentEvent(state, event, at);
       pushStepOutputEvent(state, stepIndex, event, at);
     },
-    ...createRunnerEventController({
-      state,
-      client,
-      repoDir,
-      step,
-      activeSessionID: sessionID,
-      pushLine,
-      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-    }),
+    ...requestBroker.callbacks,
     onSessionError: (message) => {
       sessionEventError ??= new Error(`session.error: ${message}`);
     },
@@ -313,6 +323,7 @@ export async function reattachOpenCodeStep({
     const sub = await client.event.subscribe({ directory: repoDir }, { signal: ctrl.signal });
     if (!sub.stream) throw new Error("event.subscribe returned no stream");
     pushLine(`[looper] subscribed to events for reattach`);
+    await brokerOwner.reconcile();
     consumerPromise = consumer.consume(sub.stream).catch((err) => {
       const error = toError(err);
       if (isAbortError(error)) return;
@@ -368,7 +379,8 @@ export async function reattachOpenCodeStep({
     }
   } finally {
     clearInterval(watcher);
-    clearTimeout(stepTimeout);
+    unsubscribeHumanGate();
+    stepTimeout.dispose();
     ctrl.abort();
     if (consumerPromise) {
       let consumerTimedOut = false;
@@ -389,8 +401,15 @@ export async function reattachOpenCodeStep({
       pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
     }
     consumer.flush();
-    setPendingPermission(state, null);
-    setPendingQuestion(state, null);
+    if (cancellationAction !== null) {
+      const teardown = await brokerOwner.teardown(sessionID);
+      if (!teardown.safeToProceed) {
+        cancellationAction = null;
+        sessionEventError = new Error(teardown.reason);
+      }
+    }
+    localBrokerOwner?.dispose();
+    if (requestBrokerOwner === undefined) clearPendingRequests(state);
   }
 
   const finalize = (
@@ -420,7 +439,14 @@ export async function reattachOpenCodeStep({
     return finalize("failed", { errorMessage: reason });
   }
 
-  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, outcomeMessageID);
+  const classification = await classifyAssistantWithReactivationGrace({
+    client,
+    repoDir,
+    sessionID,
+    parentMessageID: outcomeMessageID,
+    shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+    log: pushLine,
+  });
   if (classification.kind === "done") {
     pushLine(`[looper] reattach: assistant message ${outcomeMessageID} completed cleanly`);
     let record: RunContinuationRecord | null = null;

@@ -2,6 +2,7 @@ import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } fro
 
 import type { LoopState } from "../lib/state.ts";
 import { focusPaneTabLabel, nextFocusedPane, selectedOrActiveStep, subscribe } from "../lib/state.ts";
+import { modalFocusWinner } from "./permission-gate.ts";
 
 function footerContent(state: LoopState): string {
   if (state.escConfirm === "reset") {
@@ -12,6 +13,14 @@ function footerContent(state: LoopState): string {
   }
   if (state.recovery !== null) {
     return `step failed — [r]estart  [n]udge  [q]uit`;
+  }
+  if (modalFocusWinner(state) === "permission") {
+    const keys =
+      state.pendingRequests[0]?.kind === "question"
+        ? `[d] reject  [s] skip`
+        : `[y] once  [a] always  [d] deny  [s] deny + skip`;
+    const queued = state.pendingRequests.length > 1 ? `  (+${state.pendingRequests.length - 1} waiting)` : "";
+    return `agent is waiting on you - ${keys}${queued}  [q]uit`;
   }
   if (state.historyView !== null) {
     const navHint =
@@ -57,7 +66,7 @@ function footerContent(state: LoopState): string {
 function footerColor(state: LoopState): string {
   if (state.escConfirm !== null) return "#f38ba8";
   if (state.recovery !== null) return "#f38ba8";
-  if (state.pendingPermission !== null || state.pendingQuestion !== null) return "#f9e2af";
+  if (state.pendingRequests.length > 0) return "#f9e2af";
   if (state.historyView !== null) return "#cba6f7";
   return state.paused || state.stopAfterIteration || state.skipRequested || state.restartRequested ? "#f9e2af" : "#6c7086";
 }

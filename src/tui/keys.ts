@@ -21,8 +21,10 @@ import {
   toggleConfigModal,
   toggleFocusedPane,
   togglePromptModal,
+  tryClaimPendingRequestDecision,
 } from "../lib/state.ts";
 import { tryOpenCurrentPr } from "./github-status.ts";
+import { modalFocusWinner, permissionKeyAction, questionKeyAction } from "./permission-gate.ts";
 
 export type KeyHooks = {
   onEscape: () => void;
@@ -158,6 +160,18 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
 
     if (keyName === "c") {
       toggleConfigModal(state);
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      return;
+    }
+
+    // Human gate for permission/question asks. Recovery and the esc confirmation outrank it
+    // (modalFocusWinner owns that order); quit and interrupt stay reachable so a gated run can
+    // always be abandoned. Every other key is held by the gate.
+    const gateHead = state.pendingRequests[0];
+    if (!event.ctrl && keyName !== "q" && gateHead !== undefined && modalFocusWinner(state) === "permission") {
+      const action = gateHead.kind === "permission" ? permissionKeyAction(keyName) : questionKeyAction(keyName);
+      // The broker consumes the claim; deny+skip signals the skip only after its reject lands.
+      if (action !== null) tryClaimPendingRequestDecision(state, { requestID: gateHead.requestID, generation: gateHead.generation, action });
       if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }

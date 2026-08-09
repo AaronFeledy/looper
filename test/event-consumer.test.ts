@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Event } from "@opencode-ai/sdk/v2";
 
 import { consumeSessionEvents, createSessionEventConsumer, renderSession } from "../src/lib/event-consumer.ts";
+import { OwnedSessionSet } from "../src/lib/owned-session-set.ts";
 import type {
   PermissionAskedPayload,
   PermissionRepliedPayload,
@@ -176,6 +177,8 @@ describe("request lifecycle callbacks", () => {
         permission: "edit",
         patterns: ["src/**/*.ts"],
         metadata: { filepath: "src/lib/event-consumer.ts" },
+        always: ["src/**/*.ts"],
+        tool: { messageID: MID, callID: "call_1" },
       },
     ]);
     expect(permissionsReplied).toEqual([{ sessionID: SID, requestID: "per_1", reply: "once" }]);
@@ -193,6 +196,7 @@ describe("request lifecycle callbacks", () => {
             ],
           },
         ],
+        tool: { messageID: MID, callID: "call_2" },
       },
     ]);
     expect(questionsReplied).toEqual([{ sessionID: SID, requestID: "que_1", answers: [["yes"]] }]);
@@ -259,6 +263,81 @@ describe("request lifecycle callbacks", () => {
     );
 
     expect(fired).toBe(0);
+  });
+
+  test("delivers permission and question lifecycle events for an owned child session", async () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+    ownedSessions.addChild("ses_child");
+    const delivered: string[] = [];
+
+    // When
+    await consumeSessionEvents(
+      makeStream([
+        permissionAsked("per_child", "ses_child"),
+        permissionReplied("per_child", "once", "ses_child"),
+        questionAsked("que_child", "ses_child"),
+        questionReplied("que_child", "ses_child"),
+        questionRejected("que_child_rejected", "ses_child"),
+      ]),
+      SID,
+      {
+        pushLine: () => {},
+        ownedSessionIDs: () => ownedSessions.ids(),
+        onPermissionAsked: (payload) => delivered.push(payload.requestID),
+        onPermissionReplied: (payload) => delivered.push(payload.requestID),
+        onQuestionAsked: (payload) => delivered.push(payload.requestID),
+        onQuestionReplied: (payload) => delivered.push(payload.requestID),
+        onQuestionRejected: (payload) => delivered.push(payload.requestID),
+      },
+    );
+
+    // Then
+    expect(delivered).toEqual(["per_child", "per_child", "que_child", "que_child", "que_child_rejected"]);
+  });
+
+  test("keeps non-request events on the strict primary-session filter", async () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+    ownedSessions.addChild("ses_child");
+    let fired = 0;
+
+    // When
+    await consumeSessionEvents(makeStream([sessionIdle("ses_child"), todoUpdated("ses_child")]), SID, {
+      pushLine: () => {},
+      ownedSessionIDs: () => ownedSessions.ids(),
+      onSessionIdle: () => { fired += 1; },
+      onTodoUpdated: () => { fired += 1; },
+    });
+
+    // Then
+    expect(fired).toBe(0);
+  });
+});
+
+describe("OwnedSessionSet", () => {
+  test("seeds the primary session and adds and removes child sessions", () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+
+    // When
+    ownedSessions.addChild("ses_child");
+    ownedSessions.removeChild(SID);
+    ownedSessions.removeChild("ses_child");
+
+    // Then
+    expect([...ownedSessions.ids()]).toEqual([SID]);
+  });
+
+  test("excludes title-purpose child sessions", () => {
+    // Given
+    const ownedSessions = new OwnedSessionSet(SID);
+
+    // When
+    ownedSessions.addChild("ses_title", "title");
+
+    // Then
+    expect([...ownedSessions.ids()]).toEqual([SID]);
   });
 });
 
@@ -447,6 +526,84 @@ describe("user message visibility", () => {
       { kind: "user.started" },
       { kind: "user.text", text: "plugin continuation" },
     ]);
+  });
+
+  test("keeps a whole multiline user prompt, unterminated final line included, ahead of later assistant work", () => {
+    // Given: a visible user turn whose single text part carries three lines, the last of
+    // which has no trailing newline and no part.time.end (so only the map-wide final
+    // flush can emit it), followed by an assistant turn that reasons and calls a tool.
+    const userCreated = 1_700_000_300_000;
+    const assistantCreated = userCreated + 1_000;
+    const promptLines = [
+      "TASK: add a regression test",
+      "EXPECTED OUTCOME: it fails today",
+      "<!-- OMO_INTERNAL_INITIATOR -->",
+    ];
+
+    // When: the session is rendered offline.
+    const { events } = renderSession([
+      {
+        info: { id: "msg_user", role: "user", sessionID: SID, time: { created: userCreated } } as never,
+        parts: [
+          {
+            id: "p_user",
+            sessionID: SID,
+            messageID: "msg_user",
+            type: "text",
+            text: promptLines.join("\n"),
+            time: { start: userCreated },
+          } as never,
+        ],
+      },
+      {
+        info: {
+          id: MID,
+          sessionID: SID,
+          role: "assistant",
+          time: { created: assistantCreated, completed: assistantCreated + 6_000 },
+        } as never,
+        parts: [
+          {
+            id: "p_reasoning",
+            sessionID: SID,
+            messageID: MID,
+            type: "reasoning",
+            text: "weighing the options\n",
+            time: { start: assistantCreated + 1_000, end: assistantCreated + 2_000 },
+          } as never,
+          {
+            id: "p_tool",
+            sessionID: SID,
+            messageID: MID,
+            type: "tool",
+            callID: "call_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "ls" },
+              output: "ok",
+              title: "bash",
+              metadata: {},
+              time: { start: assistantCreated + 3_000, end: assistantCreated + 4_000 },
+            },
+          } as never,
+        ],
+      },
+    ]);
+
+    // Then: every chunk of the prompt survives, in order...
+    const userTexts = events.flatMap((event) => (event.kind === "user.text" ? [event.text] : []));
+    expect(userTexts).toEqual(promptLines);
+    // ...including the trailing marker, which must be rendered rather than stripped...
+    expect(userTexts).toContain("<!-- OMO_INTERNAL_INITIATOR -->");
+
+    // ...and the whole prompt precedes the assistant's first reasoning/tool event.
+    const lastUserTextIndex = events.findLastIndex((event) => event.kind === "user.text");
+    const firstAssistantWorkIndex = events.findIndex(
+      (event) => event.kind === "reasoning.started" || event.kind === "reasoning.text" || event.kind === "tool.started",
+    );
+    expect(firstAssistantWorkIndex).toBeGreaterThanOrEqual(0);
+    expect(lastUserTextIndex).toBeLessThan(firstAssistantWorkIndex);
   });
 
   test("offline rendering does not flush unterminated hidden user text", () => {

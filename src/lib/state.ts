@@ -203,12 +203,38 @@ export type PendingPermission = {
   permission: string;
   patterns: string[];
   metadata?: Record<string, unknown>;
+  generation: number;
+  askedAt?: number;
 };
 
 export type PendingQuestion = {
   requestID: string;
   sessionID: string;
   questions: unknown[];
+  generation: number;
+  askedAt?: number;
+};
+
+export type PendingRequestStatus = "open" | "resolving" | "error";
+export type PendingRequestDecisionAction = "once" | "always" | "reject" | "skip";
+
+type PendingRequestState = {
+  status: PendingRequestStatus;
+  decision?: PendingRequestDecisionAction;
+  lastError?: string;
+};
+
+export type PendingRequest =
+  | ({ kind: "permission" } & PendingPermission & PendingRequestState)
+  | ({ kind: "question" } & PendingQuestion & PendingRequestState);
+
+export type PendingRequestIdentity = {
+  requestID: string;
+  generation: number;
+};
+
+export type PendingRequestDecision = PendingRequestIdentity & {
+  action: PendingRequestDecisionAction;
 };
 
 export type TodoItem = {
@@ -239,8 +265,7 @@ export type LoopState = {
   restartRequested: boolean;
   restartReason?: StepRestartReason;
   recovery: RecoveryPrompt | null;
-  pendingPermission: PendingPermission | null;
-  pendingQuestion: PendingQuestion | null;
+  pendingRequests: PendingRequest[];
   todos: TodoItem[];
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
@@ -427,8 +452,7 @@ export function createLoopState({
     restartRequested: false,
     restartReason: undefined,
     recovery: null,
-    pendingPermission: null,
-    pendingQuestion: null,
+    pendingRequests: [],
     todos: [],
     recoveryChoice: null,
     escConfirm: null,
@@ -451,13 +475,78 @@ export function createLoopState({
   };
 }
 
-export function setPendingPermission(state: LoopState, pending: PendingPermission | null): void {
-  state.pendingPermission = pending;
+function enqueuePendingRequest(state: LoopState, pending: PendingRequest): void {
+  const index = state.pendingRequests.findIndex(({ requestID }) => requestID === pending.requestID);
+  if (index === -1) state.pendingRequests.push(pending);
+  else state.pendingRequests[index] = pending;
   notifyStateChange();
 }
 
-export function setPendingQuestion(state: LoopState, pending: PendingQuestion | null): void {
-  state.pendingQuestion = pending;
+export function enqueuePendingPermission(state: LoopState, pending: PendingPermission): void {
+  enqueuePendingRequest(state, { kind: "permission", status: "open", ...pending });
+}
+
+export function enqueuePendingQuestion(state: LoopState, pending: PendingQuestion): void {
+  enqueuePendingRequest(state, { kind: "question", status: "open", ...pending });
+}
+
+export function tryClaimPendingRequestDecision(state: LoopState, decision: PendingRequestDecision): boolean {
+  const head = state.pendingRequests[0];
+  if (head === undefined || head.status !== "open" || head.requestID !== decision.requestID || head.generation !== decision.generation) return false;
+  head.status = "resolving";
+  head.decision = decision.action;
+  notifyStateChange();
+  return true;
+}
+
+export function consumePendingRequestDecision(state: LoopState, identity: PendingRequestIdentity): PendingRequestDecisionAction | null {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request?.status !== "resolving" || request.decision === undefined) return null;
+  const decision = request.decision;
+  delete request.decision;
+  notifyStateChange();
+  return decision;
+}
+
+export function setPendingRequestError(state: LoopState, identity: PendingRequestIdentity, lastError: string): boolean {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request === undefined) return false;
+  request.status = "error";
+  request.lastError = lastError;
+  delete request.decision;
+  notifyStateChange();
+  return true;
+}
+
+export function reopenPendingRequest(state: LoopState, identity: PendingRequestIdentity, lastError: string): boolean {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request === undefined) return false;
+  request.status = "open";
+  request.lastError = lastError;
+  delete request.decision;
+  notifyStateChange();
+  return true;
+}
+
+export function clearPendingRequest(state: LoopState, identity: PendingRequestIdentity): boolean {
+  const index = state.pendingRequests.findIndex(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (index === -1) return false;
+  state.pendingRequests.splice(index, 1);
+  notifyStateChange();
+  return true;
+}
+
+export function clearPendingRequests(state: LoopState): void {
+  if (state.pendingRequests.length === 0) return;
+  state.pendingRequests = [];
   notifyStateChange();
 }
 
@@ -1226,6 +1315,70 @@ export function hydrateResumableBootStep(
   if (checkpoint.sessionID !== undefined) step.sessionID = checkpoint.sessionID;
   if (checkpoint.looperMessageIDs !== undefined) step.looperMessageIDs = [...checkpoint.looperMessageIDs];
   if (checkpoint.title !== undefined) step.title = checkpoint.title;
+}
+
+/**
+ * Reflect a durable resume checkpoint onto the idle TUI steps list before the
+ * operator presses [g]/enter. Prior steps in the resume iteration show as done
+ * (with any persisted session IDs), the resume target is selected and hydrated
+ * with in-flight checkpoint fields, and `resumable` is set so ESC can reset.
+ * No-op when `started` is already true or the plan is not a resume.
+ */
+export function applyResumableBootUi(
+  state: LoopState,
+  plan: {
+    readonly resumed: boolean;
+    readonly startIteration: number;
+    readonly startStepIndex: number;
+    readonly resume?: {
+      readonly promptText?: string;
+      readonly sessionID?: string;
+      readonly looperMessageIDs?: readonly string[];
+    };
+    readonly title?: string;
+    readonly stepSessions?: readonly { readonly stepIndex: number; readonly sessionID: string }[];
+  },
+): void {
+  if (state.started || !plan.resumed) return;
+
+  state.resumable = true;
+  if (plan.startIteration > 0) state.iteration = plan.startIteration;
+
+  const startStepIndex = Math.max(0, plan.startStepIndex);
+  for (const step of state.steps.slice(0, startStepIndex)) {
+    step.status = "done";
+    step.finishedAt ??= Date.now();
+    if (plan.title !== undefined && step.title === undefined) step.title = plan.title;
+  }
+
+  if (plan.stepSessions !== undefined) {
+    for (const entry of plan.stepSessions) {
+      if (entry.stepIndex >= startStepIndex) continue;
+      const step = state.steps[entry.stepIndex];
+      if (step === undefined) continue;
+      step.sessionID = entry.sessionID;
+      if (step.status === "pending") {
+        step.status = "done";
+        step.finishedAt ??= Date.now();
+      }
+      if (plan.title !== undefined && step.title === undefined) step.title = plan.title;
+    }
+  }
+
+  if (state.steps.length === 0) return;
+
+  const resumeStepIndex = Math.min(startStepIndex, state.steps.length - 1);
+  const resumeStep = state.steps[resumeStepIndex];
+  if (resumeStep !== undefined) {
+    hydrateResumableBootStep(resumeStep, {
+      ...(plan.resume?.promptText !== undefined ? { promptText: plan.resume.promptText } : {}),
+      ...(plan.resume?.sessionID !== undefined ? { sessionID: plan.resume.sessionID } : {}),
+      ...(plan.resume?.looperMessageIDs !== undefined ? { looperMessageIDs: plan.resume.looperMessageIDs } : {}),
+      ...(plan.title !== undefined ? { title: plan.title } : {}),
+    });
+  }
+  state.selectedStepIndex = resumeStepIndex;
+  state.selectedBackgroundSessionID = null;
 }
 
 export function selectedOrActiveStep(state: LoopState): LoopStep | null {

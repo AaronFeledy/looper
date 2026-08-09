@@ -16,7 +16,7 @@ import { startAgentRegistry, type AgentRegistry } from "./opencode/agent-registr
 import { waitWithCountdown } from "./lib/fallback-ui.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import { computeRunResumePlan, runEngine, type RunResumePlan } from "./engine/run-engine.ts";
-import { stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
+import { permissionBellEnabled, stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
@@ -29,12 +29,12 @@ import { lookupServerVersion } from "./lib/server-version.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
 import {
+  applyResumableBootUi,
   cancelPendingNotify,
   createLoopState,
   createStepRow,
   dismissEscConfirm,
   type EscConfirmMode,
-  hydrateResumableBootStep,
   notify,
   pushAgentLine,
   resetIterationNavigationState,
@@ -55,6 +55,8 @@ import { createConfigOverlay } from "./tui/config-overlay.ts";
 import { createHelpOverlay } from "./tui/help-overlay.ts";
 import { createPromptOverlay } from "./tui/prompt-overlay.ts";
 import { createPendingRequestPanel } from "./tui/pending-request-panel.ts";
+import { createPermissionBell } from "./tui/permission-bell.ts";
+import { createPermissionDialog } from "./tui/permission-dialog.ts";
 import { createHeader } from "./tui/header.ts";
 import { bindKeys, installBootInterruptHandler } from "./tui/keys.ts";
 import { createRecoveryMenu } from "./tui/recovery-menu.ts";
@@ -70,6 +72,7 @@ import type { PrdWatcher } from "./watchers/prd.ts";
 import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 import { createStoryStateStore } from "./persistence/story-state-store.ts";
+import { clearPermissionAudit } from "./opencode/permission-audit.ts";
 import { handleSignal } from "./lib/signal.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
@@ -195,6 +198,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
     storyStateStore.clear();
+    clearPermissionAudit(configDir);
   }
   let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
 
@@ -277,38 +281,31 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let firstIterationWasResumed = firstIterationResumed;
   let firstIterationResumePoint = firstIterationStartStepIndex;
 
-  // Make a resumable boot look like the prior run never exited: mark the
-  // already-completed steps of the resume iteration as done and pre-select the
-  // step we will resume on. On a clean slate, pre-select the first step so it is
-  // obvious that pressing enter starts it. Also rehydrate in-flight checkpoint
-  // fields (promptText/session/title) onto that row so idle-TUI actions like `v`
-  // work before [g]o starts the engine.
+  // Make a resumable boot look like the prior run never exited: mark prior
+  // steps done, attach stepSessions, hydrate the resume target, and select it.
+  // On a clean slate, pre-select the first step so enter obviously starts it.
   if (!state.started) {
     if (firstIterationResumed) {
-      state.resumable = true;
-      for (const step of state.steps.slice(0, firstIterationStartStepIndex)) {
-        step.status = "done";
-        step.finishedAt ??= Date.now();
-      }
-      if (state.steps.length > 0) {
-        const resumeStepIndex = Math.min(firstIterationStartStepIndex, state.steps.length - 1);
-        const resumeStep = state.steps[resumeStepIndex];
-        if (resumeStep !== undefined) {
-          hydrateResumableBootStep(resumeStep, {
-            ...(firstIterationResume?.promptText !== undefined ? { promptText: firstIterationResume.promptText } : {}),
-            ...(firstIterationResume?.sessionID !== undefined ? { sessionID: firstIterationResume.sessionID } : {}),
-            ...(firstIterationResume?.looperMessageIDs !== undefined
-              ? { looperMessageIDs: firstIterationResume.looperMessageIDs }
-              : {}),
-            ...(firstIterationTitle !== undefined ? { title: firstIterationTitle } : {}),
-          });
-        }
-      }
-    }
-    if (state.steps.length > 0) {
-      state.selectedStepIndex = firstIterationResumed
-        ? Math.min(firstIterationStartStepIndex, state.steps.length - 1)
-        : 0;
+      applyResumableBootUi(state, {
+        resumed: true,
+        startIteration,
+        startStepIndex: firstIterationStartStepIndex,
+        ...(firstIterationResume !== undefined
+          ? {
+              resume: {
+                ...(firstIterationResume.promptText !== undefined ? { promptText: firstIterationResume.promptText } : {}),
+                ...(firstIterationResume.sessionID !== undefined ? { sessionID: firstIterationResume.sessionID } : {}),
+                ...(firstIterationResume.looperMessageIDs !== undefined
+                  ? { looperMessageIDs: firstIterationResume.looperMessageIDs }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(firstIterationTitle !== undefined ? { title: firstIterationTitle } : {}),
+        ...(iterationStepSessions.length > 0 ? { stepSessions: iterationStepSessions } : {}),
+      });
+    } else if (state.steps.length > 0) {
+      state.selectedStepIndex = 0;
       state.selectedBackgroundSessionID = null;
     }
   }
@@ -319,6 +316,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   let server: ServerHandle | undefined;
   let cleanupBootInterrupt: (() => void) | undefined;
   let cleanupKeys: (() => void) | undefined;
+  let cleanupBell: (() => void) | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let agentRegistry: AgentRegistry | undefined;
   let agentRegistryController: { stop: () => void } | undefined;
@@ -365,6 +363,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       try {
         cleanupBootInterrupt?.();
         cleanupKeys?.();
+        cleanupBell?.();
       } catch (error) { // no-excuse-ok: catch -- force-kill cleanup must not block the hard exit
         ignoreForceKillCleanupError(error);
       }
@@ -547,6 +546,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     root.add(createHelpOverlay(renderer, state));
     root.add(createPromptOverlay(renderer, state));
     root.add(createConfigOverlay(renderer, state, configDir));
+    root.add(createPermissionDialog(renderer, state));
     root.add(createPendingRequestPanel(renderer, state));
     root.add(createRecoveryMenu(renderer, state));
     root.add(createFooter(renderer, state));
@@ -580,6 +580,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       adjudicationStore.clearMarker();
       adjudicationStore.clearSession();
       storyStateStore.clear();
+      clearPermissionAudit(configDir);
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
@@ -598,6 +599,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       state.manualStepSelection = false;
       state.activeStepIndex = null;
       state.resumable = false;
+      state.iteration = 0;
       notify();
     };
     const handleEscape = () => {
@@ -636,6 +638,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         adjudicationStore.clearMarker();
         adjudicationStore.clearSession();
         storyStateStore.clear();
+        clearPermissionAudit(configDir);
       }
       if (!state.started) {
         if (state.manualStepSelection && state.selectedStepIndex !== null) {
@@ -664,6 +667,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     cleanupBootInterrupt?.();
     cleanupBootInterrupt = undefined;
+
+    cleanupBell = createPermissionBell(state, {
+      enabled: permissionBellEnabled(),
+      isTTY: process.stdout.isTTY === true,
+      write: (text) => {
+        process.stdout.write(text);
+      },
+    });
 
     cleanupKeys = bindKeys(renderer, state, {
       onEscape: () => {
@@ -810,6 +821,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   } finally {
     cleanupBootInterrupt?.();
     cleanupKeys?.();
+    cleanupBell?.();
     agentRegistryController?.stop();
     agentRegistry?.stop();
     backgroundAgentStreamer?.stop();

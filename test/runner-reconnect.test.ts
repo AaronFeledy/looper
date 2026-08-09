@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "../src/lib/event-consumer.ts";
@@ -264,7 +264,7 @@ describe("runOpenCodeStep headless policy events", () => {
     const run = await runPolicyStep({ events: [permissionAsked("per_uncovered", "edit")], permissionPolicy: { bash: "once" } });
 
     expect(run.replyCalls).toEqual([]);
-    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
     expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
   });
 
@@ -272,7 +272,7 @@ describe("runOpenCodeStep headless policy events", () => {
     const run = await runPolicyStep({ events: [permissionAsked("per_ask", "edit")], permissionPolicy: { edit: "ask" } });
 
     expect(run.replyCalls).toEqual([]);
-    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
     expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
   });
 
@@ -304,7 +304,7 @@ describe("runOpenCodeStep headless policy events", () => {
 
     expect(run.questionRejectCalls).toEqual([]);
     expect(run.questionReplyCalls).toEqual([]);
-    expect(run.state.pendingQuestion).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
   });
 
   test("updates active session todos in state", async () => {
@@ -583,10 +583,25 @@ describe("runIteration reattach policy propagation", () => {
 
 describe("runOpenCodeStep event stream recovery", () => {
   let repoDir: string | undefined;
+  // The empty-assistant reactivation grace defaults to 10s of real waiting; these
+  // fakes never revive, so shrink the window instead of sleeping it out.
+  const graceEnv = new Map<string, string | undefined>();
+
+  beforeEach(() => {
+    for (const key of ["LOOPER_EMPTY_ASSISTANT_GRACE_MS", "LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS", "LOOPER_PERMISSION_TEARDOWN_MS"]) graceEnv.set(key, process.env[key]);
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = "5";
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = "1";
+    process.env.LOOPER_PERMISSION_TEARDOWN_MS = "5";
+  });
 
   afterEach(() => {
     if (repoDir) rmSync(repoDir, { recursive: true, force: true });
     repoDir = undefined;
+    for (const [key, value] of graceEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    graceEnv.clear();
   });
 
   test("resubscribes when the event stream ends early while the session is still busy", async () => {
@@ -698,6 +713,59 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     expect(result.status).toBe("failed");
     expect(result.errorMessage).toContain("completed without assistant output");
+  });
+
+  test("fails into reattach instead of completing when opencode revives the empty session", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-revived-assistant-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let promptMessageID = "";
+    // Opencode auto-restarts a session that ended without assistant output: the
+    // session goes busy again right after looper reads the empty turn.
+    let emptyTurnRead = 0;
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: emptyTurnRead > 0 ? "busy" : "idle" } } }),
+        messages: async () => {
+          emptyTurnRead += 1;
+          return { data: [assistantEmpty(promptMessageID)] };
+        },
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    // Failed (never done) so runIteration's evaluatePriorSession takes the live
+    // session over via reattach rather than advancing past a generating step.
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("was reactivated by opencode after an empty assistant message");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("was reactivated by opencode"))).toBe(true);
   });
 
   test("keeps meaningful assistant completions successful", async () => {
@@ -918,7 +986,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     }
   });
 
-  test("reattach restarts with a timeout when the session stays busy past the step timeout", async () => {
+  test("reattach fails closed when timeout teardown cannot confirm the session stopped", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-timeout-"));
     let abortCalled = false;
 
@@ -960,7 +1028,8 @@ describe("runOpenCodeStep event stream recovery", () => {
       outcomeMessageID: MID,
     });
 
-    expect(result.status).toBe("restart");
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("permission teardown timed out while confirming session stop");
     expect(state.restartRequested).toBe(true);
     expect(state.restartReason).toBe("timeout");
     expect(abortCalled).toBe(true);
@@ -1068,11 +1137,10 @@ describe("runOpenCodeStep event stream recovery", () => {
     });
 
     expect(result.status).toBe("done");
-    expect(state.pendingPermission).toBeNull();
-    expect(state.pendingQuestion).toBeNull();
+    expect(state.pendingRequests).toEqual([]);
   });
 
-  test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
+  test("fails closed when prompt timeout teardown cannot confirm the session stopped", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;
 
@@ -1122,8 +1190,8 @@ describe("runOpenCodeStep event stream recovery", () => {
       step,
     });
 
-    expect(result.status).toBe("restart");
-    expect(result.restartReason).toBe("timeout");
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("permission teardown timed out while confirming session stop");
     expect(abortCalled).toBe(true);
   });
 
@@ -1199,7 +1267,7 @@ describe("reattachOpenCodeStep session.idle hints", () => {
         abort: async () => ({ data: {} }),
         status: async () => {
           statusCalls += 1;
-          return { data: { [SID]: { type: Date.now() - startedAt >= 40 ? "idle" : "busy" } } };
+          return { data: { [SID]: { type: statusCalls === 1 ? "busy" : "idle" } } };
         },
         messages: async () => ({ data: [assistantDone(MID)] }),
         children: async () => ({ data: [] }),

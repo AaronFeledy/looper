@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { DEFAULT_STEP_TIMEOUT_MS, gateScriptTimeoutMs, inheritedRenameDelayMs } from "../config/tunables.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, gateScriptTimeoutMs, inheritedRenameDelayMs, stopSessionConfirmTimeoutMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { derivePrdPaths, readPrd } from "../lib/prd.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
@@ -16,6 +16,7 @@ export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAh
 export type { BranchDelta, BranchDeltaChange } from "../watchers/branch-delta.ts";
 import { buildLooperContext, withLooperContext, type ContextInput, type PriorStepInfo } from "../lib/prompt-context.ts";
 import { latestUserMessageID } from "../opencode/assistant-classification.ts";
+import { createRequestBrokerOwner } from "../opencode/request-broker-owner.ts";
 import {
   evaluatePriorSession,
   reattachOpenCodeStep,
@@ -163,6 +164,8 @@ export type RunIterationOptions = {
   recoverySnapshots?: RecoverySnapshotsConfig;
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
+  unattended?: boolean;
+  writeStop?: (reason: string) => void;
   useSessionIdle?: boolean;
   prdDir?: string;
   storyIdPattern?: string;
@@ -241,6 +244,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     recoverySnapshots = false,
     permissionPolicy,
     questionPolicy,
+    unattended = false,
+    writeStop,
     useSessionIdle,
     prdDir,
     storyIdPattern,
@@ -361,7 +366,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const adjudicating = pendingAdjudicateStep !== undefined;
     if (!adjudicating && index >= steps.length) break;
 
-    if (!adjudicating) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
+    const recoveryRowIndex = state.steps.length - (steps.length - index);
+    const preserveRecoveryRow = !adjudicating
+      && recoveryNudgePending
+      && pendingResume?.sessionID !== undefined
+      && state.steps[recoveryRowIndex]?.name === steps[index]?.name;
+    if (!adjudicating && !preserveRecoveryRow) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
     let currentStepIndex = adjudicating ? state.steps.length - 1 : state.steps.length - (steps.length - index);
 
     if (stopFileExists() || state.quitting) {
@@ -633,10 +643,39 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (recoveryNudgePending) {
       recoveryNudgePending = false;
       attempt.recoveryNudgeActive = true;
-      attempt.resumePrompt = recoveryNudgePrompt(promptText(step));
     }
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
+    let gatePausedAt: number | undefined;
+    const requestBrokerOwner = createRequestBrokerOwner({
+      state,
+      client,
+      repoDir,
+      configDir,
+      stepIndex: index,
+      step,
+      pushLine: (line) => logStepLine(currentStepIndex, line),
+      unattended,
+      friction: { counts: attempt.permissionFrictionCounts, requestIDs: attempt.permissionFrictionRequestIDs },
+      ...(writeStop !== undefined ? { writeStop } : {}),
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+      onHumanGateChange: (open) => {
+        if (open && gatePausedAt === undefined) gatePausedAt = Date.now();
+        if (!open && gatePausedAt !== undefined) {
+          stepStartTime += Date.now() - gatePausedAt;
+          gatePausedAt = undefined;
+        }
+      },
+    });
+    const stopStepSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
+      if (sessionID === undefined) return true;
+      if (!requestBrokerOwner.owns(sessionID)) return await stopPriorSession(sessionID, stepIdx, timeoutMs);
+      const teardown = await requestBrokerOwner.teardown(sessionID, timeoutMs ?? stopSessionConfirmTimeoutMs());
+      if (teardown.safeToProceed) return true;
+      logStepLine(stepIdx, `[looper] ${teardown.reason}`);
+      return false;
+    };
     const failAfterUnconfirmedStop = (sessionID: string, stepIdx: number, action: string): StepRunResult => {
       const reason = `could not confirm session ${sessionID} stopped; not ${action} to avoid overlapping opencode generations`;
       attempt.suppressFailureRetry = true;
@@ -748,10 +787,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+              requestBrokerOwner,
             });
           } else if (resumeDecision.kind === "nudge-existing") {
             logStepLine(currentStepIndex, `[looper] resuming ${step.name}: prior session ${resumeSession} is idle; nudging the existing session`);
             attempt.resumeSessionID = resumeSession;
+            attempt.resumePrompt = recoveryNudgePrompt();
             if (resumeInfo.promptText !== undefined) setStepPromptText(state, currentStepIndex, resumeInfo.promptText);
             setStepLooperMessageIDs(
               state,
@@ -765,13 +806,21 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               pendingResult = failAfterUnrecoveredServer(resumeSession, currentStepIndex);
             } else {
               logStepLine(currentStepIndex, `[looper] resuming ${step.name}: ${resumeDecision.reason}; confirming session ${resumeSession} is stopped before restarting`);
-              if (!(await stopPriorSession(resumeSession, currentStepIndex))) {
+              if (!(await stopStepSession(resumeSession, currentStepIndex))) {
                 pendingResult = failAfterUnconfirmedStop(resumeSession, currentStepIndex, "restarting after resume");
               }
             }
           }
         }
       }
+    }
+    if (
+      attempt.recoveryNudgeActive
+      && attempt.resumeSessionID === undefined
+      && attempt.resumePrompt === undefined
+      && pendingResult === undefined
+    ) {
+      attempt.resumePrompt = cleanRestartPrompt(promptText(step), "manual");
     }
 
     while (true) {
@@ -835,6 +884,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ...(questionPolicy !== undefined ? { questionPolicy } : {}),
           ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
+          requestBrokerOwner,
           onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) => {
             if (adjudicating) {
               adjudication?.store.writeSession({ sessionID, messageID });
@@ -923,6 +973,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+              requestBrokerOwner,
             });
             continue;
           }
@@ -953,7 +1004,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         if (waitResult === "restart") {
           const reason: StepRestartReason = state.restartReason ?? "manual";
           const previousStepIndex = currentStepIndex;
-          if (!(await stopPriorSession(waitSessionID, previousStepIndex))) {
+          if (!(await stopStepSession(waitSessionID, previousStepIndex))) {
             result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a restart session");
             break;
           }
@@ -972,7 +1023,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
 
         if (waitResult === "timeout") {
           const previousStepIndex = currentStepIndex;
-          if (!(await stopPriorSession(waitSessionID, previousStepIndex))) {
+          if (!(await stopStepSession(waitSessionID, previousStepIndex))) {
             result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a timeout restart session");
             break;
           }
@@ -1007,7 +1058,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         // Confirm the prior session is actually aborted before creating the
         // fresh restart session, so the old run can't keep generating in
         // parallel with the new one.
-        if (!(await stopPriorSession(priorSessionID, currentStepIndex)) && priorSessionID !== undefined) {
+        if (!(await stopStepSession(priorSessionID, currentStepIndex)) && priorSessionID !== undefined) {
           result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "starting a restart session");
           break;
         }
@@ -1090,6 +1141,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+              requestBrokerOwner,
             });
             continue;
           }
@@ -1110,7 +1162,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             pushAgentLine(state, line);
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
-            const stopConfirmed = await stopPriorSession(priorSessionID, currentStepIndex);
+            const stopConfirmed = await stopStepSession(priorSessionID, currentStepIndex);
             priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending, stopConfirmed });
           } else {
             priorHealthDecision = decideAfterPriorHealth(attempt, { health: pending });
@@ -1191,6 +1243,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       logStepLine(currentStepIndex, `[looper] story phase write failed for ${storyId ?? "current branch"}: ${message}`);
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
+      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `could not persist story phase for ${storyId ?? "current branch"}: ${message}`,
         { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },
@@ -1200,9 +1253,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
     if (!adjudicating && routing.kind !== "continue" && result.status !== "done") {
       const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
-      if (!(await stopPriorSession(terminalSessionID, currentStepIndex)) && terminalSessionID !== undefined) {
+      if (!(await stopStepSession(terminalSessionID, currentStepIndex)) && terminalSessionID !== undefined) {
         titleCoordinator?.cancel();
         cancelInheritedTitleTimer();
+        requestBrokerOwner.dispose();
         throw new StepFailureError(
           `could not confirm session ${terminalSessionID} stopped; deferring adjudication to avoid overlapping opencode generations`,
           { stepName: step.name, sessionID: terminalSessionID },
@@ -1222,7 +1276,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       const terminalSessionID = state.steps[currentStepIndex]?.sessionID;
       const terminalStopConfirmed = attempt.allowTerminalSessionToContinue
         ? false
-        : await stopPriorSession(
+        : await stopStepSession(
             terminalSessionID,
             currentStepIndex,
             stopRequested ? STOP_SESSION_QUIT_TIMEOUT_MS : undefined,
@@ -1232,9 +1286,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
       if (stopRequested) {
         markRemainingSkipped(state, currentStepIndex);
+        requestBrokerOwner.dispose();
         break;
       }
       const reason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
+      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `${step.name} failed after ${attempt.failureRetryCount} retr${attempt.failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
         { stepName: step.name, ...(terminalSessionID !== undefined ? { sessionID: terminalSessionID } : {}) },
@@ -1274,6 +1330,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         adjudication?.store.markAdjudicated();
         adjudication?.store.clearMarker();
         adjudication?.store.clearSession();
+        requestBrokerOwner.dispose();
         break;
       }
       // Fail closed: keep the marker so the next iteration / resume re-routes
@@ -1282,11 +1339,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
       const adjSessionID = state.steps[currentStepIndex]?.sessionID;
-      if (await stopPriorSession(adjSessionID, currentStepIndex)) adjudication?.store.clearSession();
+      if (await stopStepSession(adjSessionID, currentStepIndex)) adjudication?.store.clearSession();
       if (state.quitting || stopFileExists()) {
         markRemainingSkipped(state, currentStepIndex);
+        requestBrokerOwner.dispose();
         break;
       }
+      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `adjudicate step failed: ${attempt.lastErrorMessage ?? "adjudicator did not complete"}`,
         { stepName: step.name, ...(adjSessionID !== undefined ? { sessionID: adjSessionID } : {}) },
@@ -1301,6 +1360,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       rowIndex: currentStepIndex,
       recordPriorStep: true,
     });
+    requestBrokerOwner.dispose();
   }
 
   return state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()

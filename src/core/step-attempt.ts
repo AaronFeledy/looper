@@ -19,6 +19,8 @@ export type StepAttemptState = {
   resumePrompt: string | undefined;
   lastErrorMessage: string | undefined;
   lastPromptMessageID: string | undefined;
+  permissionFrictionCounts: Map<string, number>;
+  permissionFrictionRequestIDs: Set<string>;
 };
 
 export type PriorEvaluationDecision =
@@ -51,6 +53,8 @@ export function createStepAttemptState(): StepAttemptState {
     resumePrompt: undefined,
     lastErrorMessage: undefined,
     lastPromptMessageID: undefined,
+    permissionFrictionCounts: new Map(),
+    permissionFrictionRequestIDs: new Set(),
   };
 }
 

@@ -1,0 +1,31 @@
+permission-ux task 5 — request broker
+
+TDD RED
+command: bun test test/request-broker.test.ts
+result: FAIL (expected)
+error: Cannot find module '../src/opencode/request-broker.ts'
+
+RELEVANT TEST GATE
+command: bun test test/request-broker.test.ts test/runner-event-controller.test.ts test/pending-request-panel.test.ts test/state.test.ts test/step-attempt-characterization.test.ts test/event-consumer.test.ts
+result: PASS
+summary: 92 pass, 0 fail, 272 expect() calls
+
+TYPECHECK
+command: bun run typecheck
+result: PASS (tsc -p .)
+
+LSP
+result: PASS — no diagnostics in changed TypeScript files
+
+SCENARIOS COVERED
+- attended always/once/reject and pending ask
+- unattended always fail-closed; no always reply
+- unattended ask and gate-timeout friction accounting
+- three same-kind automated rejects trigger stop hook
+- human and configured rejects excluded from friction
+- concurrent policy replies
+- exactly one automatic retry, reopen with lastError, human reclaim
+- permission/question external resolution tombstones
+- unattended question rejection
+- generation-validated atomic claim consumption
+- dispose clears request timers and decision poller

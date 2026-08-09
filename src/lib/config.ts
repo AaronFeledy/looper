@@ -289,6 +289,8 @@ export function resolvePermissionAction(
 ): PermissionAction {
   const stepAction = step.permissionPolicy?.[kind];
   if (stepAction !== undefined) return stepAction;
+  const stepWildcard = step.permissionPolicy?.["*"];
+  if (stepWildcard !== undefined) return stepWildcard;
   const globalKind = global.permissionPolicy?.[kind];
   if (globalKind !== undefined) return globalKind;
   const wildcard = global.permissionPolicy?.["*"];

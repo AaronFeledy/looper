@@ -44,6 +44,7 @@ export function createPromptEventStream({
   pushLine,
   consumer,
   timings = DEFAULT_PROMPT_EVENT_STREAM_TIMINGS,
+  reconcileRequests,
 }: {
   readonly client: OpencodeClient;
   readonly repoDir: string;
@@ -54,6 +55,7 @@ export function createPromptEventStream({
   readonly pushLine: (line: string) => void;
   readonly consumer: SessionEventConsumer;
   readonly timings?: PromptEventStreamTimings;
+  readonly reconcileRequests?: () => Promise<void>;
 }): PromptEventStream {
   let consumerPromise: Promise<void> | undefined;
   let consumerError: Error | undefined;
@@ -110,6 +112,7 @@ export function createPromptEventStream({
     } catch {
       // backfill is best-effort; live events will continue to heal state
     }
+    await reconcileRequests?.();
     // Backfill first so the consumer's per-part length guards are in place
     // before live deltas from the new stream are appended. This prevents
     // overlapping replay from double-printing assistant text.

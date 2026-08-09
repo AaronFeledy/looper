@@ -22,6 +22,6 @@ export function cleanRestartPrompt(prompt: string, reason: "timeout" | "manual")
   return `Note: This is a clean restart in a new session because the previous attempt ${label}. The previous attempt may have been interrupted after making partial progress, so inspect the existing workspace/state and continue from any useful work rather than blindly starting over.\n\n${prompt}`;
 }
 
-export function recoveryNudgePrompt(prompt: string): string {
-  return `Continue working to completion if you haven't already. If the work is already complete, report the result.\n\n${prompt}`;
+export function recoveryNudgePrompt(): string {
+  return "Continue working to completion if you haven't already. If the work is already complete, report the result.\n";
 }

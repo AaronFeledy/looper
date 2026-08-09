@@ -88,6 +88,23 @@ describe("createHeader server badge", () => {
     renderer.destroy();
   });
 
+  test("shows resume iteration while waiting to start on a checkpoint", async () => {
+    const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 80, height: 6 });
+    const state = createLoopState({ maxIterations: 5, stepNames: ["Build"] });
+    state.branch = "feat/x";
+    state.resumable = true;
+    state.iteration = 3;
+
+    renderer.root.add(createHeader(renderer, state, "1.2.3"));
+    await renderOnce();
+
+    const line = headerLine(captureCharFrame());
+    expect(line).toContain("Looper · resume iteration 3/5");
+    expect(line).toContain("branch feat/x");
+    expect(line).not.toContain("waiting to start");
+    renderer.destroy();
+  });
+
   test("keeps the badge intact and truncates the left label at narrow width", async () => {
     const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 30, height: 6 });
     const state = createLoopState({ maxIterations: 3, stepNames: ["Build"] });

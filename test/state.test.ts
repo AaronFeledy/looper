@@ -1,18 +1,22 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  applyResumableBootUi,
   cancelPendingNotify,
+  clearPendingRequest,
+  consumePendingRequestDecision,
   createLoopState,
   createStepRow,
+  enqueuePendingPermission,
+  enqueuePendingQuestion,
   hydrateResumableBootStep,
   prdPassingGain,
   resetPrdIterationBaseline,
   setBranchDiffStatus,
-  setPendingPermission,
   setPrdStatus,
-  setPendingQuestion,
   setTodos,
   subscribe,
+  tryClaimPendingRequestDecision,
   type PendingPermission,
   type PrdStatus,
   type PendingQuestion,
@@ -30,8 +34,7 @@ async function flushNotify(): Promise<void> {
 describe("createLoopState panel defaults", () => {
   test("initializes permission, question, and todo fields", () => {
     const state = createLoopState({ maxIterations: 3, stepNames: ["build"] });
-    expect(state.pendingPermission).toBeNull();
-    expect(state.pendingQuestion).toBeNull();
+    expect(state.pendingRequests).toEqual([]);
     expect(state.todos).toEqual([]);
     expect(state.prd).toEqual({ kind: "loading" });
     expect(state.prdIterationBaseline).toBeNull();
@@ -157,8 +160,9 @@ describe("setPrdStatus", () => {
   });
 });
 
-describe("setPendingPermission", () => {
-  test("stores value and notifies subscribers", async () => {
+describe("pending request queue", () => {
+  test("stores multiple permission and question requests in arrival order", async () => {
+    // Given
     const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
     const permission: PendingPermission = {
       requestID: "req_perm",
@@ -166,42 +170,106 @@ describe("setPendingPermission", () => {
       permission: "edit",
       patterns: ["src/**"],
       metadata: { filepath: "src/foo.ts" },
+      generation: 7,
     };
     let calls = 0;
     subscribe(() => {
       calls += 1;
     });
 
-    setPendingPermission(state, permission);
-    expect(state.pendingPermission).toEqual(permission);
+    // When
+    enqueuePendingPermission(state, permission);
+    enqueuePendingQuestion(state, {
+      requestID: "req_q",
+      sessionID: "ses_2",
+      questions: [{ id: "q1", text: "Continue?" }],
+      generation: 7,
+    });
 
+    // Then
+    expect(state.pendingRequests).toEqual([
+      { kind: "permission", status: "open", ...permission },
+      {
+        kind: "question",
+        status: "open",
+        requestID: "req_q",
+        sessionID: "ses_2",
+        questions: [{ id: "q1", text: "Continue?" }],
+        generation: 7,
+      },
+    ]);
     await flushNotify();
     expect(calls).toBe(1);
-
-    setPendingPermission(state, null);
-    expect(state.pendingPermission).toBeNull();
-    await flushNotify();
-    expect(calls).toBe(2);
   });
-});
 
-describe("setPendingQuestion", () => {
-  test("stores value and notifies subscribers", async () => {
+  test("claims only the matching open head once", () => {
+    // Given
     const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
     const question: PendingQuestion = {
       requestID: "req_q",
       sessionID: "ses_2",
       questions: [{ id: "q1", text: "Continue?" }],
+      generation: 3,
     };
-    let calls = 0;
-    subscribe(() => {
-      calls += 1;
+    enqueuePendingQuestion(state, question);
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: [],
+      generation: 3,
     });
 
-    setPendingQuestion(state, question);
-    expect(state.pendingQuestion).toEqual(question);
-    await flushNotify();
-    expect(calls).toBe(1);
+    // When
+    const claimed = tryClaimPendingRequestDecision(state, { requestID: "req_q", action: "reject", generation: 3 });
+
+    // Then
+    expect(claimed).toBe(true);
+    expect(state.pendingRequests[0]).toMatchObject({ requestID: "req_q", status: "resolving", decision: "reject" });
+    expect(tryClaimPendingRequestDecision(state, { requestID: "req_q", action: "skip", generation: 3 })).toBe(false);
+    expect(tryClaimPendingRequestDecision(state, { requestID: "req_perm", action: "once", generation: 3 })).toBe(false);
+  });
+
+  test("rejects a stale generation without changing the head", () => {
+    // Given
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: [],
+      generation: 9,
+    });
+
+    // When
+    const claimed = tryClaimPendingRequestDecision(state, { requestID: "req_perm", action: "once", generation: 8 });
+
+    // Then
+    expect(claimed).toBe(false);
+    expect(state.pendingRequests[0]).toMatchObject({ requestID: "req_perm", status: "open" });
+  });
+
+  test("consumes a claimed decision and clears a request by identity", () => {
+    // Given
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    enqueuePendingPermission(state, {
+      requestID: "req_perm",
+      sessionID: "ses_1",
+      permission: "edit",
+      patterns: [],
+      generation: 4,
+    });
+    tryClaimPendingRequestDecision(state, { requestID: "req_perm", action: "always", generation: 4 });
+
+    // When
+    const decision = consumePendingRequestDecision(state, { requestID: "req_perm", generation: 4 });
+
+    // Then
+    expect(decision).toBe("always");
+    expect(state.pendingRequests[0]).toMatchObject({ requestID: "req_perm", status: "resolving" });
+    expect(consumePendingRequestDecision(state, { requestID: "req_perm", generation: 4 })).toBeNull();
+    expect(clearPendingRequest(state, { requestID: "req_perm", generation: 4 })).toBe(true);
+    expect(state.pendingRequests).toEqual([]);
   });
 });
 
@@ -260,5 +328,78 @@ describe("hydrateResumableBootStep", () => {
     ids.push("msg_b");
 
     expect(step.looperMessageIDs).toEqual(["msg_a"]);
+  });
+});
+
+describe("applyResumableBootUi", () => {
+  test("marks prior steps done, hydrates the resume target, and selects it before start", () => {
+    const state = createLoopState({ maxIterations: 5, stepNames: ["build", "review", "publish"] });
+
+    applyResumableBootUi(state, {
+      resumed: true,
+      startIteration: 2,
+      startStepIndex: 1,
+      resume: {
+        promptText: "continue review",
+        sessionID: "ses_review",
+        looperMessageIDs: ["msg_looper"],
+      },
+      title: "Widget export",
+      stepSessions: [
+        { stepIndex: 0, sessionID: "ses_build" },
+        { stepIndex: 1, sessionID: "ses_review_stale" },
+      ],
+    });
+
+    expect(state.resumable).toBe(true);
+    expect(state.iteration).toBe(2);
+    expect(state.selectedStepIndex).toBe(1);
+    expect(state.selectedBackgroundSessionID).toBeNull();
+
+    expect(state.steps[0]?.status).toBe("done");
+    expect(state.steps[0]?.finishedAt).toBeDefined();
+    expect(state.steps[0]?.sessionID).toBe("ses_build");
+    expect(state.steps[0]?.title).toBe("Widget export");
+
+    expect(state.steps[1]?.status).toBe("pending");
+    expect(state.steps[1]?.promptText).toBe("continue review");
+    expect(state.steps[1]?.sessionID).toBe("ses_review");
+    expect(state.steps[1]?.looperMessageIDs).toEqual(["msg_looper"]);
+    expect(state.steps[1]?.title).toBe("Widget export");
+
+    expect(state.steps[2]?.status).toBe("pending");
+    expect(state.steps[2]?.sessionID).toBeUndefined();
+  });
+
+  test("is a no-op when not resumed or already started", () => {
+    const fresh = createLoopState({ maxIterations: 3, stepNames: ["a", "b"] });
+    applyResumableBootUi(fresh, { resumed: false, startIteration: 1, startStepIndex: 1 });
+    expect(fresh.resumable).toBe(false);
+    expect(fresh.steps[0]?.status).toBe("pending");
+    expect(fresh.selectedStepIndex).toBeNull();
+
+    const started = createLoopState({ maxIterations: 3, stepNames: ["a", "b"] });
+    started.started = true;
+    applyResumableBootUi(started, { resumed: true, startIteration: 1, startStepIndex: 1 });
+    expect(started.resumable).toBe(false);
+    expect(started.steps[0]?.status).toBe("pending");
+  });
+
+  test("selects step 0 when resuming the first step of an iteration", () => {
+    const state = createLoopState({ maxIterations: 3, stepNames: ["build", "review"] });
+
+    applyResumableBootUi(state, {
+      resumed: true,
+      startIteration: 4,
+      startStepIndex: 0,
+      resume: { sessionID: "ses_build" },
+    });
+
+    expect(state.resumable).toBe(true);
+    expect(state.iteration).toBe(4);
+    expect(state.selectedStepIndex).toBe(0);
+    expect(state.steps[0]?.sessionID).toBe("ses_build");
+    expect(state.steps[0]?.status).toBe("pending");
+    expect(state.steps[1]?.status).toBe("pending");
   });
 });

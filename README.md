@@ -37,7 +37,7 @@ CLI flags:
 - `--attach[=url]` &mdash; connect to an existing opencode server instead of spawning one. Without a URL: tries `opencode.serverUrl` from the config file, then `$OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 - `--config-dir=path` / `--config-dir path` &mdash; use this directory for config, prompts, and state files. Overrides auto-detection and `$LOOPER_CONFIG_DIR`.
 - `--start` &mdash; skip the TUI start prompt and begin immediately.
-- `--fresh` &mdash; ignore any saved checkpoint and start a new run from iteration 1, step 1.
+- `--fresh` &mdash; ignore any saved checkpoint, clear Looper's permission audit, and start a new run from iteration 1, step 1. It does not revoke OpenCode project-level `always` permissions.
 - `--continue` &mdash; deprecated alias of `--start` (resuming is now the default).
 - `--wait[=minutes]` &mdash; sleep between iterations. With `=N`, sleep N minutes. Without a value, sleep for the previous iteration's wall-clock duration.
 - `max_iterations` (positional, default `100`) &mdash; stop after this many iterations if no step has written `.looper-stop`.
@@ -49,8 +49,9 @@ Without `--config-dir`, looper looks under `$PWD` in this order: `.looper`, `.lo
 Looper resumes the previous run by default. If you quit (or it stops) mid-run, the next start picks up at the
 same iteration and step. While a step is running, looper records its opencode session in `.looper-run.json`; on
 resume it reattaches to that session if it is still generating, otherwise it restarts the step in a fresh session.
-Manual recovery nudge is the exception: when the failed session is known and already idle, nudge sends its prompt
-to that existing session instead of creating a new one.
+Manual recovery nudge is the exception: when the failed session is known and already idle, nudge sends a short
+continue-working message to that existing session without replaying the original prompt. The current step row,
+output, and elapsed time are preserved; if the session cannot be reused, looper falls back to a fresh restart.
 A run that reaches `max_iterations` clears its checkpoint, so the next start begins a new run. Pass `--fresh` to
 ignore the checkpoint and start over from iteration 1.
 
@@ -75,6 +76,7 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-adjudicate         # written when PRD oscillation is detected; routes to the adjudicate step
     ├── .looper-adjudicate-session.json  # in-flight adjudicator session, reconciled on resume
     ├── .looper-prd-history.json   # per-story PRD passes transition log (+ adjudicated watermark); cleared only on --fresh
+    ├── .looper-permission-log.jsonl # private decision audit (0600); cleared only on --fresh
     └── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh
 ```
 
@@ -142,7 +144,15 @@ Per-step fields:
 - `permissionPolicy` &mdash; optional per-step OpenCode permission auto-reply policy. Actions are `ask`, `always`, `once`, or `reject`; `*` is the wildcard key at the global level.
 - `questionPolicy` &mdash; optional per-step OpenCode question policy: `ask` or `reject`.
 
-When a permission or question is left pending (policy `ask`, or no policy), the TUI shows a "waiting on you" banner above the footer until it is answered from an attached opencode client.
+### Permission UX
+
+When a permission or question is left pending (policy `ask`, or no policy), the TUI opens a "waiting on you" gate. For permissions press `y` to allow once, `a` to allow always, `d` to deny, or `s` to deny and skip the step. For questions, `d` rejects and `s` rejects and skips; answer free-text or multi-option questions in an attached OpenCode client. `q` still quits while the gate is open.
+
+`always` changes OpenCode's project permission state outside Looper's config directory. Looper never learns an `always` rule from prior answers, and `--fresh` does not revoke one. In non-TTY/unattended mode, Looper never sends `always`: `ask` is rejected immediately, configured `once`/`reject` is honored, and configured `always` fails closed by rejecting with an error line. Three successful automated rejects of the same permission kind in one logical step write the stop diagnosis `permission friction: automated reject limit for '<kind>'`.
+
+Each Looper-issued decision is appended to `.looper-permission-log.jsonl` in the config directory with mode `0600`. The JSONL contains timestamp, request/session IDs, request kind, optional permission kind, action, origin, and optional step index; request patterns are omitted. Audit write failures do not fail the step, the audit is never used for auto-reply, and all three `--fresh` paths clear it.
+
+The TTY rings once for newly gated requests by default. Set `LOOPER_PERMISSION_BELL=0` to silence it. Human asks have a finite `LOOPER_PERMISSION_GATE_MAX_MS` deadline (default 30 minutes), and request cleanup is bounded by `LOOPER_PERMISSION_TEARDOWN_MS` (default 5 seconds).
 
 - `title` &mdash; see "Session titles" below.
 - `context` &mdash; see "Prompt context" below.
@@ -354,10 +364,15 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_ATTACH_VALIDATION_TIMEOUT_MS` &mdash; timeout for attach-mode managed-resource validation (default: `10000`)
 - `LOOPER_BRANCH_DIFF_TIMEOUT_MS` &mdash; timeout for one live Diff-panel collection (default: `10000`)
 - `LOOPER_GATE_SCRIPT_TIMEOUT_MS` &mdash; timeout for a step's `gate.script` (default: `30000`)
+- `LOOPER_PERMISSION_GATE_MAX_MS` &mdash; maximum attended wait for each permission/question ask (default: `1800000`; must be at least `1`)
+- `LOOPER_PERMISSION_TEARDOWN_MS` &mdash; total deadline for stopping a session and resolving its open requests (default: `5000`)
+- `LOOPER_PERMISSION_BELL` &mdash; TTY alert for newly gated permission/question requests (`1` by default; set `0` to disable)
 - `LOOPER_CONTINUATION_EXIT_GRACE_MS` &mdash; how long to wait after a step exits for a background-continuation record to appear (default: 30000)
 - `LOOPER_EVENT_WATCHDOG_POLL_MS` &mdash; event-stream watchdog poll interval (default: `15000`)
 - `LOOPER_EVENT_STALL_MS` &mdash; event-stream idle threshold before probing session status (default: `45000`)
 - `LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS` &mdash; minimum delay between event-stream reconnect attempts (default: `1000`)
+- `LOOPER_EMPTY_ASSISTANT_GRACE_MS` &mdash; grace window for opencode to revive a session that ended without assistant output, before looper fails the step (default: `10000`; `0` disables)
+- `LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS` &mdash; poll interval during that grace window (default: `500`)
 - `LOOPER_STOP_SESSION_POLL_MS` &mdash; poll interval while confirming a prior session stopped (default: `250`)
 - `LOOPER_STOP_SESSION_TIMEOUT_MS` &mdash; timeout while confirming a prior session stopped (default: `10000`)
 - `LOOPER_SERVER_RECOVERY_MAX_WAIT_MS` &mdash; maximum wait while recovering a server/session status probe (default: `600000`)

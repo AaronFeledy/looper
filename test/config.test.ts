@@ -620,13 +620,44 @@ describe("context policy config parsing", () => {
 });
 
 describe("resolvePermissionAction", () => {
-  const global = { permissionPolicy: { edit: "once" as PermissionAction, "*": "reject" as PermissionAction } };
+  const global = {
+    permissionPolicy: { edit: "once", "*": "reject" } satisfies Record<string, PermissionAction>,
+  };
 
-  test("prefers step override, then kind, then wildcard, then ask", () => {
-    expect(resolvePermissionAction("edit", { permissionPolicy: { edit: "always" } }, global)).toBe("always");
-    expect(resolvePermissionAction("bash", {}, global)).toBe("reject");
-    expect(resolvePermissionAction("webfetch", { permissionPolicy: { webfetch: "once" } }, {})).toBe("once");
-    expect(resolvePermissionAction("unknown", {}, {})).toBe("ask");
+  test("uses the step exact action before every wildcard or global action", () => {
+    const step = {
+      permissionPolicy: { edit: "always", "*": "ask" } satisfies Record<string, PermissionAction>,
+    };
+
+    const action = resolvePermissionAction("edit", step, global);
+
+    expect(action).toBe("always");
+  });
+
+  test("uses the step wildcard before the global exact action", () => {
+    const step = { permissionPolicy: { "*": "ask" } satisfies Record<string, PermissionAction> };
+
+    const action = resolvePermissionAction("edit", step, global);
+
+    expect(action).toBe("ask");
+  });
+
+  test("uses the global exact action when the step has no matching action", () => {
+    const action = resolvePermissionAction("edit", {}, global);
+
+    expect(action).toBe("once");
+  });
+
+  test("uses the global wildcard when neither scope has an exact action", () => {
+    const action = resolvePermissionAction("bash", {}, global);
+
+    expect(action).toBe("reject");
+  });
+
+  test("asks when no policy action matches", () => {
+    const action = resolvePermissionAction("unknown", {}, {});
+
+    expect(action).toBe("ask");
   });
 });
 

@@ -1,10 +1,41 @@
 export const DEFAULT_STEP_TIMEOUT_MS = 60 * 60 * 1000;
+export const DEFAULT_PERMISSION_GATE_MAX_MS = 1_800_000;
+export const DEFAULT_PERMISSION_TEARDOWN_MS = 5_000;
 
 export function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function requiredPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${name} must be an integer greater than or equal to 1`);
+  return parsed;
+}
+
+const FALSE_ENV_VALUES = new Set(["0", "false", "off", "no"]);
+
+function booleanEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (value === undefined || value === "") return fallback;
+  return !FALSE_ENV_VALUES.has(value);
+}
+
+export function permissionBellEnabled(): boolean {
+  // Terminal bell when a request starts waiting on a human. On by default; the TUI only writes it on a TTY.
+  return booleanEnv("LOOPER_PERMISSION_BELL", true);
+}
+
+export function permissionGateMaxMs(): number {
+  return requiredPositiveIntegerEnv("LOOPER_PERMISSION_GATE_MAX_MS", DEFAULT_PERMISSION_GATE_MAX_MS);
+}
+
+export function permissionTeardownMs(): number {
+  return requiredPositiveIntegerEnv("LOOPER_PERMISSION_TEARDOWN_MS", DEFAULT_PERMISSION_TEARDOWN_MS);
 }
 
 export const CONTINUATION_EXIT_GRACE_MS = positiveIntegerEnv("LOOPER_CONTINUATION_EXIT_GRACE_MS", 30_000);
@@ -41,6 +72,7 @@ export function nonNegativeIntegerEnv(name: string, fallback: number): number {
 
 const STALL_ITERATION_LIMIT_DEFAULT = 3;
 const STALL_ADJUDICATION_LIMIT_DEFAULT = 3;
+const STALL_CONFIRM_MS_DEFAULT = 180_000;
 
 export function stallIterationLimit(configValue?: number): number {
   // Precedence: environment override, then looper.yaml stall.iterations, then the default. 0 disables.
@@ -50,6 +82,23 @@ export function stallIterationLimit(configValue?: number): number {
 export function stallAdjudicationLimit(configValue?: number): number {
   // Precedence: environment override, then looper.yaml stall.adjudications, then the default. 0 disables.
   return nonNegativeIntegerEnv("LOOPER_STALL_ADJUDICATIONS", configValue ?? STALL_ADJUDICATION_LIMIT_DEFAULT);
+}
+
+export function stallConfirmMs(): number {
+  // Settle window between a stalled verdict and the confirming re-sample. 0 re-samples immediately.
+  return nonNegativeIntegerEnv("LOOPER_STALL_CONFIRM_MS", STALL_CONFIRM_MS_DEFAULT);
+}
+
+const EMPTY_ASSISTANT_GRACE_MS_DEFAULT = 10_000;
+const EMPTY_ASSISTANT_GRACE_POLL_MS_DEFAULT = 500;
+
+export function emptyAssistantGraceMs(): number {
+  // Bounded wait before an `empty` assistant classification becomes a step failure. 0 disables the wait.
+  return nonNegativeIntegerEnv("LOOPER_EMPTY_ASSISTANT_GRACE_MS", EMPTY_ASSISTANT_GRACE_MS_DEFAULT);
+}
+
+export function emptyAssistantGracePollMs(): number {
+  return positiveIntegerEnv("LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS", EMPTY_ASSISTANT_GRACE_POLL_MS_DEFAULT);
 }
 
 export function stopSessionConfirmTimeoutMs(): number {

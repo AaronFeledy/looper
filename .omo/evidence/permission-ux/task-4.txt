@@ -1,0 +1,19 @@
+Permission UX — Task 4 evidence
+
+Implemented:
+- OwnedSessionSet seeds the primary session, adds/removes children, preserves the primary id, and excludes title-purpose sessions.
+- Permission/question lifecycle events accept sessionless, primary-session, or owned-child events.
+- All other event types retain the primary-session filter.
+- step-runner seeds and supplies the owned set to the event consumer and runner event controller.
+- Child discovery is intentionally deferred to TODO 5/6; addChild/removeChild are ready for that wiring.
+
+TDD RED:
+- bun test test/event-consumer.test.ts
+- Failed: Cannot find module '../src/lib/owned-session-set.ts'.
+
+Verification GREEN:
+- bun test event-consumer
+- 29 pass, 0 fail, 65 expect() calls.
+- bun run typecheck
+- Passed (tsc -p .).
+- LSP diagnostics: no diagnostics in all five changed TypeScript files.
