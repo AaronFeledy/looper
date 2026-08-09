@@ -1,21 +1,38 @@
 import type { LooperEvent } from "../core/events.ts";
+import type {
+  FinalizeStepStatus,
+  StepRestartReason,
+  StepStatus,
+  TodoItem,
+} from "../core/step-view.ts";
+import type {
+  PendingPermission,
+  PendingQuestion,
+  PendingRequest,
+  PendingRequestDecision,
+  PendingRequestDecisionAction,
+  PendingRequestIdentity,
+} from "../core/pending-request.ts";
 
-export type StepStatus = "pending" | "running" | "waiting" | "done" | "failed" | "skipped";
-
-/** Terminal display statuses a step row settles into once its attempt is over. */
-export type TerminalStepStatus = "done" | "failed" | "skipped";
-
-/**
- * Statuses accepted by {@link finalizeStepRow}: the terminals plus `"restart"`,
- * which is a {@link StepStatus}-less signal that resets the row back to
- * `pending` (the runner returns `"restart"` as a {@link import("./runner.ts").StepResult},
- * never as a displayed status).
- */
-export type FinalizeStepStatus = TerminalStepStatus | "restart";
+export type {
+  FinalizeStepStatus,
+  StepRestartReason,
+  StepRowView,
+  StepStatus,
+  TerminalStepStatus,
+  TodoItem,
+} from "../core/step-view.ts";
+export type {
+  PendingPermission,
+  PendingQuestion,
+  PendingRequest,
+  PendingRequestDecision,
+  PendingRequestDecisionAction,
+  PendingRequestIdentity,
+  PendingRequestStatus,
+} from "../core/pending-request.ts";
 
 export type LoopPane = "steps" | "output" | "github";
-
-export type StepRestartReason = "manual" | "timeout";
 
 export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "end";
 
@@ -197,51 +214,6 @@ export type RecoveryPrompt = {
   sessionID?: string;
 };
 
-export type PendingPermission = {
-  requestID: string;
-  sessionID: string;
-  permission: string;
-  patterns: string[];
-  metadata?: Record<string, unknown>;
-  generation: number;
-  askedAt?: number;
-};
-
-export type PendingQuestion = {
-  requestID: string;
-  sessionID: string;
-  questions: unknown[];
-  generation: number;
-  askedAt?: number;
-};
-
-export type PendingRequestStatus = "open" | "resolving" | "error";
-export type PendingRequestDecisionAction = "once" | "always" | "reject" | "skip";
-
-type PendingRequestState = {
-  status: PendingRequestStatus;
-  decision?: PendingRequestDecisionAction;
-  lastError?: string;
-};
-
-export type PendingRequest =
-  | ({ kind: "permission" } & PendingPermission & PendingRequestState)
-  | ({ kind: "question" } & PendingQuestion & PendingRequestState);
-
-export type PendingRequestIdentity = {
-  requestID: string;
-  generation: number;
-};
-
-export type PendingRequestDecision = PendingRequestIdentity & {
-  action: PendingRequestDecisionAction;
-};
-
-export type TodoItem = {
-  content: string;
-  status: string;
-  priority: string;
-};
 
 export type EscConfirmMode = "reset" | "stop";
 
