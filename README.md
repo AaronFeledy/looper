@@ -49,8 +49,9 @@ Without `--config-dir`, looper looks under `$PWD` in this order: `.looper`, `.lo
 Looper resumes the previous run by default. If you quit (or it stops) mid-run, the next start picks up at the
 same iteration and step. While a step is running, looper records its opencode session in `.looper-run.json`; on
 resume it reattaches to that session if it is still generating, otherwise it restarts the step in a fresh session.
-Manual recovery nudge is the exception: when the failed session is known and already idle, nudge sends its prompt
-to that existing session instead of creating a new one.
+Manual recovery nudge is the exception: when the failed session is known and already idle, nudge sends a short
+continue-working message to that existing session without replaying the original prompt. The current step row,
+output, and elapsed time are preserved; if the session cannot be reused, looper falls back to a fresh restart.
 A run that reaches `max_iterations` clears its checkpoint, so the next start begins a new run. Pass `--fresh` to
 ignore the checkpoint and start over from iteration 1.
 
@@ -370,6 +371,8 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_EVENT_WATCHDOG_POLL_MS` &mdash; event-stream watchdog poll interval (default: `15000`)
 - `LOOPER_EVENT_STALL_MS` &mdash; event-stream idle threshold before probing session status (default: `45000`)
 - `LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS` &mdash; minimum delay between event-stream reconnect attempts (default: `1000`)
+- `LOOPER_EMPTY_ASSISTANT_GRACE_MS` &mdash; grace window for opencode to revive a session that ended without assistant output, before looper fails the step (default: `10000`; `0` disables)
+- `LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS` &mdash; poll interval during that grace window (default: `500`)
 - `LOOPER_STOP_SESSION_POLL_MS` &mdash; poll interval while confirming a prior session stopped (default: `250`)
 - `LOOPER_STOP_SESSION_TIMEOUT_MS` &mdash; timeout while confirming a prior session stopped (default: `10000`)
 - `LOOPER_SERVER_RECOVERY_MAX_WAIT_MS` &mdash; maximum wait while recovering a server/session status probe (default: `600000`)

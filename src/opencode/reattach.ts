@@ -12,7 +12,7 @@ import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-bro
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
-import { classifyAssistantForMessage, type AssistantClassification } from "./assistant-classification.ts";
+import { classifyAssistantForMessage, classifyAssistantWithReactivationGrace } from "./assistant-classification.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
@@ -439,7 +439,14 @@ export async function reattachOpenCodeStep({
     return finalize("failed", { errorMessage: reason });
   }
 
-  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, outcomeMessageID);
+  const classification = await classifyAssistantWithReactivationGrace({
+    client,
+    repoDir,
+    sessionID,
+    parentMessageID: outcomeMessageID,
+    shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+    log: pushLine,
+  });
   if (classification.kind === "done") {
     pushLine(`[looper] reattach: assistant message ${outcomeMessageID} completed cleanly`);
     let record: RunContinuationRecord | null = null;

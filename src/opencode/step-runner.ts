@@ -9,7 +9,7 @@ import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
 import type { RunContinuationRecord } from "./continuation-records.ts";
-import { classifyAssistantForMessage } from "./assistant-classification.ts";
+import { classifyAssistantWithReactivationGrace, sessionReactivatedMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
 import type { RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
@@ -271,8 +271,23 @@ export async function runOpenCodeStep({
     finalError = sessionEventError;
   }
   if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
-    const classification = await classifyAssistantForMessage(client, repoDir, cancellation.activeSessionID, sentMessageID);
+    const boundSessionID = cancellation.activeSessionID;
+    let reactivated = false;
+    const classification = await classifyAssistantWithReactivationGrace({
+      client,
+      repoDir,
+      sessionID: boundSessionID,
+      parentMessageID: sentMessageID,
+      shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+      log: pushLine,
+      onReactivated: () => {
+        reactivated = true;
+      },
+    });
     if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
+    // A reactivated session must NOT complete the step: opencode is generating
+    // again, and the reattach path owns that session from here.
+    else if (reactivated) finalError = new Error(`${sessionReactivatedMessage(boundSessionID)}; reattaching instead of completing the step`);
   }
 
   if (teardownError !== undefined) finalError = new Error(teardownError);

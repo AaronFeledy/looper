@@ -210,6 +210,8 @@ describe("runIteration fail-path characterization", () => {
       "LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS",
       "LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS",
       "LOOPER_CONTINUATION_POLL_MS",
+      "LOOPER_EMPTY_ASSISTANT_GRACE_MS",
+      "LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS",
     ]) {
       savedEnv.set(key, process.env[key]);
     }
@@ -219,6 +221,10 @@ describe("runIteration fail-path characterization", () => {
     process.env.LOOPER_SERVER_RECOVERY_BACKOFF_BASE_MS = "1";
     process.env.LOOPER_SERVER_RECOVERY_BACKOFF_MAX_MS = "1";
     process.env.LOOPER_CONTINUATION_POLL_MS = "20";
+    // Empty-assistant grace: keep the (real-time) reactivation window tiny so the
+    // fail-path matrix still exercises it without waiting the 10s default.
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = "5";
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = "1";
   });
 
   afterEach(() => {

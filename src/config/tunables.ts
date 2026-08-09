@@ -72,6 +72,7 @@ export function nonNegativeIntegerEnv(name: string, fallback: number): number {
 
 const STALL_ITERATION_LIMIT_DEFAULT = 3;
 const STALL_ADJUDICATION_LIMIT_DEFAULT = 3;
+const STALL_CONFIRM_MS_DEFAULT = 180_000;
 
 export function stallIterationLimit(configValue?: number): number {
   // Precedence: environment override, then looper.yaml stall.iterations, then the default. 0 disables.
@@ -81,6 +82,23 @@ export function stallIterationLimit(configValue?: number): number {
 export function stallAdjudicationLimit(configValue?: number): number {
   // Precedence: environment override, then looper.yaml stall.adjudications, then the default. 0 disables.
   return nonNegativeIntegerEnv("LOOPER_STALL_ADJUDICATIONS", configValue ?? STALL_ADJUDICATION_LIMIT_DEFAULT);
+}
+
+export function stallConfirmMs(): number {
+  // Settle window between a stalled verdict and the confirming re-sample. 0 re-samples immediately.
+  return nonNegativeIntegerEnv("LOOPER_STALL_CONFIRM_MS", STALL_CONFIRM_MS_DEFAULT);
+}
+
+const EMPTY_ASSISTANT_GRACE_MS_DEFAULT = 10_000;
+const EMPTY_ASSISTANT_GRACE_POLL_MS_DEFAULT = 500;
+
+export function emptyAssistantGraceMs(): number {
+  // Bounded wait before an `empty` assistant classification becomes a step failure. 0 disables the wait.
+  return nonNegativeIntegerEnv("LOOPER_EMPTY_ASSISTANT_GRACE_MS", EMPTY_ASSISTANT_GRACE_MS_DEFAULT);
+}
+
+export function emptyAssistantGracePollMs(): number {
+  return positiveIntegerEnv("LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS", EMPTY_ASSISTANT_GRACE_POLL_MS_DEFAULT);
 }
 
 export function stopSessionConfirmTimeoutMs(): number {

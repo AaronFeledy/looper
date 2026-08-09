@@ -583,18 +583,25 @@ describe("runIteration reattach policy propagation", () => {
 
 describe("runOpenCodeStep event stream recovery", () => {
   let repoDir: string | undefined;
-  let originalTeardownMs: string | undefined;
+  // The empty-assistant reactivation grace defaults to 10s of real waiting; these
+  // fakes never revive, so shrink the window instead of sleeping it out.
+  const graceEnv = new Map<string, string | undefined>();
 
   beforeEach(() => {
-    originalTeardownMs = process.env.LOOPER_PERMISSION_TEARDOWN_MS;
+    for (const key of ["LOOPER_EMPTY_ASSISTANT_GRACE_MS", "LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS", "LOOPER_PERMISSION_TEARDOWN_MS"]) graceEnv.set(key, process.env[key]);
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = "5";
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = "1";
     process.env.LOOPER_PERMISSION_TEARDOWN_MS = "5";
   });
 
   afterEach(() => {
     if (repoDir) rmSync(repoDir, { recursive: true, force: true });
     repoDir = undefined;
-    if (originalTeardownMs === undefined) delete process.env.LOOPER_PERMISSION_TEARDOWN_MS;
-    else process.env.LOOPER_PERMISSION_TEARDOWN_MS = originalTeardownMs;
+    for (const [key, value] of graceEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    graceEnv.clear();
   });
 
   test("resubscribes when the event stream ends early while the session is still busy", async () => {
@@ -706,6 +713,59 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     expect(result.status).toBe("failed");
     expect(result.errorMessage).toContain("completed without assistant output");
+  });
+
+  test("fails into reattach instead of completing when opencode revives the empty session", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-revived-assistant-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    let promptMessageID = "";
+    // Opencode auto-restarts a session that ended without assistant output: the
+    // session goes busy again right after looper reads the empty turn.
+    let emptyTurnRead = 0;
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: emptyTurnRead > 0 ? "busy" : "idle" } } }),
+        messages: async () => {
+          emptyTurnRead += 1;
+          return { data: [assistantEmpty(promptMessageID)] };
+        },
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async () => ({ stream: fromArray([]) }),
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    const result = await runOpenCodeStep({
+      state,
+      stepIndex: 0,
+      prompt: "do the thing",
+      client,
+      repoDir,
+      step,
+    });
+
+    // Failed (never done) so runIteration's evaluatePriorSession takes the live
+    // session over via reattach rather than advancing past a generating step.
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("was reactivated by opencode after an empty assistant message");
+    expect(state.steps[0]?.outputLines.some((line) => line.includes("was reactivated by opencode"))).toBe(true);
   });
 
   test("keeps meaningful assistant completions successful", async () => {
@@ -1207,7 +1267,7 @@ describe("reattachOpenCodeStep session.idle hints", () => {
         abort: async () => ({ data: {} }),
         status: async () => {
           statusCalls += 1;
-          return { data: { [SID]: { type: Date.now() - startedAt >= 40 ? "idle" : "busy" } } };
+          return { data: { [SID]: { type: statusCalls === 1 ? "busy" : "idle" } } };
         },
         messages: async () => ({ data: [assistantDone(MID)] }),
         children: async () => ({ data: [] }),
