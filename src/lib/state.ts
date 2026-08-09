@@ -1067,6 +1067,23 @@ export function markStepWaiting(state: LoopState, stepIndex: number): void {
   notify();
 }
 
+export function markStepWaitingForBackground(state: LoopState, stepIndex: number): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.status = "waiting";
+  step.finishedAt = undefined;
+  state.activeStepIndex = null;
+  notify();
+}
+
+export function clearStepStatusMessageIf(state: LoopState, stepIndex: number, expected: string): void {
+  const step = state.steps[stepIndex];
+  if (step?.statusMessage === expected) {
+    step.statusMessage = undefined;
+    notify();
+  }
+}
+
 /**
  * -> pending, in place (no row insertion). Resets a freshly-inserted
  * retry/restart row before its next attempt: preserves `startedAt`, clears
