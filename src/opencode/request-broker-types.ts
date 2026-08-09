@@ -37,11 +37,12 @@ export type RequestBrokerOptions = {
   readonly claimPollMs?: number;
   readonly scheduler?: RequestBrokerScheduler;
   readonly now?: () => number;
+  readonly onHumanGateChange?: (open: boolean) => void;
 };
 
 export type RequestListResults = {
-  readonly permissions: readonly PermissionRequest[];
-  readonly questions: readonly QuestionRequest[];
+  readonly permissions?: readonly PermissionRequest[];
+  readonly questions?: readonly QuestionRequest[];
 };
 
 export type RequestBrokerCallbacks = Pick<
@@ -55,5 +56,8 @@ export type RequestBroker = {
   readonly reconcile: (listResults: RequestListResults) => void;
   readonly rejectOpen: (reason: string) => Promise<void>;
   readonly consumeDecisions: () => Promise<void>;
+  readonly stopAcceptingDecisions: () => void;
+  readonly hasOpenRequests: () => boolean;
+  readonly clearUI: () => void;
   readonly dispose: () => void;
 };

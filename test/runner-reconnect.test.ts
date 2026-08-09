@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "../src/lib/event-consumer.ts";
@@ -583,10 +583,18 @@ describe("runIteration reattach policy propagation", () => {
 
 describe("runOpenCodeStep event stream recovery", () => {
   let repoDir: string | undefined;
+  let originalTeardownMs: string | undefined;
+
+  beforeEach(() => {
+    originalTeardownMs = process.env.LOOPER_PERMISSION_TEARDOWN_MS;
+    process.env.LOOPER_PERMISSION_TEARDOWN_MS = "5";
+  });
 
   afterEach(() => {
     if (repoDir) rmSync(repoDir, { recursive: true, force: true });
     repoDir = undefined;
+    if (originalTeardownMs === undefined) delete process.env.LOOPER_PERMISSION_TEARDOWN_MS;
+    else process.env.LOOPER_PERMISSION_TEARDOWN_MS = originalTeardownMs;
   });
 
   test("resubscribes when the event stream ends early while the session is still busy", async () => {
@@ -918,7 +926,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     }
   });
 
-  test("reattach restarts with a timeout when the session stays busy past the step timeout", async () => {
+  test("reattach fails closed when timeout teardown cannot confirm the session stopped", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-timeout-"));
     let abortCalled = false;
 
@@ -960,7 +968,8 @@ describe("runOpenCodeStep event stream recovery", () => {
       outcomeMessageID: MID,
     });
 
-    expect(result.status).toBe("restart");
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("permission teardown timed out while confirming session stop");
     expect(state.restartRequested).toBe(true);
     expect(state.restartReason).toBe("timeout");
     expect(abortCalled).toBe(true);
@@ -1071,7 +1080,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(state.pendingRequests).toEqual([]);
   });
 
-  test("returns a timeout restart when the prompt exceeds the step timeout", async () => {
+  test("fails closed when prompt timeout teardown cannot confirm the session stopped", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-timeout-"));
     let abortCalled = false;
 
@@ -1121,8 +1130,8 @@ describe("runOpenCodeStep event stream recovery", () => {
       step,
     });
 
-    expect(result.status).toBe("restart");
-    expect(result.restartReason).toBe("timeout");
+    expect(result.status).toBe("failed");
+    expect(result.errorMessage).toContain("permission teardown timed out while confirming session stop");
     expect(abortCalled).toBe(true);
   });
 

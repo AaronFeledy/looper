@@ -38,10 +38,15 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
   const inFlight = new Map<string, Promise<void>>();
   const deadlines = new Map<string, object>();
   let disposed = false;
+  let acceptingDecisions = true;
   const effectiveQuestionPolicy = options.step.questionPolicy ?? options.questionPolicy;
   const ownsSession = (sessionID: string): boolean =>
     sessionID === options.activeSessionID || options.ownedSessionIDs?.().has(sessionID) === true;
   const identity = (requestID: string) => ({ requestID, generation });
+  const humanGateOpen = (): boolean => options.state.pendingRequests.some(
+    (request) => request.generation === generation && request.status !== "resolving",
+  );
+  const reportHumanGate = (): void => options.onHumanGateChange?.(humanGateOpen());
 
   const rememberHandled = (requestID: string): void => {
     handled.add(requestID);
@@ -60,6 +65,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     clearDeadline(requestID);
     clearPendingRequest(options.state, identity(requestID));
     rememberHandled(requestID);
+    reportHumanGate();
   };
 
   const incrementFriction = (request: Extract<PendingRequest, { kind: "permission" }>, origin: AutomatedRejectOrigin): void => {
@@ -114,8 +120,8 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     options.pushLine(`[looper] request ${request.requestID} reply failed after retry: ${lastError}`);
   };
 
-  const submit = (request: PendingRequest, action: PendingRequestDecisionAction, origin?: AutomatedRejectOrigin): void => {
-    if (disposed || inFlight.has(request.requestID) || handled.has(request.requestID)) return;
+  const submit = (request: PendingRequest, action: PendingRequestDecisionAction, origin?: AutomatedRejectOrigin, cleanup = false): void => {
+    if (disposed || (!acceptingDecisions && !cleanup) || inFlight.has(request.requestID) || handled.has(request.requestID)) return;
     const pending = runWithRetry(request, action, origin).finally(() => inFlight.delete(request.requestID));
     inFlight.set(request.requestID, pending);
   };
@@ -148,6 +154,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     const request = options.state.pendingRequests.find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
     if (request?.kind !== "permission") return;
     const action = resolvePermissionAction(payload.permission, options.step, { permissionPolicy: options.permissionPolicy });
+    if (!options.unattended && action === "ask") reportHumanGate();
     if (options.unattended && action === "ask") submit(request, "reject", "nontty_ask");
     else if (options.unattended && action === "always") {
       options.pushLine(`[error] permission '${payload.permission}' policy always rejected origin=unattended_always_fail_closed; unattended runs never send always`);
@@ -163,6 +170,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     armDeadline(payload.requestID, askedAt);
     const request = options.state.pendingRequests.find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
     if (request?.kind !== "question") return;
+    if (!options.unattended && effectiveQuestionPolicy !== "reject") reportHumanGate();
     if (options.unattended || effectiveQuestionPolicy === "reject") submit(request, "reject");
     else options.pushLine("[looper] question left pending");
   };
@@ -186,12 +194,15 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
   };
 
   const reconcile = (results: RequestListResults): void => {
-    const listed = new Set([...results.permissions.map(({ id }) => id), ...results.questions.map(({ id }) => id)]);
+    const permissionIDs = results.permissions === undefined ? undefined : new Set(results.permissions.map(({ id }) => id));
+    const questionIDs = results.questions === undefined ? undefined : new Set(results.questions.map(({ id }) => id));
     for (const request of [...options.state.pendingRequests]) {
-      if (request.generation === generation && !listed.has(request.requestID)) dismiss(request.requestID);
+      if (request.generation !== generation) continue;
+      const listed = request.kind === "permission" ? permissionIDs : questionIDs;
+      if (listed !== undefined && !listed.has(request.requestID)) dismiss(request.requestID);
     }
-    for (const request of results.permissions) permissionAsked({ ...request, requestID: request.id, tool: request.tool });
-    for (const request of results.questions) questionAsked({ ...request, requestID: request.id, tool: request.tool });
+    for (const request of results.permissions ?? []) permissionAsked({ ...request, requestID: request.id, tool: request.tool });
+    for (const request of results.questions ?? []) questionAsked({ ...request, requestID: request.id, tool: request.tool });
   };
 
   const poller = scheduler.setInterval(() => { void consumeDecisions(); }, options.claimPollMs ?? DEFAULT_CLAIM_POLL_MS);
@@ -200,10 +211,22 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     generation,
     reconcile,
     consumeDecisions,
+    stopAcceptingDecisions() {
+      acceptingDecisions = false;
+    },
+    hasOpenRequests() {
+      return options.state.pendingRequests.some((request) => request.generation === generation);
+    },
+    clearUI() {
+      for (const request of [...options.state.pendingRequests]) {
+        if (request.generation === generation) clearPendingRequest(options.state, identity(request.requestID));
+      }
+      reportHumanGate();
+    },
     async rejectOpen(reason) {
       options.pushLine(`[looper] rejecting open requests: ${reason}`);
       for (const request of [...options.state.pendingRequests]) {
-        if (request.generation === generation && request.status !== "resolving") submit(request, "reject");
+        if (request.generation === generation && request.status !== "resolving") submit(request, "reject", undefined, true);
       }
       await Promise.all([...inFlight.values()]);
     },

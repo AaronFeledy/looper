@@ -1,0 +1,34 @@
+Task 6 — Dual list reconcile + teardown SM + clocks + broker owner wiring
+
+TDD red:
+- bun test test/pausable-timeout.test.ts test/request-teardown.test.ts test/request-reconcile.test.ts test/request-broker-owner.test.ts
+- Failed because the four task-6 modules did not exist.
+
+Implemented scenarios:
+- hanging session.abort returns safeToProceed=false within the teardown deadline
+- hanging permission reply returns safeToProceed=false
+- externally resolved request during teardown is dismissed safely
+- teardown rejects each request id once
+- question.list merges open questions
+- permission.list failure keeps the existing permission queue and logs once
+- per-request gate deadline rejects automatically
+- step timeout pauses for one overlapping-gate interval and re-arms
+- unsafe teardown poisons broker replacement, preventing a new overlapping prompt/session
+- same-session waiting/resume retains one broker and its logical-step friction state
+- event-stream resubscribe invokes dual-list reconciliation
+- terminal owner disposal clears broker timers, poller, and UI generation
+- LOOPER_PERMISSION_GATE_MAX_MS defaults to 1800000 and rejects values below 1
+- LOOPER_PERMISSION_TEARDOWN_MS defaults to 5000 and rejects values below 1
+
+Final gate:
+$ bun run typecheck && bun test
+$ tsc -p .
+1121 pass
+0 fail
+2571 expect() calls
+Ran 1121 tests across 105 files. [106.37s]
+
+Scope checks:
+- No TUI implementation from todos 7-9.
+- No production dependency added.
+- No `as any`, `@ts-ignore`, or `@ts-expect-error` in task-6 production files.

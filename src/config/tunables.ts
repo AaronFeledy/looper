@@ -1,10 +1,28 @@
 export const DEFAULT_STEP_TIMEOUT_MS = 60 * 60 * 1000;
+export const DEFAULT_PERMISSION_GATE_MAX_MS = 1_800_000;
+export const DEFAULT_PERMISSION_TEARDOWN_MS = 5_000;
 
 export function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function requiredPositiveIntegerEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${name} must be an integer greater than or equal to 1`);
+  return parsed;
+}
+
+export function permissionGateMaxMs(): number {
+  return requiredPositiveIntegerEnv("LOOPER_PERMISSION_GATE_MAX_MS", DEFAULT_PERMISSION_GATE_MAX_MS);
+}
+
+export function permissionTeardownMs(): number {
+  return requiredPositiveIntegerEnv("LOOPER_PERMISSION_TEARDOWN_MS", DEFAULT_PERMISSION_TEARDOWN_MS);
 }
 
 export const CONTINUATION_EXIT_GRACE_MS = positiveIntegerEnv("LOOPER_CONTINUATION_EXIT_GRACE_MS", 30_000);

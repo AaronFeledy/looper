@@ -70,6 +70,7 @@ describe("prompt event stream watchdog", () => {
     let subscribeCount = 0;
     let statusCalls = 0;
     const lines: string[] = [];
+    let reconcileCalls = 0;
 
     const client = {
       event: {
@@ -95,6 +96,7 @@ describe("prompt event stream watchdog", () => {
       promptAbortController: new AbortController(),
       cancellationActive: () => false,
       pushLine: (line) => lines.push(line),
+      reconcileRequests: async () => { reconcileCalls += 1; },
       timings: { pollMs: 5, stallThresholdMs: 20, resubscribeBackoffMs: 1 },
       consumer: {
         consume: async (stream) => {
@@ -112,5 +114,6 @@ describe("prompt event stream watchdog", () => {
     expect(statusCalls).toBeGreaterThan(0);
     expect(subscribeCount).toBeGreaterThan(1);
     expect(lines.some((line) => line.includes("resubscribed"))).toBe(true);
+    expect(reconcileCalls).toBeGreaterThan(0);
   });
 });
