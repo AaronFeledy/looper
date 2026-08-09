@@ -175,7 +175,7 @@ describe("createRunnerEventController permission characterization", () => {
 
       // Then
       expect(harness.fake.permissionReplies).toEqual([]);
-      expect(harness.state.pendingRequests[0]).toEqual({
+      expect(harness.state.pendingRequests[0]).toMatchObject({
         kind: "permission",
         status: "open",
         requestID: "perm-1",
@@ -183,7 +183,8 @@ describe("createRunnerEventController permission characterization", () => {
         permission: "edit",
         patterns: ["src/**"],
         metadata: { source: "tool" },
-        generation: 0,
+        generation: expect.any(Number),
+        askedAt: expect.any(Number),
       });
       expect(harness.lines.some((line) => line.includes("left pending"))).toBe(true);
     });
@@ -225,8 +226,8 @@ describe("createRunnerEventController permission characterization", () => {
     await drainReplies();
 
     // Then
-    expect(harness.fake.permissionReplies).toHaveLength(1);
-    expect(harness.lines.some((line) => line.includes("reply failed: permission transport unavailable"))).toBe(true);
+    expect(harness.fake.permissionReplies).toHaveLength(2);
+    expect(harness.lines.some((line) => line.includes("reply failed after retry: permission transport unavailable"))).toBe(true);
   });
 
   test("records question.reject when the current policy rejects", async () => {

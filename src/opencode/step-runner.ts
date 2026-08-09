@@ -12,6 +12,7 @@ import { createPromptEventStream, type PromptEventStream } from "./event-stream.
 import type { RunContinuationRecord } from "./continuation-records.ts";
 import { classifyAssistantForMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
+import { createRequestBroker, type RequestBroker } from "./request-broker.ts";
 import { createRunnerEventController, parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
@@ -124,6 +125,7 @@ export async function runOpenCodeStep({
   }, effectiveTimeoutMs);
 
   let eventStream: PromptEventStream | undefined;
+  let requestBroker: RequestBroker | undefined;
   let sessionEventError: Error | undefined;
   let finalError: Error | undefined;
 
@@ -151,6 +153,19 @@ export async function runOpenCodeStep({
     const hiddenUserMessageIDs = new Set<string>(activeStep.looperMessageIDs ?? []);
     setStepPromptText(state, stepIndex, prompt);
 
+    requestBroker = createRequestBroker({
+      state,
+      client,
+      repoDir,
+      step,
+      activeSessionID: boundSessionID,
+      ownedSessionIDs: () => ownedSessions.ids(),
+      pushLine,
+      unattended: false,
+      friction: { counts: new Map(), requestIDs: new Set() },
+      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    });
     const consumer = createSessionEventConsumer(boundSessionID, {
       pushLine,
       pushLines,
@@ -159,17 +174,7 @@ export async function runOpenCodeStep({
         pushAgentEvent(state, event, at);
         pushStepOutputEvent(state, stepIndex, event, at);
       },
-      ...createRunnerEventController({
-        state,
-        client,
-        repoDir,
-        step,
-        activeSessionID: boundSessionID,
-        ownedSessionIDs: () => ownedSessions.ids(),
-        pushLine,
-        ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-        ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-      }),
+      ...requestBroker.callbacks,
       onSessionError: (message) => {
         sessionEventError ??= new Error(`session.error: ${message}`);
       },
@@ -233,6 +238,7 @@ export async function runOpenCodeStep({
   } finally {
     clearInterval(watcher);
     clearTimeout(timeout);
+    requestBroker?.dispose();
     subscription.ctrl?.abort();
     ctrl.abort();
     await eventStream?.stop();

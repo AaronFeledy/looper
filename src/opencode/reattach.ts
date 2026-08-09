@@ -8,7 +8,8 @@ import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentE
 import { stopFileExists } from "../lib/state-files.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
-import { createRunnerEventController, type Step, type StepRunResult } from "./step-runner-types.ts";
+import { createRequestBroker } from "./request-broker.ts";
+import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
 import { classifyAssistantForMessage, type AssistantClassification } from "./assistant-classification.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
@@ -277,6 +278,18 @@ export async function reattachOpenCodeStep({
     }
   };
   const hiddenUserMessageIDs = new Set<string>(looperMessageIDs ?? activeStep.looperMessageIDs ?? []);
+  const requestBroker = createRequestBroker({
+    state,
+    client,
+    repoDir,
+    step,
+    activeSessionID: sessionID,
+    pushLine,
+    unattended: false,
+    friction: { counts: new Map(), requestIDs: new Set() },
+    ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+    ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+  });
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
@@ -285,16 +298,7 @@ export async function reattachOpenCodeStep({
       pushAgentEvent(state, event, at);
       pushStepOutputEvent(state, stepIndex, event, at);
     },
-    ...createRunnerEventController({
-      state,
-      client,
-      repoDir,
-      step,
-      activeSessionID: sessionID,
-      pushLine,
-      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-    }),
+    ...requestBroker.callbacks,
     onSessionError: (message) => {
       sessionEventError ??= new Error(`session.error: ${message}`);
     },
@@ -369,6 +373,7 @@ export async function reattachOpenCodeStep({
   } finally {
     clearInterval(watcher);
     clearTimeout(stepTimeout);
+    requestBroker.dispose();
     ctrl.abort();
     if (consumerPromise) {
       let consumerTimedOut = false;

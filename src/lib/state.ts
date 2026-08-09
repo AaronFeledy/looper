@@ -204,6 +204,7 @@ export type PendingPermission = {
   patterns: string[];
   metadata?: Record<string, unknown>;
   generation: number;
+  askedAt?: number;
 };
 
 export type PendingQuestion = {
@@ -211,6 +212,7 @@ export type PendingQuestion = {
   sessionID: string;
   questions: unknown[];
   generation: number;
+  askedAt?: number;
 };
 
 export type PendingRequestStatus = "open" | "resolving" | "error";
@@ -506,6 +508,30 @@ export function consumePendingRequestDecision(state: LoopState, identity: Pendin
   delete request.decision;
   notifyStateChange();
   return decision;
+}
+
+export function setPendingRequestError(state: LoopState, identity: PendingRequestIdentity, lastError: string): boolean {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request === undefined) return false;
+  request.status = "error";
+  request.lastError = lastError;
+  delete request.decision;
+  notifyStateChange();
+  return true;
+}
+
+export function reopenPendingRequest(state: LoopState, identity: PendingRequestIdentity, lastError: string): boolean {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request === undefined) return false;
+  request.status = "open";
+  request.lastError = lastError;
+  delete request.decision;
+  notifyStateChange();
+  return true;
 }
 
 export function clearPendingRequest(state: LoopState, identity: PendingRequestIdentity): boolean {

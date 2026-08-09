@@ -1,9 +1,9 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy, type VariantConfig } from "../lib/config.ts";
-import type { EventConsumerCallbacks, PermissionAskedPayload, QuestionAskedPayload } from "../lib/event-consumer.ts";
-import { clearPendingRequest, enqueuePendingPermission, enqueuePendingQuestion, setTodos, type LoopState, type StepRestartReason } from "../lib/state.ts";
-import { formatRequestError, toError } from "./util.ts";
+import type { PermissionPolicy, QuestionPolicy, VariantConfig } from "../lib/config.ts";
+import type { EventConsumerCallbacks } from "../lib/event-consumer.ts";
+import type { LoopState, StepRestartReason } from "../lib/state.ts";
+import { createRequestBroker } from "./request-broker.ts";
 
 export type Step = {
   name: string;
@@ -41,126 +41,18 @@ export type RunnerEventControllerOptions = {
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
   ownedSessionIDs?: () => ReadonlySet<string>;
+  unattended?: boolean;
 };
 
-export function createRunnerEventController({
-  state,
-  client,
-  repoDir,
-  step,
-  activeSessionID,
-  pushLine,
-  permissionPolicy,
-  questionPolicy,
-  ownedSessionIDs,
-}: RunnerEventControllerOptions): Pick<
+export function createRunnerEventController(options: RunnerEventControllerOptions): Pick<
   EventConsumerCallbacks,
   "onPermissionAsked" | "onPermissionReplied" | "onQuestionAsked" | "onQuestionReplied" | "onQuestionRejected" | "onTodoUpdated"
 > {
-  const handledRequestIDs = new Set<string>();
-  const inFlightReplies = new Map<string, Promise<void>>();
-  const generation = 0;
-  const effectiveQuestionPolicy = step.questionPolicy ?? questionPolicy;
-
-  const trackReply = (requestID: string, reply: Promise<void>): void => {
-    inFlightReplies.set(requestID, reply);
-    reply
-      .then(() => {
-        handledRequestIDs.add(requestID);
-      })
-      .catch((error) => {
-        pushLine(`[looper] request ${requestID} reply failed: ${toError(error).message}`);
-      })
-      .finally(() => {
-        inFlightReplies.delete(requestID);
-      });
-  };
-
-  const alreadyHandling = (requestID: string): boolean => handledRequestIDs.has(requestID) || inFlightReplies.has(requestID);
-  const ownsRequestSession = (sessionID: string): boolean => sessionID === activeSessionID || ownedSessionIDs?.().has(sessionID) === true;
-
-  const onPermissionAsked = (payload: PermissionAskedPayload): void => {
-    if (!ownsRequestSession(payload.sessionID)) return;
-    if (alreadyHandling(payload.requestID)) return;
-
-    // Pending state is set for the "ask" path too (and left set until the
-    // permission.replied event) so the TUI can surface that the run is blocked
-    // waiting on a human instead of silently stalling.
-    enqueuePendingPermission(state, {
-      requestID: payload.requestID,
-      sessionID: payload.sessionID,
-      permission: payload.permission,
-      patterns: payload.patterns,
-      ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
-      generation,
-    });
-
-    const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
-    if (action === "ask") {
-      pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
-      return;
-    }
-
-    const request = client.permission.reply({ requestID: payload.requestID, reply: action, directory: repoDir })
-      .then((result) => {
-        if (result.error) throw new Error(formatRequestError(result.error));
-        pushLine(`[looper] permission '${payload.permission}' -> ${action}`);
-      })
-      .catch((error) => {
-        throw error;
-      })
-      .finally(() => {
-        clearPendingRequest(state, { requestID: payload.requestID, generation });
-      });
-    trackReply(payload.requestID, request);
-  };
-
-  const onQuestionAsked = (payload: QuestionAskedPayload): void => {
-    if (!ownsRequestSession(payload.sessionID)) return;
-    if (alreadyHandling(payload.requestID)) return;
-
-    enqueuePendingQuestion(state, {
-      requestID: payload.requestID,
-      sessionID: payload.sessionID,
-      questions: payload.questions,
-      generation,
-    });
-
-    if (effectiveQuestionPolicy !== "reject") {
-      pushLine(`[looper] question left pending (answer in an attached opencode client, or set questionPolicy: reject)`);
-      return;
-    }
-
-    const request = client.question.reject({ requestID: payload.requestID, directory: repoDir })
-      .then((result) => {
-        if (result.error) throw new Error(formatRequestError(result.error));
-        pushLine(`[looper] question rejected (questionPolicy=${effectiveQuestionPolicy})`);
-      })
-      .catch((error) => {
-        throw error;
-      })
-      .finally(() => {
-        clearPendingRequest(state, { requestID: payload.requestID, generation });
-      });
-    trackReply(payload.requestID, request);
-  };
-
-  return {
-    onPermissionAsked,
-    onPermissionReplied: (payload) => {
-      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
-    },
-    onQuestionAsked,
-    onQuestionReplied: (payload) => {
-      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
-    },
-    onQuestionRejected: (payload) => {
-      if (ownsRequestSession(payload.sessionID)) clearPendingRequest(state, { requestID: payload.requestID, generation });
-    },
-    onTodoUpdated: (payload) => {
-      if (payload.sessionID === activeSessionID) setTodos(state, payload.todos);
-    },
-  };
+  return createRequestBroker({
+    ...options,
+    unattended: options.unattended ?? false,
+    friction: { counts: new Map(), requestIDs: new Set() },
+  }).callbacks;
 }
 
 export class MalformedModelError extends Error {
