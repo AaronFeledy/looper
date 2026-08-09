@@ -164,6 +164,8 @@ export type RunIterationOptions = {
   recoverySnapshots?: RecoverySnapshotsConfig;
   permissionPolicy?: PermissionPolicy;
   questionPolicy?: QuestionPolicy;
+  unattended?: boolean;
+  writeStop?: (reason: string) => void;
   useSessionIdle?: boolean;
   prdDir?: string;
   storyIdPattern?: string;
@@ -242,6 +244,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     recoverySnapshots = false,
     permissionPolicy,
     questionPolicy,
+    unattended = false,
+    writeStop,
     useSessionIdle,
     prdDir,
     storyIdPattern,
@@ -645,8 +649,9 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       repoDir,
       step,
       pushLine: (line) => logStepLine(currentStepIndex, line),
-      unattended: false,
+      unattended,
       friction: { counts: attempt.permissionFrictionCounts, requestIDs: attempt.permissionFrictionRequestIDs },
+      ...(writeStop !== undefined ? { writeStop } : {}),
       ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
       ...(questionPolicy !== undefined ? { questionPolicy } : {}),
       onHumanGateChange: (open) => {

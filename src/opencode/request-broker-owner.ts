@@ -17,6 +17,7 @@ type RequestBrokerOwnerOptions = {
   readonly pushLine: (line: string) => void;
   readonly unattended: boolean;
   readonly friction: RequestFrictionState;
+  readonly writeStop?: (reason: string) => void;
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
   readonly onHumanGateChange?: (open: boolean) => void;
@@ -73,6 +74,7 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
         pushLine: options.pushLine,
         unattended: options.unattended,
         friction: options.friction,
+        ...(options.writeStop !== undefined ? { writeStop: options.writeStop } : {}),
         gateMaxMs,
         ...(options.permissionPolicy !== undefined ? { permissionPolicy: options.permissionPolicy } : {}),
         ...(options.questionPolicy !== undefined ? { questionPolicy: options.questionPolicy } : {}),

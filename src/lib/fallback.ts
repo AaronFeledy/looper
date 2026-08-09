@@ -232,6 +232,7 @@ export async function runNonTtyIterations({
     recoverySnapshots,
     ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    unattended: true,
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),

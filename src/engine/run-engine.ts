@@ -42,6 +42,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly recoverySnapshots?: RecoverySnapshotsConfig;
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
+  readonly unattended?: boolean;
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
@@ -214,6 +215,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.titleGenConfig !== undefined ? { titleGenConfig: input.titleGenConfig } : {}),
         ...(input.permissionPolicy !== undefined ? { permissionPolicy: input.permissionPolicy } : {}),
         ...(input.questionPolicy !== undefined ? { questionPolicy: input.questionPolicy } : {}),
+        ...(input.unattended !== undefined ? { unattended: input.unattended } : {}),
+        writeStop: input.store.writeStop,
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
         ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),

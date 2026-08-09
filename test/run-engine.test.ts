@@ -95,6 +95,40 @@ describe("computeRunResumePlan", () => {
 });
 
 describe("runEngine", () => {
+  test("forwards unattended mode and the run-state stop writer to an iteration", async () => {
+    // Given an unattended engine run with a store-backed stop writer.
+    const stopReasons: string[] = [];
+    const store = { ...memoryStore(), writeStop: (reason: string) => stopReasons.push(reason) } satisfies RunStateStore;
+    let receivedUnattended: boolean | undefined;
+
+    // When the iteration uses the forwarded writer.
+    await runEngine({
+      maxIterations: 1,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: {},
+      store,
+      hooks: { createIterationState: () => ({}) },
+      loadSteps: () => [{ name: "build", prompt: "build.md" }],
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run",
+      legacyResumeStepIndex: () => 0,
+      unattended: true,
+      runIteration: async (input) => {
+        receivedUnattended = input.unattended;
+        input.writeStop("permission friction: automated reject limit for 'edit'");
+        return "complete";
+      },
+    });
+
+    // Then unattended mode and the exact store writer both reached the iteration.
+    expect(receivedUnattended).toBe(true);
+    expect(stopReasons).toEqual(["permission friction: automated reject limit for 'edit'"]);
+  });
+
   test("passes a custom story id pattern to the TTY iteration path", async () => {
     // Given a run engine configured with a custom story id pattern.
     let receivedPattern: string | undefined;
