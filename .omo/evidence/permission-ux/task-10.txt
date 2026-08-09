@@ -1,0 +1,29 @@
+# task 10 — stall proof: permission gate hold vs control
+
+## What was proven
+A: run blocked on a pending human permission gate scores no stall strikes.
+B (control): the equivalent quiescent no-progress run with the gate answered does accumulate strikes and trips.
+
+A already holds in production via probeInFlight; no prod change was needed.
+Chain proven by the test (real code, only the opencode client is faked):
+  session.status busy -> probeBackgroundLiveness -> createInFlightProbe -> StallObservation.inFlight -> detector HOLDs the counter
+Second (primary) mechanism, documented in the test comment, not re-tested here: while the gate is open the step timeout is paused and runIteration has not returned, so runStallCheck is never reached.
+
+## bun test test/stall-detector.test.ts
+bun test v1.3.14 (0d9b296a)
+
+ 48 pass
+ 0 fail
+ 192 expect() calls
+Ran 48 tests across 1 file. [422.00ms]
+
+## Mutation check (temporarily disabled the inFlight hold in stall-detector.ts)
+Test A FAILS without the hold, so it is not tautological:
+  (fail) ... > a run blocked on a pending human permission gate scores no stall strikes
+  Expected: false  Received: true    (44 pass, 4 fail)
+Restored source: 48 pass / 0 fail.
+
+## bun run typecheck
+$ tsc -p .
+test/permission-gate-ui.test.ts(17,40): error TS2307: Cannot find module '../src/tui/permission-dialog.ts' or its corresponding type declarations.
+(the permission-dialog error is pre-existing from unstarted task 9, unrelated to this change)
