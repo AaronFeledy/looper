@@ -1,5 +1,6 @@
 import type { OpencodeClient, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
 
+import type { PendingRequestPort } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import type { EventConsumerCallbacks } from "../lib/event-consumer.ts";
 import type { LoopState } from "../lib/state.ts";
@@ -20,8 +21,11 @@ export interface RequestBrokerScheduler {
   clearInterval(handle: object): void;
 }
 
-export type RequestBrokerOptions = {
-  readonly state: LoopState;
+type RequestBrokerSource =
+  | { readonly requests: PendingRequestPort }
+  | { readonly state: LoopState };
+
+export type RequestBrokerOptions = RequestBrokerSource & {
   readonly client: OpencodeClient;
   readonly repoDir: string;
   readonly step: Step;

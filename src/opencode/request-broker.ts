@@ -1,15 +1,6 @@
 import { resolvePermissionAction } from "../lib/config.ts";
-import {
-  clearPendingRequest,
-  consumePendingRequestDecision,
-  enqueuePendingPermission,
-  enqueuePendingQuestion,
-  reopenPendingRequest,
-  setPendingRequestError,
-  setTodos,
-  type PendingRequest,
-  type PendingRequestDecisionAction,
-} from "../lib/state.ts";
+import type { PendingRequest, PendingRequestDecisionAction } from "../core/pending-request.ts";
+import { createLoopStateStepReporter } from "../lib/loop-state-reporter.ts";
 import { formatRequestError, toError } from "./util.ts";
 import { AlreadyResolvedRequestError, createRequestBrokerScheduler, DEFAULT_CLAIM_POLL_MS, DEFAULT_GATE_MAX_MS, FRICTION_LIMIT, HANDLED_REQUEST_LIMIT, isAlreadyResolvedRequest } from "./request-broker-support.ts";
 import type { PermissionAuditOrigin } from "./permission-audit.ts";
@@ -32,6 +23,7 @@ export type {
 let nextGeneration = 1;
 
 export function createRequestBroker(options: RequestBrokerOptions): RequestBroker {
+  const requests = "requests" in options ? options.requests : createLoopStateStepReporter(options.state).requests;
   const generation = nextGeneration++;
   const scheduler = options.scheduler ?? createRequestBrokerScheduler();
   const gateMaxMs = options.gateMaxMs ?? DEFAULT_GATE_MAX_MS;
@@ -44,7 +36,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
   const ownsSession = (sessionID: string): boolean =>
     sessionID === options.activeSessionID || options.ownedSessionIDs?.().has(sessionID) === true;
   const identity = (requestID: string) => ({ requestID, generation });
-  const humanGateOpen = (): boolean => options.state.pendingRequests.some(
+  const humanGateOpen = (): boolean => requests.list().some(
     (request) => request.generation === generation && request.status !== "resolving",
   );
   const reportHumanGate = (): void => options.onHumanGateChange?.(humanGateOpen());
@@ -64,7 +56,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
 
   const dismiss = (requestID: string): void => {
     clearDeadline(requestID);
-    clearPendingRequest(options.state, identity(requestID));
+    requests.clearOne(identity(requestID));
     rememberHandled(requestID);
     reportHumanGate();
   };
@@ -117,10 +109,10 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
           return;
         }
         lastError = toError(error).message;
-        setPendingRequestError(options.state, identity(request.requestID), lastError);
+        requests.setError(identity(request.requestID), lastError);
       }
     }
-    reopenPendingRequest(options.state, identity(request.requestID), lastError);
+    requests.reopen(identity(request.requestID), lastError);
     options.pushLine(`[looper] request ${request.requestID} reply failed after retry: ${lastError}`);
   };
 
@@ -140,7 +132,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
 
   const onDeadline = (requestID: string): void => {
     deadlines.delete(requestID);
-    const request = options.state.pendingRequests.find((candidate) => candidate.requestID === requestID && candidate.generation === generation);
+    const request = requests.list().find((candidate) => candidate.requestID === requestID && candidate.generation === generation);
     if (request === undefined || request.status === "resolving") return;
     submit(request, "reject", "gate_timeout");
   };
@@ -155,9 +147,9 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     if (!ownsSession(payload.sessionID) || handled.has(payload.requestID) || inFlight.has(payload.requestID)) return;
     // Reconcile re-lists open requests; keep an existing same-generation entry intact
     // (including a human claim the poller has not consumed yet).
-    if (options.state.pendingRequests.some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
+    if (requests.list().some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
     const askedAt = options.now?.() ?? Date.now();
-    enqueuePendingPermission(options.state, {
+    requests.enqueuePermission({
       requestID: payload.requestID,
       sessionID: payload.sessionID,
       permission: payload.permission,
@@ -167,7 +159,7 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
       askedAt,
     });
     armDeadline(payload.requestID, askedAt);
-    const request = options.state.pendingRequests.find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
+    const request = requests.list().find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
     if (request?.kind !== "permission") return;
     const action = resolvePermissionAction(payload.permission, options.step, { permissionPolicy: options.permissionPolicy });
     if (!options.unattended && action === "ask") reportHumanGate();
@@ -181,11 +173,11 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
 
   const questionAsked = (payload: Parameters<NonNullable<RequestBroker["callbacks"]["onQuestionAsked"]>>[0]): void => {
     if (!ownsSession(payload.sessionID) || handled.has(payload.requestID) || inFlight.has(payload.requestID)) return;
-    if (options.state.pendingRequests.some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
+    if (requests.list().some((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation)) return;
     const askedAt = options.now?.() ?? Date.now();
-    enqueuePendingQuestion(options.state, { requestID: payload.requestID, sessionID: payload.sessionID, questions: payload.questions, generation, askedAt });
+    requests.enqueueQuestion({ requestID: payload.requestID, sessionID: payload.sessionID, questions: payload.questions, generation, askedAt });
     armDeadline(payload.requestID, askedAt);
-    const request = options.state.pendingRequests.find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
+    const request = requests.list().find((candidate) => candidate.requestID === payload.requestID && candidate.generation === generation);
     if (request?.kind !== "question") return;
     if (!options.unattended && effectiveQuestionPolicy !== "reject") reportHumanGate();
     if (options.unattended) submit(request, "reject", "nontty_ask");
@@ -194,9 +186,9 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
   };
 
   const consumeDecisions = async (): Promise<void> => {
-    const resolving = options.state.pendingRequests.filter((request) => request.generation === generation && request.status === "resolving");
+    const resolving = requests.list().filter((request) => request.generation === generation && request.status === "resolving");
     for (const request of resolving) {
-      const action = consumePendingRequestDecision(options.state, identity(request.requestID));
+      const action = requests.consumeDecision(identity(request.requestID));
       if (action !== null) submit(request, action, "human");
     }
     await Promise.all([...inFlight.values()]);
@@ -208,13 +200,13 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     onQuestionAsked: questionAsked,
     onQuestionReplied: (payload) => { if (ownsSession(payload.sessionID)) dismiss(payload.requestID); },
     onQuestionRejected: (payload) => { if (ownsSession(payload.sessionID)) dismiss(payload.requestID); },
-    onTodoUpdated: (payload) => { if (payload.sessionID === options.activeSessionID) setTodos(options.state, payload.todos); },
+    onTodoUpdated: (payload) => { if (payload.sessionID === options.activeSessionID) requests.setTodos(payload.todos); },
   };
 
   const reconcile = (results: RequestListResults): void => {
     const permissionIDs = results.permissions === undefined ? undefined : new Set(results.permissions.map(({ id }) => id));
     const questionIDs = results.questions === undefined ? undefined : new Set(results.questions.map(({ id }) => id));
-    for (const request of [...options.state.pendingRequests]) {
+    for (const request of [...requests.list()]) {
       if (request.generation !== generation) continue;
       const listed = request.kind === "permission" ? permissionIDs : questionIDs;
       if (listed !== undefined && !listed.has(request.requestID)) dismiss(request.requestID);
@@ -233,17 +225,17 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
       acceptingDecisions = false;
     },
     hasOpenRequests() {
-      return options.state.pendingRequests.some((request) => request.generation === generation);
+      return requests.list().some((request) => request.generation === generation);
     },
     clearUI() {
-      for (const request of [...options.state.pendingRequests]) {
-        if (request.generation === generation) clearPendingRequest(options.state, identity(request.requestID));
+      for (const request of [...requests.list()]) {
+        if (request.generation === generation) requests.clearOne(identity(request.requestID));
       }
       reportHumanGate();
     },
     async rejectOpen(reason) {
       options.pushLine(`[looper] rejecting open requests: ${reason}`);
-      for (const request of [...options.state.pendingRequests]) {
+      for (const request of [...requests.list()]) {
         if (request.generation === generation && request.status !== "resolving") submit(request, "reject", "teardown", true);
       }
       await Promise.all([...inFlight.values()]);

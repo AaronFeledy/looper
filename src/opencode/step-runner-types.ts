@@ -1,8 +1,9 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+import type { StepRestartReason } from "../core/step-view.ts";
+import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy, VariantConfig } from "../lib/config.ts";
 import type { EventConsumerCallbacks } from "../lib/event-consumer.ts";
-import type { LoopState, StepRestartReason } from "../lib/state.ts";
 import { createRequestBroker } from "./request-broker.ts";
 
 export type Step = {
@@ -32,7 +33,7 @@ export type StepRunResult = {
 };
 
 export type RunnerEventControllerOptions = {
-  state: LoopState;
+  ctx: RunStepContext;
   client: OpencodeClient;
   repoDir: string;
   step: Step;
@@ -48,8 +49,10 @@ export function createRunnerEventController(options: RunnerEventControllerOption
   EventConsumerCallbacks,
   "onPermissionAsked" | "onPermissionReplied" | "onQuestionAsked" | "onQuestionReplied" | "onQuestionRejected" | "onTodoUpdated"
 > {
+  const { ctx, ...brokerOptions } = options;
   return createRequestBroker({
-    ...options,
+    ...brokerOptions,
+    requests: ctx.reporter.requests,
     unattended: options.unattended ?? false,
     friction: { counts: new Map(), requestIDs: new Set() },
   }).callbacks;

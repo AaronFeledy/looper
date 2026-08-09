@@ -1,8 +1,9 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
+import type { StepRestartReason } from "../core/step-view.ts";
+import type { RunStepContext } from "../engine/step-reporter.ts";
 import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../lib/session-metadata.ts";
-import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
@@ -17,15 +18,13 @@ import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
-import type { RunControlView } from "../engine/run-control.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
 export { createRunnerEventController, parseModel } from "./step-runner-types.ts";
 export { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 
 export type RunOpenCodeStepOptions = {
-  state: LoopState;
-  control: RunControlView;
+  ctx: RunStepContext;
   stepIndex: number;
   prompt: string;
   client: OpencodeClient;
@@ -43,8 +42,7 @@ export type RunOpenCodeStepOptions = {
 };
 
 export async function runOpenCodeStep({
-  state,
-  control,
+  ctx,
   stepIndex,
   prompt,
   client,
@@ -59,22 +57,19 @@ export async function runOpenCodeStep({
   questionPolicy,
   requestBrokerOwner,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
-  const activeStep = state.steps[stepIndex];
-  if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
+  if (ctx.reporter.steps.get(stepIndex) === undefined) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
   const effectiveTimeoutMs = timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
 
-  beginStepRun(state, stepIndex);
+  ctx.reporter.steps.begin(stepIndex);
 
   const pushLine = (line: string, at?: number) => {
-    pushAgentLine(state, line, at);
-    pushStepOutputLine(state, stepIndex, line, at);
+    ctx.reporter.out.line(stepIndex, line, at);
   };
 
   const pushLines = (lines: string[], at?: number) => {
     if (lines.length === 0) return;
-    for (const line of lines) pushAgentLine(state, line, at);
-    pushStepOutputLines(state, stepIndex, lines, at);
+    ctx.reporter.out.lines(stepIndex, lines, at);
   };
 
   pushLine(`[looper] starting step ${step.name}`);
@@ -91,7 +86,7 @@ export async function runOpenCodeStep({
 
   const persistSessionID = (sid: string) => {
     cancellation.activeSessionID = sid;
-    setStepSessionID(state, stepIndex, sid);
+    ctx.reporter.steps.setSessionID(stepIndex, sid);
   };
 
   if (sessionID !== undefined) persistSessionID(sessionID);
@@ -119,14 +114,14 @@ export async function runOpenCodeStep({
 
   const watcher = setInterval(() => {
     if (cancellation.action !== null) return;
-    if (control.restartRequested) requestCancellation(control.restartReason ?? "manual");
-    else if (control.skipRequested || control.quitting || stopFileExists()) requestCancellation("skip");
+    if (ctx.control.restartRequested) requestCancellation(ctx.control.restartReason ?? "manual");
+    else if (ctx.control.skipRequested || ctx.control.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
   let timeoutController: ReturnType<typeof createPausableTimeout> | undefined;
   const onTimeout = (): void => {
     if (cancellation.action !== null) return;
-    control.requestRestart("timeout");
-    notify();
+    ctx.control.requestRestart("timeout");
+    ctx.reporter.notify();
     requestCancellation("timeout");
   };
 
@@ -160,7 +155,7 @@ export async function runOpenCodeStep({
     pushLine(`[looper] session=${sid}`);
     const boundSessionID = sid;
     const brokerOwner = requestBrokerOwner ?? createRequestBrokerOwner({
-      state,
+      requests: ctx.reporter.requests,
       client,
       repoDir,
       step,
@@ -174,8 +169,8 @@ export async function runOpenCodeStep({
     unsubscribeHumanGate = brokerOwner.subscribeHumanGate(timeoutController.setGateOpen);
     const boundBroker = brokerOwner.bind(boundSessionID);
     const ownedSessions = boundBroker.ownedSessions;
-    const hiddenUserMessageIDs = new Set<string>(activeStep.looperMessageIDs ?? []);
-    setStepPromptText(state, stepIndex, prompt);
+    const hiddenUserMessageIDs = new Set<string>(ctx.reporter.steps.get(stepIndex)?.looperMessageIDs ?? []);
+    ctx.reporter.steps.setPromptText(stepIndex, prompt);
 
     requestBroker = boundBroker.broker;
     const consumer = createSessionEventConsumer(boundSessionID, {
@@ -183,8 +178,7 @@ export async function runOpenCodeStep({
       pushLines,
       ownedSessionIDs: () => ownedSessions.ids(),
       onEvent: (event, at) => {
-        pushAgentEvent(state, event, at);
-        pushStepOutputEvent(state, stepIndex, event, at);
+        ctx.reporter.out.event(stepIndex, event, at);
       },
       ...requestBroker.callbacks,
       onSessionError: (message) => {
@@ -221,7 +215,7 @@ export async function runOpenCodeStep({
     sentMessageID = messageID;
     hiddenUserMessageIDs.add(messageID);
     const looperMessageIDs = [...hiddenUserMessageIDs];
-    setStepLooperMessageIDs(state, stepIndex, looperMessageIDs);
+    ctx.reporter.steps.setLooperMessageIDs(stepIndex, looperMessageIDs);
     eventStream.setSentMessageID(messageID);
     onSessionBound?.({ sessionID: sid, messageID, promptText: prompt, looperMessageIDs: [...looperMessageIDs] });
     pushLine(`[looper] sending prompt (agent=${agent ?? "default"}${model ? ` model=${model.providerID}/${model.modelID}` : ""}${variant !== undefined ? ` variant=${variant}` : ""} messageID=${messageID})`);
@@ -262,7 +256,7 @@ export async function runOpenCodeStep({
       if (teardown?.safeToProceed === false) teardownError = teardown.reason;
     }
     localBrokerOwner?.dispose();
-    if (requestBrokerOwner === undefined) clearPendingRequests(state);
+    if (requestBrokerOwner === undefined) ctx.reporter.requests.clearAll();
   }
 
   const consumerError = eventStream?.consumerError();
@@ -280,7 +274,7 @@ export async function runOpenCodeStep({
       repoDir,
       sessionID: boundSessionID,
       parentMessageID: sentMessageID,
-      shouldStop: () => control.quitting || control.skipRequested || control.restartRequested || stopFileExists(),
+      shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
       log: pushLine,
       onReactivated: () => {
         reactivated = true;
@@ -314,13 +308,13 @@ export async function runOpenCodeStep({
       pushLine(`[looper] continuation lookup after opencode exit threw: ${toError(error).message}`);
     }
     if (record !== null) {
-      setContinuationStatus(state, stepIndex, record);
-      logContinuationState(state, stepIndex, record, "background tasks active after opencode exit");
+      setContinuationStatus(ctx, stepIndex, record);
+      logContinuationState(ctx, stepIndex, record, "background tasks active after opencode exit");
       return { status: "waiting", sessionID: record.sessionID, ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}) };
     }
   }
 
-  finalizeStepRow(state, stepIndex, status);
+  ctx.reporter.steps.finalize(stepIndex, status);
 
   return {
     status,

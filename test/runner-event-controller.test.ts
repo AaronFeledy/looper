@@ -51,6 +51,7 @@ import { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { describe, expect, test } from "bun:test";
 
 import type { PermissionAction, PermissionPolicy } from "../src/lib/config.ts";
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
 import { createRunnerEventController } from "../src/opencode/step-runner-types.ts";
 
@@ -114,7 +115,7 @@ function createHarness(options: {
   const fake = new FakeOpencodeClient(options.permissionReplyOutcome);
   const lines: string[] = [];
   const controller = createRunnerEventController({
-    state,
+    ctx: loopStateRunStepContext(state, state.control),
     client: fake.client,
     repoDir: REPO_DIR,
     step: { name: "Build", prompt: "build" },

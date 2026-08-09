@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { createLoopState, enqueuePendingPermission, enqueuePendingQuestion, type LoopState } from "../src/lib/state.ts";
 import { createRunnerEventController } from "../src/opencode/step-runner-types.ts";
 import { pendingRequestLines } from "../src/tui/pending-request-panel.ts";
@@ -30,7 +31,7 @@ function makeController(state: LoopState, options: { permissionPolicy?: Record<s
     },
   } as unknown as OpencodeClient;
   const controller = createRunnerEventController({
-    state,
+    ctx: loopStateRunStepContext(state, state.control),
     client,
     repoDir: "/repo",
     step: { name: "Build", prompt: "/p.md" },

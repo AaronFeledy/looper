@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { createSessionEventConsumer } from "../src/lib/event-consumer.ts";
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { reattachOpenCodeStep, runOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { createLoopState } from "../src/lib/state.ts";
@@ -227,8 +228,7 @@ describe("runOpenCodeStep headless policy events", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client: harness.client,
@@ -656,8 +656,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -705,8 +704,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -756,8 +754,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -804,8 +801,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -848,8 +844,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -879,8 +874,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,
@@ -927,8 +921,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,
@@ -977,8 +970,7 @@ describe("runOpenCodeStep event stream recovery", () => {
 
     try {
       const result = await reattachOpenCodeStep({
-        state,
-        control: state.control,
+        ctx: loopStateRunStepContext(state, state.control),
         stepIndex: 0,
         client,
         repoDir,
@@ -1028,8 +1020,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const startedAt = Date.now();
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,
@@ -1088,8 +1079,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,
@@ -1138,8 +1128,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,
@@ -1194,8 +1183,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt", timeoutMs: 25 };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -1239,8 +1227,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await runOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       prompt: "do the thing",
       client,
@@ -1313,8 +1300,7 @@ describe("reattachOpenCodeStep session.idle hints", () => {
     const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
 
     const result = await reattachOpenCodeStep({
-      state,
-      control: state.control,
+      ctx: loopStateRunStepContext(state, state.control),
       stepIndex: 0,
       client,
       repoDir,

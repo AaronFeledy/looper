@@ -37,6 +37,7 @@ import { extractAssistantModel, extractAssistantText, generateWorkDescription, h
 import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
 import { comparePhase } from "../lib/story-state-files.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
+import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
 import {
   decideRouting,
   insertAdjudicationRow,
@@ -395,6 +396,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (step === undefined) break;
     const executionIndex = adjudicating ? steps.length : index;
     const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+    const ctx = loopStateRunStepContext(state, control);
     const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
     const needsStoryFacts = !adjudicating && (
       step.gate !== undefined ||
@@ -651,7 +653,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     let stepStartTime = Date.now();
     let gatePausedAt: number | undefined;
     const requestBrokerOwner = createRequestBrokerOwner({
-      state,
+      requests: ctx.reporter.requests,
       client,
       repoDir,
       configDir,
@@ -777,8 +779,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               });
             }
             pendingResult = await reattachOpenCodeStep({
-              state,
-              control,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,
@@ -876,8 +877,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ? withAdjudicationReason(promptText(step), adjudication?.store.readMarker() ?? null)
           : promptText(step);
         result = await runOpenCodeStep({
-          state,
-          control,
+          ctx,
           stepIndex: currentStepIndex,
           prompt: withLooperContext(contextBlock, attempt.resumePrompt ?? stepBasePrompt),
           client,
@@ -931,7 +931,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         }
 
         const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
-        const waitResult = await waitForLoopContinuationIdle({ state, control, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
+        const waitResult = await waitForLoopContinuationIdle({ ctx, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !control.quitting && !stopFileExists()) {
           attempt.resumeSessionID = waitSessionID;
           attempt.resumePrompt = backgroundContinuationPrompt();
@@ -965,8 +965,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
             pendingResult = await reattachOpenCodeStep({
-              state,
-              control,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,
@@ -1134,8 +1133,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             pushAgentLine(state, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pendingResult = await reattachOpenCodeStep({
-              state,
-              control,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,

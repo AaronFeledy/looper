@@ -6,6 +6,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { parseArgs, resolveAttachUrl } from "../src/lib/args.ts";
 import { loadRuntimeConfig } from "../src/lib/config.ts";
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { runIteration, StepFailureError } from "../src/lib/orchestrator.ts";
 import { reattachOpenCodeStep, runOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { startOrAttachServer } from "../src/lib/sdk-server.ts";
@@ -370,8 +371,7 @@ test("session error events fail the current step", async () => {
   const step: Step = { name: "Sync", agent: "build", variant: "", model: "", prompt: "prompt.md" };
 
   const result = await runOpenCodeStep({
-    state,
-    control: state.control,
+    ctx: loopStateRunStepContext(state, state.control),
     stepIndex: 0,
     prompt: "run",
     client,
@@ -509,8 +509,7 @@ test("reattach honors an older session-scoped active continuation record", async
   const step: Step = { name: "Review", agent: "build", variant: "", model: "", prompt: "prompt.md" };
 
   const result = await reattachOpenCodeStep({
-    state,
-    control: state.control,
+    ctx: loopStateRunStepContext(state, state.control),
     stepIndex: 0,
     client,
     repoDir,
@@ -577,8 +576,7 @@ test("session-scoped continuation lookup rejects path traversal session IDs", as
   const step: Step = { name: "Review", agent: "build", variant: "", model: "", prompt: "prompt.md" };
 
   const result = await reattachOpenCodeStep({
-    state,
-    control: state.control,
+    ctx: loopStateRunStepContext(state, state.control),
     stepIndex: 0,
     client,
     repoDir,
