@@ -57,7 +57,6 @@ export function createRunnerEventController({
 > {
   const handledRequestIDs = new Set<string>();
   const inFlightReplies = new Map<string, Promise<void>>();
-  const hasPermissionPolicy = permissionPolicy !== undefined || step.permissionPolicy !== undefined;
   const effectiveQuestionPolicy = step.questionPolicy ?? questionPolicy;
 
   const trackReply = (requestID: string, reply: Promise<void>): void => {
@@ -91,7 +90,7 @@ export function createRunnerEventController({
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
     });
 
-    const action = hasPermissionPolicy ? resolvePermissionAction(payload.permission, step, { permissionPolicy }) : "ask";
+    const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
     if (action === "ask") {
       pushLine(`[looper] permission '${payload.permission}' left pending (no policy; set permissionPolicy.${payload.permission} to allow or deny)`);
       return;

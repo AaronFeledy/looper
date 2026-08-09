@@ -176,6 +176,8 @@ describe("request lifecycle callbacks", () => {
         permission: "edit",
         patterns: ["src/**/*.ts"],
         metadata: { filepath: "src/lib/event-consumer.ts" },
+        always: ["src/**/*.ts"],
+        tool: { messageID: MID, callID: "call_1" },
       },
     ]);
     expect(permissionsReplied).toEqual([{ sessionID: SID, requestID: "per_1", reply: "once" }]);
@@ -193,6 +195,7 @@ describe("request lifecycle callbacks", () => {
             ],
           },
         ],
+        tool: { messageID: MID, callID: "call_2" },
       },
     ]);
     expect(questionsReplied).toEqual([{ sessionID: SID, requestID: "que_1", answers: [["yes"]] }]);
@@ -447,6 +450,84 @@ describe("user message visibility", () => {
       { kind: "user.started" },
       { kind: "user.text", text: "plugin continuation" },
     ]);
+  });
+
+  test("keeps a whole multiline user prompt, unterminated final line included, ahead of later assistant work", () => {
+    // Given: a visible user turn whose single text part carries three lines, the last of
+    // which has no trailing newline and no part.time.end (so only the map-wide final
+    // flush can emit it), followed by an assistant turn that reasons and calls a tool.
+    const userCreated = 1_700_000_300_000;
+    const assistantCreated = userCreated + 1_000;
+    const promptLines = [
+      "TASK: add a regression test",
+      "EXPECTED OUTCOME: it fails today",
+      "<!-- OMO_INTERNAL_INITIATOR -->",
+    ];
+
+    // When: the session is rendered offline.
+    const { events } = renderSession([
+      {
+        info: { id: "msg_user", role: "user", sessionID: SID, time: { created: userCreated } } as never,
+        parts: [
+          {
+            id: "p_user",
+            sessionID: SID,
+            messageID: "msg_user",
+            type: "text",
+            text: promptLines.join("\n"),
+            time: { start: userCreated },
+          } as never,
+        ],
+      },
+      {
+        info: {
+          id: MID,
+          sessionID: SID,
+          role: "assistant",
+          time: { created: assistantCreated, completed: assistantCreated + 6_000 },
+        } as never,
+        parts: [
+          {
+            id: "p_reasoning",
+            sessionID: SID,
+            messageID: MID,
+            type: "reasoning",
+            text: "weighing the options\n",
+            time: { start: assistantCreated + 1_000, end: assistantCreated + 2_000 },
+          } as never,
+          {
+            id: "p_tool",
+            sessionID: SID,
+            messageID: MID,
+            type: "tool",
+            callID: "call_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: "ls" },
+              output: "ok",
+              title: "bash",
+              metadata: {},
+              time: { start: assistantCreated + 3_000, end: assistantCreated + 4_000 },
+            },
+          } as never,
+        ],
+      },
+    ]);
+
+    // Then: every chunk of the prompt survives, in order...
+    const userTexts = events.flatMap((event) => (event.kind === "user.text" ? [event.text] : []));
+    expect(userTexts).toEqual(promptLines);
+    // ...including the trailing marker, which must be rendered rather than stripped...
+    expect(userTexts).toContain("<!-- OMO_INTERNAL_INITIATOR -->");
+
+    // ...and the whole prompt precedes the assistant's first reasoning/tool event.
+    const lastUserTextIndex = events.findLastIndex((event) => event.kind === "user.text");
+    const firstAssistantWorkIndex = events.findIndex(
+      (event) => event.kind === "reasoning.started" || event.kind === "reasoning.text" || event.kind === "tool.started",
+    );
+    expect(firstAssistantWorkIndex).toBeGreaterThanOrEqual(0);
+    expect(lastUserTextIndex).toBeLessThan(firstAssistantWorkIndex);
   });
 
   test("offline rendering does not flush unterminated hidden user text", () => {

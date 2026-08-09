@@ -1,0 +1,23 @@
+Permission UX task 2 evidence
+
+TDD red:
+  Command: bun test test/config.test.ts
+  Result: 66 pass, 1 fail
+  Expected step wildcard "ask" but received global exact "once".
+
+Targeted verification:
+  Command: bun test test/config.test.ts test/runner-event-controller.test.ts test/pending-request-panel.test.ts
+  Result: 85 pass, 0 fail, 123 expect() calls.
+
+Type verification:
+  Command: bun run typecheck
+  Result: exit 0 (tsc -p .).
+
+LSP diagnostics:
+  Result: no diagnostics in all changed TypeScript files.
+
+Scope:
+  Implemented step exact -> step * -> global exact -> global * -> ask.
+  Forwarded pinned permission always/tool fields and question tool field.
+  Removed hasPermissionPolicy double-path; controller always calls resolvePermissionAction.
+  No broker, queue, stall-detector, or unrelated production changes.

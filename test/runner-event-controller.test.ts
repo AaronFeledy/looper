@@ -133,6 +133,8 @@ function askPermission(harness: Harness, requestID = "perm-1", sessionID = ACTIV
     permission: "edit",
     patterns: ["src/**"],
     metadata: { source: "tool" },
+    always: ["src/**"],
+    tool: { messageID: "msg-1", callID: "call-1" },
   });
 }
 
@@ -229,7 +231,12 @@ describe("createRunnerEventController permission characterization", () => {
     const harness = createHarness({ questionPolicy: "reject" });
 
     // When
-    harness.controller.onQuestionAsked?.({ requestID: "question-1", sessionID: ACTIVE_SESSION_ID, questions: [] });
+    harness.controller.onQuestionAsked?.({
+      requestID: "question-1",
+      sessionID: ACTIVE_SESSION_ID,
+      questions: [],
+      tool: { messageID: "msg-1", callID: "call-1" },
+    });
     await drainReplies();
 
     // Then

@@ -13,6 +13,8 @@ export type PermissionAskedPayload = {
   permission: PermissionAskedProperties["permission"];
   patterns: PermissionAskedProperties["patterns"];
   metadata: PermissionAskedProperties["metadata"];
+  always: PermissionAskedProperties["always"];
+  tool: PermissionAskedProperties["tool"];
 };
 
 export type PermissionRepliedPayload = Extract<Event, { type: "permission.replied" }>["properties"];
@@ -21,6 +23,7 @@ export type QuestionAskedPayload = {
   requestID: QuestionAskedProperties["id"];
   sessionID: QuestionAskedProperties["sessionID"];
   questions: QuestionAskedProperties["questions"];
+  tool: QuestionAskedProperties["tool"];
 };
 
 export type QuestionRepliedPayload = Extract<Event, { type: "question.replied" }>["properties"];
@@ -500,6 +503,8 @@ export function createSessionEventConsumer(
           permission: props.permission,
           patterns: props.patterns,
           metadata: props.metadata,
+          always: props.always,
+          tool: props.tool,
         });
         break;
       }
@@ -514,6 +519,7 @@ export function createSessionEventConsumer(
           requestID: props.id,
           sessionID: props.sessionID,
           questions: props.questions,
+          tool: props.tool,
         });
         break;
       }
@@ -669,13 +675,15 @@ export function renderSession(
         messageCreated,
         entry.info.role,
       );
+      // A snapshot part is already materialized: no later delta can extend it, so its
+      // unterminated tail is flushed here, in part order. Live parts stay buffered
+      // because a delta may still arrive for them.
+      const state = partsMap.get(part.id);
+      if (state !== undefined && (state.kind === "text" || state.kind === "reasoning" || state.kind === "user")) {
+        stamp = state.startedAt ?? start;
+        flushRemaining(state, emit);
+      }
     }
-  }
-
-  for (const state of partsMap.values()) {
-    if (state.kind !== "text" && state.kind !== "reasoning" && state.kind !== "user") continue;
-    stamp = state.startedAt ?? Date.now();
-    flushRemaining(state, emit);
   }
 
   return { events, eventTimes, lines, lineTimes };
