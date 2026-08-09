@@ -264,7 +264,7 @@ describe("runOpenCodeStep headless policy events", () => {
     const run = await runPolicyStep({ events: [permissionAsked("per_uncovered", "edit")], permissionPolicy: { bash: "once" } });
 
     expect(run.replyCalls).toEqual([]);
-    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
     expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
   });
 
@@ -272,7 +272,7 @@ describe("runOpenCodeStep headless policy events", () => {
     const run = await runPolicyStep({ events: [permissionAsked("per_ask", "edit")], permissionPolicy: { edit: "ask" } });
 
     expect(run.replyCalls).toEqual([]);
-    expect(run.state.pendingPermission).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
     expect(run.state.steps[0]!.outputLines.some((line) => line.includes("permission 'edit' left pending"))).toBe(true);
   });
 
@@ -304,7 +304,7 @@ describe("runOpenCodeStep headless policy events", () => {
 
     expect(run.questionRejectCalls).toEqual([]);
     expect(run.questionReplyCalls).toEqual([]);
-    expect(run.state.pendingQuestion).toBeNull();
+    expect(run.state.pendingRequests).toEqual([]);
   });
 
   test("updates active session todos in state", async () => {
@@ -1068,8 +1068,7 @@ describe("runOpenCodeStep event stream recovery", () => {
     });
 
     expect(result.status).toBe("done");
-    expect(state.pendingPermission).toBeNull();
-    expect(state.pendingQuestion).toBeNull();
+    expect(state.pendingRequests).toEqual([]);
   });
 
   test("returns a timeout restart when the prompt exceeds the step timeout", async () => {

@@ -2,7 +2,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { resolvePermissionAction, type PermissionPolicy, type QuestionPolicy, type VariantConfig } from "../lib/config.ts";
 import type { EventConsumerCallbacks, PermissionAskedPayload, QuestionAskedPayload } from "../lib/event-consumer.ts";
-import { setPendingPermission, setPendingQuestion, setTodos, type LoopState, type StepRestartReason } from "../lib/state.ts";
+import { clearPendingRequest, enqueuePendingPermission, enqueuePendingQuestion, setTodos, type LoopState, type StepRestartReason } from "../lib/state.ts";
 import { formatRequestError, toError } from "./util.ts";
 
 export type Step = {
@@ -57,6 +57,7 @@ export function createRunnerEventController({
 > {
   const handledRequestIDs = new Set<string>();
   const inFlightReplies = new Map<string, Promise<void>>();
+  const generation = 0;
   const effectiveQuestionPolicy = step.questionPolicy ?? questionPolicy;
 
   const trackReply = (requestID: string, reply: Promise<void>): void => {
@@ -82,12 +83,13 @@ export function createRunnerEventController({
     // Pending state is set for the "ask" path too (and left set until the
     // permission.replied event) so the TUI can surface that the run is blocked
     // waiting on a human instead of silently stalling.
-    setPendingPermission(state, {
+    enqueuePendingPermission(state, {
       requestID: payload.requestID,
       sessionID: payload.sessionID,
       permission: payload.permission,
       patterns: payload.patterns,
       ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
+      generation,
     });
 
     const action = resolvePermissionAction(payload.permission, step, { permissionPolicy });
@@ -105,7 +107,7 @@ export function createRunnerEventController({
         throw error;
       })
       .finally(() => {
-        setPendingPermission(state, null);
+        clearPendingRequest(state, { requestID: payload.requestID, generation });
       });
     trackReply(payload.requestID, request);
   };
@@ -114,10 +116,11 @@ export function createRunnerEventController({
     if (payload.sessionID !== activeSessionID) return;
     if (alreadyHandling(payload.requestID)) return;
 
-    setPendingQuestion(state, {
+    enqueuePendingQuestion(state, {
       requestID: payload.requestID,
       sessionID: payload.sessionID,
       questions: payload.questions,
+      generation,
     });
 
     if (effectiveQuestionPolicy !== "reject") {
@@ -134,7 +137,7 @@ export function createRunnerEventController({
         throw error;
       })
       .finally(() => {
-        setPendingQuestion(state, null);
+        clearPendingRequest(state, { requestID: payload.requestID, generation });
       });
     trackReply(payload.requestID, request);
   };
@@ -142,14 +145,14 @@ export function createRunnerEventController({
   return {
     onPermissionAsked,
     onPermissionReplied: (payload) => {
-      if (payload.sessionID === activeSessionID) setPendingPermission(state, null);
+      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onQuestionAsked,
     onQuestionReplied: (payload) => {
-      if (payload.sessionID === activeSessionID) setPendingQuestion(state, null);
+      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onQuestionRejected: (payload) => {
-      if (payload.sessionID === activeSessionID) setPendingQuestion(state, null);
+      if (payload.sessionID === activeSessionID) clearPendingRequest(state, { requestID: payload.requestID, generation });
     },
     onTodoUpdated: (payload) => {
       if (payload.sessionID === activeSessionID) setTodos(state, payload.todos);

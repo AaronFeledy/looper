@@ -203,12 +203,36 @@ export type PendingPermission = {
   permission: string;
   patterns: string[];
   metadata?: Record<string, unknown>;
+  generation: number;
 };
 
 export type PendingQuestion = {
   requestID: string;
   sessionID: string;
   questions: unknown[];
+  generation: number;
+};
+
+export type PendingRequestStatus = "open" | "resolving" | "error";
+export type PendingRequestDecisionAction = "once" | "always" | "reject" | "skip";
+
+type PendingRequestState = {
+  status: PendingRequestStatus;
+  decision?: PendingRequestDecisionAction;
+  lastError?: string;
+};
+
+export type PendingRequest =
+  | ({ kind: "permission" } & PendingPermission & PendingRequestState)
+  | ({ kind: "question" } & PendingQuestion & PendingRequestState);
+
+export type PendingRequestIdentity = {
+  requestID: string;
+  generation: number;
+};
+
+export type PendingRequestDecision = PendingRequestIdentity & {
+  action: PendingRequestDecisionAction;
 };
 
 export type TodoItem = {
@@ -239,8 +263,7 @@ export type LoopState = {
   restartRequested: boolean;
   restartReason?: StepRestartReason;
   recovery: RecoveryPrompt | null;
-  pendingPermission: PendingPermission | null;
-  pendingQuestion: PendingQuestion | null;
+  pendingRequests: PendingRequest[];
   todos: TodoItem[];
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
@@ -427,8 +450,7 @@ export function createLoopState({
     restartRequested: false,
     restartReason: undefined,
     recovery: null,
-    pendingPermission: null,
-    pendingQuestion: null,
+    pendingRequests: [],
     todos: [],
     recoveryChoice: null,
     escConfirm: null,
@@ -451,13 +473,54 @@ export function createLoopState({
   };
 }
 
-export function setPendingPermission(state: LoopState, pending: PendingPermission | null): void {
-  state.pendingPermission = pending;
+function enqueuePendingRequest(state: LoopState, pending: PendingRequest): void {
+  const index = state.pendingRequests.findIndex(({ requestID }) => requestID === pending.requestID);
+  if (index === -1) state.pendingRequests.push(pending);
+  else state.pendingRequests[index] = pending;
   notifyStateChange();
 }
 
-export function setPendingQuestion(state: LoopState, pending: PendingQuestion | null): void {
-  state.pendingQuestion = pending;
+export function enqueuePendingPermission(state: LoopState, pending: PendingPermission): void {
+  enqueuePendingRequest(state, { kind: "permission", status: "open", ...pending });
+}
+
+export function enqueuePendingQuestion(state: LoopState, pending: PendingQuestion): void {
+  enqueuePendingRequest(state, { kind: "question", status: "open", ...pending });
+}
+
+export function tryClaimPendingRequestDecision(state: LoopState, decision: PendingRequestDecision): boolean {
+  const head = state.pendingRequests[0];
+  if (head === undefined || head.status !== "open" || head.requestID !== decision.requestID || head.generation !== decision.generation) return false;
+  head.status = "resolving";
+  head.decision = decision.action;
+  notifyStateChange();
+  return true;
+}
+
+export function consumePendingRequestDecision(state: LoopState, identity: PendingRequestIdentity): PendingRequestDecisionAction | null {
+  const request = state.pendingRequests.find(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (request?.status !== "resolving" || request.decision === undefined) return null;
+  const decision = request.decision;
+  delete request.decision;
+  notifyStateChange();
+  return decision;
+}
+
+export function clearPendingRequest(state: LoopState, identity: PendingRequestIdentity): boolean {
+  const index = state.pendingRequests.findIndex(
+    ({ requestID, generation }) => requestID === identity.requestID && generation === identity.generation,
+  );
+  if (index === -1) return false;
+  state.pendingRequests.splice(index, 1);
+  notifyStateChange();
+  return true;
+}
+
+export function clearPendingRequests(state: LoopState): void {
+  if (state.pendingRequests.length === 0) return;
+  state.pendingRequests = [];
   notifyStateChange();
 }
 

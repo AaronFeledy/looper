@@ -17,17 +17,16 @@ function firstQuestionText(questions: readonly unknown[]): string | undefined {
 
 export function pendingRequestLines(state: LoopState): string[] {
   const lines: string[] = [];
-  const permission = state.pendingPermission;
-  if (permission !== null) {
-    const patterns = permission.patterns.length > 0 ? ` — ${permission.patterns.join(", ")}` : "";
-    lines.push(`Agent is waiting on permission '${permission.permission}'${patterns}`);
-    lines.push(`Reply from an attached opencode client, or set permissionPolicy.${permission.permission} in looper.yml`);
-  }
-  const question = state.pendingQuestion;
-  if (question !== null) {
-    const text = firstQuestionText(question.questions);
-    lines.push(text === undefined ? "Agent asked a question" : `Agent asked: ${text}`);
-    lines.push("Answer from an attached opencode client, or set questionPolicy: reject in looper.yml");
+  for (const request of state.pendingRequests) {
+    if (request.kind === "permission") {
+      const patterns = request.patterns.length > 0 ? ` — ${request.patterns.join(", ")}` : "";
+      lines.push(`Agent is waiting on permission '${request.permission}'${patterns}`);
+      lines.push(`Reply from an attached opencode client, or set permissionPolicy.${request.permission} in looper.yml`);
+    } else {
+      const text = firstQuestionText(request.questions);
+      lines.push(text === undefined ? "Agent asked a question" : `Agent asked: ${text}`);
+      lines.push("Answer from an attached opencode client, or set questionPolicy: reject in looper.yml");
+    }
   }
   return lines;
 }

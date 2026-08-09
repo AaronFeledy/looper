@@ -133,10 +133,10 @@ describe("pendingRequestLines", () => {
     });
 
     // When
-    const text = pendingRequestLines(state).join("\n");
+    const lines = pendingRequestLines(state);
 
     // Then
-    expect(text).toContain("edit");
-    expect(text).toContain("Continue?");
+    expect(lines[0]).toContain("edit");
+    expect(lines[2]).toContain("Continue?");
   });
 });

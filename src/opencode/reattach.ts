@@ -4,7 +4,7 @@ import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeT
 import type { PriorSessionEvaluation } from "../core/session-types.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setPendingPermission, setPendingQuestion, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
+import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
 import { stopFileExists } from "../lib/state-files.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
@@ -389,8 +389,7 @@ export async function reattachOpenCodeStep({
       pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
     }
     consumer.flush();
-    setPendingPermission(state, null);
-    setPendingQuestion(state, null);
+    clearPendingRequests(state);
   }
 
   const finalize = (

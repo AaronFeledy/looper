@@ -175,12 +175,15 @@ describe("createRunnerEventController permission characterization", () => {
 
       // Then
       expect(harness.fake.permissionReplies).toEqual([]);
-      expect(harness.state.pendingPermission).toEqual({
+      expect(harness.state.pendingRequests[0]).toEqual({
+        kind: "permission",
+        status: "open",
         requestID: "perm-1",
         sessionID: ACTIVE_SESSION_ID,
         permission: "edit",
         patterns: ["src/**"],
         metadata: { source: "tool" },
+        generation: 0,
       });
       expect(harness.lines.some((line) => line.includes("left pending"))).toBe(true);
     });
@@ -195,7 +198,7 @@ describe("createRunnerEventController permission characterization", () => {
 
     // Then
     expect(harness.fake.permissionReplies).toEqual([]);
-    expect(harness.state.pendingPermission).toBeNull();
+    expect(harness.state.pendingRequests).toEqual([]);
     expect(harness.lines).toEqual([]);
   });
 
