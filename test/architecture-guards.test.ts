@@ -6,12 +6,12 @@ import { describe, expect, test } from "bun:test";
 const OPENCODE_DIR = join(import.meta.dir, "../src/opencode");
 const ENGINE_DIR = join(import.meta.dir, "../src/engine");
 
-/** Catches runtime and `import type` of ../lib/state.ts */
-const STATE_IMPORT_RE = /from\s+"\.\.\/lib\/state\.ts"/;
+/** Catches runtime and `import type` of lib/state.ts at any nesting depth */
+const STATE_IMPORT_RE = /from\s+"(?:\.\.\/)+lib\/state\.ts"/;
 /** Catches the LoopState identifier */
 const LOOP_STATE_RE = /\bLoopState\b/;
-/** Catches imports of ../lib/agent-tree-state.ts */
-const AGENT_TREE_STATE_IMPORT_RE = /from\s+"\.\.\/lib\/agent-tree-state\.ts"/;
+/** Catches imports of lib/agent-tree-state.ts at any nesting depth */
+const AGENT_TREE_STATE_IMPORT_RE = /from\s+"(?:\.\.\/)+lib\/agent-tree-state\.ts"/;
 /** Control flags that must move behind RunControl */
 const CONTROL_FLAG_RE =
   /\bstate\.(?:control\.)?(quitting|paused|skipRequested|restartRequested|restartReason|stopAfterIteration)\b/;
@@ -22,11 +22,15 @@ type Offense = {
   readonly message: string;
 };
 
+/** Recursive so a future `src/opencode/<subdir>/` cannot slip past the guard. */
 function listTsFiles(dir: string): string[] {
-  return readdirSync(dir)
-    .filter((name) => name.endsWith(".ts"))
-    .map((name) => join(dir, name))
-    .sort();
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...listTsFiles(abs));
+    else if (entry.name.endsWith(".ts")) files.push(abs);
+  }
+  return files.sort();
 }
 
 function relFromSrc(absPath: string): string {
@@ -57,7 +61,7 @@ function collectOpencodeBoundaryOffenses(): Offense[] {
       offenses.push({
         file: rel,
         line,
-        message: `${rel}:${line} imports ../lib/state.ts`,
+        message: `${rel}:${line} imports lib/state.ts`,
       });
     }
     for (const line of findMatches(source, LOOP_STATE_RE)) {
@@ -71,7 +75,7 @@ function collectOpencodeBoundaryOffenses(): Offense[] {
       offenses.push({
         file: rel,
         line,
-        message: `${rel}:${line} imports ../lib/agent-tree-state.ts`,
+        message: `${rel}:${line} imports lib/agent-tree-state.ts`,
       });
     }
   }
@@ -112,6 +116,7 @@ describe("architecture guard self-test", () => {
   test("STATE_IMPORT_RE matches runtime and type imports of ../lib/state.ts", () => {
     expect(STATE_IMPORT_RE.test(`import { notify } from "../lib/state.ts";`)).toBe(true);
     expect(STATE_IMPORT_RE.test(`import type { LoopState } from "../lib/state.ts";`)).toBe(true);
+    expect(STATE_IMPORT_RE.test(`import { notify } from "../../lib/state.ts";`)).toBe(true);
     expect(STATE_IMPORT_RE.test(`import { stopFileExists } from "../lib/state-files.ts";`)).toBe(false);
   });
 
@@ -124,6 +129,9 @@ describe("architecture guard self-test", () => {
   test("AGENT_TREE_STATE_IMPORT_RE matches agent-tree-state imports", () => {
     expect(
       AGENT_TREE_STATE_IMPORT_RE.test(`import { setStepContinuation } from "../lib/agent-tree-state.ts";`),
+    ).toBe(true);
+    expect(
+      AGENT_TREE_STATE_IMPORT_RE.test(`import { setStepContinuation } from "../../lib/agent-tree-state.ts";`),
     ).toBe(true);
     expect(AGENT_TREE_STATE_IMPORT_RE.test(`import { notify } from "../lib/state.ts";`)).toBe(false);
   });

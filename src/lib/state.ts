@@ -215,7 +215,6 @@ export type RecoveryPrompt = {
   sessionID?: string;
 };
 
-
 export type EscConfirmMode = "reset" | "stop";
 
 export type LoopState = {
