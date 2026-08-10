@@ -1,38 +1,26 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
+import {
+  findControlFlagAccesses,
+  findModuleLoads,
+  listSourceFiles,
+} from "./helpers/architecture-boundary.ts";
 
 const OPENCODE_DIR = join(import.meta.dir, "../src/opencode");
 const ENGINE_DIR = join(import.meta.dir, "../src/engine");
 
-/** Catches runtime and `import type` of lib/state.ts at any nesting depth */
-const STATE_IMPORT_RE = /from\s+["'](?:\.\.\/)+lib\/state\.ts["']/;
 /** Catches the LoopState identifier */
 const LOOP_STATE_RE = /\bLoopState\b/;
-/** Catches imports of lib/agent-tree-state.ts at any nesting depth */
-const AGENT_TREE_STATE_IMPORT_RE = /from\s+["'](?:\.\.\/)+lib\/agent-tree-state\.ts["']/;
-/** Control flags that must move behind RunControl */
-const CONTROL_FLAG_RE =
-  /\bstate\.(?:control\.)?(quitting|paused|skipRequested|restartRequested|restartReason|stopAfterIteration)\b/;
+const FORBIDDEN_OPENCODE_MODULE_RE = /^(?:\.\.\/)+lib\/(state|agent-tree-state)\.ts$/;
 
 type Offense = {
   readonly file: string;
   readonly line: number;
   readonly message: string;
 };
-
-/** Recursive so a future `src/opencode/<subdir>/` cannot slip past the guard. */
-function listTsFiles(dir: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const abs = join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...listTsFiles(abs));
-    else if (entry.name.endsWith(".ts")) files.push(abs);
-  }
-  return files.sort();
-}
 
 function relFromSrc(absPath: string): string {
   const marker = "/src/";
@@ -52,31 +40,32 @@ function findMatches(source: string, re: RegExp): number[] {
   return hits;
 }
 
-function collectOpencodeBoundaryOffenses(): Offense[] {
+function collectOpencodeBoundaryOffenses(dir: string = OPENCODE_DIR): Offense[] {
   const offenses: Offense[] = [];
-  for (const abs of listTsFiles(OPENCODE_DIR)) {
+  for (const abs of listSourceFiles(dir)) {
     const rel = relFromSrc(abs);
     const source = readFileSync(abs, "utf8");
 
-    for (const line of findMatches(source, STATE_IMPORT_RE)) {
-      offenses.push({
-        file: rel,
-        line,
-        message: `${rel}:${line} imports lib/state.ts`,
-      });
+    for (const load of findModuleLoads(source, abs)) {
+      if (load.specifier === undefined) {
+        offenses.push({
+          file: rel,
+          line: load.line,
+          message: `${rel}:${load.line} uses a non-static module load that cannot be boundary-checked`,
+        });
+      } else if (FORBIDDEN_OPENCODE_MODULE_RE.test(load.specifier)) {
+        offenses.push({
+          file: rel,
+          line: load.line,
+          message: `${rel}:${load.line} loads ${load.specifier}`,
+        });
+      }
     }
     for (const line of findMatches(source, LOOP_STATE_RE)) {
       offenses.push({
         file: rel,
         line,
         message: `${rel}:${line} references LoopState`,
-      });
-    }
-    for (const line of findMatches(source, AGENT_TREE_STATE_IMPORT_RE)) {
-      offenses.push({
-        file: rel,
-        line,
-        message: `${rel}:${line} imports lib/agent-tree-state.ts`,
       });
     }
   }
@@ -86,14 +75,14 @@ function collectOpencodeBoundaryOffenses(): Offense[] {
 function collectControlFlagOffenses(): Offense[] {
   const offenses: Offense[] = [];
   for (const dir of [OPENCODE_DIR, ENGINE_DIR]) {
-    for (const abs of listTsFiles(dir)) {
+    for (const abs of listSourceFiles(dir)) {
       const rel = relFromSrc(abs);
       const source = readFileSync(abs, "utf8");
-      for (const line of findMatches(source, CONTROL_FLAG_RE)) {
+      for (const access of findControlFlagAccesses(source, abs)) {
         offenses.push({
           file: rel,
-          line,
-          message: `${rel}:${line} reads/writes a control flag on state`,
+          line: access.line,
+          message: `${rel}:${access.line} reads/writes state control flag ${access.flag}`,
         });
       }
     }
@@ -104,25 +93,67 @@ function collectControlFlagOffenses(): Offense[] {
 describe("architecture guards", () => {
   test("src/opencode must not import state.ts, reference LoopState, or import agent-tree-state.ts", () => {
     // A scan that silently found no files would pass vacuously.
-    expect(listTsFiles(OPENCODE_DIR)).toContain(join(OPENCODE_DIR, "step-runner.ts"));
+    expect(listSourceFiles(OPENCODE_DIR)).toContain(join(OPENCODE_DIR, "step-runner.ts"));
     const offenses = collectOpencodeBoundaryOffenses();
     expect(offenses.map((o) => o.message)).toEqual([]);
   });
 
   test("src/opencode and src/engine must not touch control flags on state", () => {
-    expect(listTsFiles(ENGINE_DIR)).toContain(join(ENGINE_DIR, "run-control.ts"));
+    expect(listSourceFiles(ENGINE_DIR)).toContain(join(ENGINE_DIR, "run-control.ts"));
     const offenses = collectControlFlagOffenses();
     expect(offenses.map((o) => o.message)).toEqual([]);
   });
 });
 
 describe("architecture guard self-test", () => {
-  test("STATE_IMPORT_RE matches runtime and type imports of ../lib/state.ts", () => {
-    expect(STATE_IMPORT_RE.test(`import { notify } from "../lib/state.ts";`)).toBe(true);
-    expect(STATE_IMPORT_RE.test(`import type { LoopState } from "../lib/state.ts";`)).toBe(true);
-    expect(STATE_IMPORT_RE.test(`import { notify } from "../../lib/state.ts";`)).toBe(true);
-    expect(STATE_IMPORT_RE.test(`import type { LoopState } from '../lib/state.ts';`)).toBe(true);
-    expect(STATE_IMPORT_RE.test(`import { stopFileExists } from "../lib/state-files.ts";`)).toBe(false);
+  test("module-load parser resolves static, dynamic, CommonJS, re-export, and computed loads", () => {
+    const source = `
+      import { notify } from "../lib/state.ts";
+      import type { LoopState } from '../../lib/state.ts';
+      import legacyState = require("../lib/state.ts");
+      export { setStepContinuation } from /* wrapped */ "../lib/agent-tree-state.ts";
+      await import /* wrapped */ (
+        "../lib/" + "state.ts"
+      );
+      require(\`../lib/agent-tree-state.ts\`);
+      const load = require;
+      load("../lib/state.ts");
+      module.require("../lib/agent-tree-state.ts");
+      module["require"]("../lib/state.ts");
+      require.main.require("../lib/state.ts");
+      const { require: destructuredLoad } = module;
+      destructuredLoad("../lib/agent-tree-state.ts");
+      const parenthesizedLoad = (require);
+      parenthesizedLoad("../lib/state.ts");
+      let assignedLoad;
+      assignedLoad = require;
+      assignedLoad("../lib/state.ts");
+      unrelated.require("../lib/state.ts");
+      import { stopFileExists } from "../lib/state-files.ts";
+    `;
+
+    expect(findModuleLoads(source, "fixture.ts").map(({ specifier }) => specifier)).toEqual([
+      "../lib/state.ts",
+      "../../lib/state.ts",
+      "../lib/state.ts",
+      "../lib/agent-tree-state.ts",
+      "../lib/state.ts",
+      "../lib/agent-tree-state.ts",
+      "../lib/state.ts",
+      "../lib/agent-tree-state.ts",
+      "../lib/state.ts",
+      "../lib/state.ts",
+      "../lib/agent-tree-state.ts",
+      "../lib/state.ts",
+      "../lib/state.ts",
+      "../lib/state-files.ts",
+    ]);
+  });
+
+  test("module-load parser marks variable dynamic loads as unresolved", () => {
+    expect(findModuleLoads(`await import(modulePath);`, "fixture.ts")).toEqual([
+      { line: 1, specifier: undefined },
+    ]);
   });
 
   test("LOOP_STATE_RE matches the LoopState identifier", () => {
@@ -131,37 +162,46 @@ describe("architecture guard self-test", () => {
     expect(LOOP_STATE_RE.test("LoopStateful")).toBe(false);
   });
 
-  test("AGENT_TREE_STATE_IMPORT_RE matches agent-tree-state imports", () => {
-    expect(
-      AGENT_TREE_STATE_IMPORT_RE.test(`import { setStepContinuation } from "../lib/agent-tree-state.ts";`),
-    ).toBe(true);
-    expect(
-      AGENT_TREE_STATE_IMPORT_RE.test(`import { setStepContinuation } from "../../lib/agent-tree-state.ts";`),
-    ).toBe(true);
-    expect(
-      AGENT_TREE_STATE_IMPORT_RE.test(`import { setStepContinuation } from '../lib/agent-tree-state.ts';`),
-    ).toBe(true);
-    expect(AGENT_TREE_STATE_IMPORT_RE.test(`import { notify } from "../lib/state.ts";`)).toBe(false);
-  });
-
-  test("listTsFiles scans nested directories", () => {
+  test("listSourceFiles scans supported source extensions in nested directories", () => {
     const root = mkdtempSync(join(tmpdir(), "looper-architecture-guard-"));
     try {
       const nested = join(root, "nested");
       mkdirSync(nested);
       const topLevelFile = join(root, "top-level.ts");
-      const nestedFile = join(nested, "nested.ts");
+      const nestedMtsFile = join(nested, "nested.mts");
+      const nestedJsFile = join(nested, "nested.js");
       writeFileSync(topLevelFile, "export {};\n");
-      writeFileSync(nestedFile, "export {};\n");
+      writeFileSync(nestedMtsFile, "export {};\n");
+      writeFileSync(nestedJsFile, "export {};\n");
       writeFileSync(join(nested, "ignored.md"), "ignored\n");
 
-      expect(listTsFiles(root)).toEqual([nestedFile, topLevelFile]);
+      expect(listSourceFiles(root)).toEqual([nestedJsFile, nestedMtsFile, topLevelFile]);
     } finally {
       rmSync(root, { force: true, recursive: true });
     }
   });
 
-  test("CONTROL_FLAG_RE matches each control flag accessor", () => {
+  test("boundary collector rejects wrapped and unresolved module loads", () => {
+    const root = mkdtempSync(join(tmpdir(), "looper-architecture-guard-"));
+    try {
+      writeFileSync(
+        join(root, "wrapped.mts"),
+        `export { notify } from /* wrapped */ "../lib/state.ts";\n`,
+      );
+      writeFileSync(join(root, "dynamic.js"), `await import(modulePath);\n`);
+
+      expect(
+        collectOpencodeBoundaryOffenses(root).map(({ message }) => message.replace(`${root}/`, "")),
+      ).toEqual([
+        "dynamic.js:1 uses a non-static module load that cannot be boundary-checked",
+        "wrapped.mts:1 loads ../lib/state.ts",
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  test("control flag scanner follows direct, bracket, alias, and destructured state access", () => {
     // Given: the six LoopState control flags
     const flagNames = [
       "quitting",
@@ -171,14 +211,30 @@ describe("architecture guard self-test", () => {
       "restartReason",
       "stopAfterIteration",
     ] as const;
-    // When/Then: direct state.<flag> and nested state.control.<flag> both match
+    const source = flagNames.flatMap((name) => [
+      `state.${name};`,
+      `state.control.${name};`,
+      `state["control"]["${name}"];`,
+    ]).join("\n") + `
+      const controlAlias = state.control;
+      controlAlias.quitting;
+      const { paused } = state;
+      const { control } = state;
+      control.restartRequested;
+      const { control: { quitting } } = state;
+      let assignedState;
+      assignedState = (state);
+      assignedState.control.quitting;
+      ctx.control.stopAfterIteration;
+    `;
+
+    // When/Then: direct, bracket, alias, and destructured state accesses are found.
+    const accesses = findControlFlagAccesses(source, "fixture.ts");
     for (const name of flagNames) {
-      expect(CONTROL_FLAG_RE.test(`state.${name}`)).toBe(true);
-      expect(CONTROL_FLAG_RE.test(`state.control.${name}`)).toBe(true);
+      const extra = name === "quitting" ? 3 : name === "paused" || name === "restartRequested" ? 1 : 0;
+      expect(accesses.filter(({ flag }) => flag === name)).toHaveLength(3 + extra);
     }
-    // Then: unrelated properties and non-state identifiers do not match
-    expect(CONTROL_FLAG_RE.test("state.steps")).toBe(false);
-    expect(CONTROL_FLAG_RE.test("state.control.steps")).toBe(false);
-    expect(CONTROL_FLAG_RE.test("myState.quitting")).toBe(false);
+    // Then: a RunStepContext control access is allowed.
+    expect(accesses).toHaveLength(23);
   });
 });
