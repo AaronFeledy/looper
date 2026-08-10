@@ -1,7 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
+import type { PendingRequestPort } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
-import type { LoopState } from "../lib/state.ts";
 import { OwnedSessionSet } from "../lib/owned-session-set.ts";
 import { DEFAULT_STEP_TIMEOUT_MS, permissionGateMaxMs, permissionTeardownMs } from "../config/tunables.ts";
 import { createRequestBroker, type RequestBroker, type RequestFrictionState } from "./request-broker.ts";
@@ -11,7 +11,7 @@ import type { Step } from "./step-runner-types.ts";
 import { appendPermissionAudit } from "./permission-audit.ts";
 
 type RequestBrokerOwnerOptions = {
-  readonly state: LoopState;
+  readonly requests: PendingRequestPort;
   readonly client: OpencodeClient;
   readonly repoDir: string;
   readonly configDir?: string;
@@ -69,7 +69,7 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
       bound?.broker.dispose();
       const ownedSessions = new OwnedSessionSet(sessionID);
       const broker = createRequestBroker({
-        state: options.state,
+        requests: options.requests,
         client: options.client,
         repoDir: options.repoDir,
         step: options.step,

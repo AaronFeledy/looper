@@ -1,13 +1,14 @@
 import type { EngineFrontendHooks } from "../engine/engine-ports.ts";
+import type { RunControl } from "../engine/run-control.ts";
 import { createLoopState, subscribe, type LoopState } from "./state.ts";
 import type { Step } from "./runner.ts";
 import { divider, label, ui, waitWithCountdown } from "./fallback-ui.ts";
 
-export function createFallbackEngineHooks(currentBranch: () => Promise<string>): EngineFrontendHooks<LoopState, Step> {
+export function createFallbackEngineHooks(currentBranch: () => Promise<string>, control: RunControl): EngineFrontendHooks<LoopState, Step> {
   let unsubscribe: (() => void) | undefined;
   return {
     createIterationState: ({ iteration, maxIterations, steps, branch }) => {
-      const state = createLoopState({ maxIterations, stepNames: steps.map((step) => step.name) });
+      const state = createLoopState({ maxIterations, stepNames: steps.map((step) => step.name), control });
       state.iteration = iteration;
       state.branch = branch;
       state.iterationStartedAt = Date.now();
@@ -49,8 +50,8 @@ export function createFallbackEngineHooks(currentBranch: () => Promise<string>):
       unsubscribe = undefined;
       process.stdout.write(`\n${ui.yellow("■ max iterations reached")} ${maxIterations}; no .looper-stop found\n`);
     },
-    waitBetweenIterations: async ({ state, seconds, label: waitLabel }) => {
-      await waitWithCountdown(state, seconds, waitLabel, false);
+    waitBetweenIterations: async ({ seconds, label: waitLabel }) => {
+      await waitWithCountdown(control, seconds, waitLabel, false);
     },
   };
 }

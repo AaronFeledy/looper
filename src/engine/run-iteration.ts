@@ -37,6 +37,7 @@ import { extractAssistantModel, extractAssistantText, generateWorkDescription, h
 import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
 import { comparePhase } from "../lib/story-state-files.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
+import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
 import {
   decideRouting,
   insertAdjudicationRow,
@@ -47,6 +48,7 @@ import {
   type AdjudicationRuntime,
 } from "./adjudication-routing.ts";
 import { evaluateGate, runGateScript } from "./step-gate.ts";
+import type { RunControl, RunControlView } from "./run-control.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -138,6 +140,7 @@ export type ResumeSession = {
 
 export type RunIterationOptions = {
   state: LoopState;
+  control?: RunControl;
   iteration: number;
   client: OpencodeClient;
   repoDir: string;
@@ -192,8 +195,8 @@ export type RunIterationOptions = {
   resumedStepSessions?: { stepIndex: number; stepName: string; sessionID: string }[];
 };
 
-async function waitWhilePaused(state: LoopState): Promise<void> {
-  while (state.paused && !state.quitting && !stopFileExists()) {
+async function waitWhilePaused(control: RunControlView): Promise<void> {
+  while (control.paused && !control.quitting && !stopFileExists()) {
     await Bun.sleep(100);
   }
 }
@@ -204,11 +207,11 @@ async function waitWhilePaused(state: LoopState): Promise<void> {
  * abort before we tear down.
  */
 const STOP_SESSION_QUIT_TIMEOUT_MS = 1_500;
-async function sleepInterruptible(state: LoopState, totalMs: number): Promise<void> {
+async function sleepInterruptible(control: RunControlView, totalMs: number): Promise<void> {
   const step = 100;
   let remaining = totalMs;
   while (remaining > 0) {
-    if (state.quitting || stopFileExists() || state.skipRequested || state.restartRequested) return;
+    if (control.quitting || stopFileExists() || control.skipRequested || control.restartRequested) return;
     const slice = Math.min(step, remaining);
     await Bun.sleep(slice);
     remaining -= slice;
@@ -255,6 +258,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     contextPolicy: globalContextPolicy,
     resumedStepSessions,
   } = options;
+  const control = options.control ?? state.control;
   const prdPaths = prdDir === undefined ? undefined : derivePrdPaths(prdDir, repoDir);
   const completed: LoopStep[] = [];
   // Logical-step ledger for the `<looper-context>` prior-steps section, keyed
@@ -374,14 +378,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (!adjudicating && !preserveRecoveryRow) syncStepsUiState(state, steps, index, completed, resumedPriorSteps ? "done" : "skipped");
     let currentStepIndex = adjudicating ? state.steps.length - 1 : state.steps.length - (steps.length - index);
 
-    if (stopFileExists() || state.quitting) {
+    if (stopFileExists() || control.quitting) {
       markRemainingSkipped(state, currentStepIndex);
       break;
     }
 
-    await waitWhilePaused(state);
+    await waitWhilePaused(control);
 
-    if (stopFileExists() || state.quitting) {
+    if (stopFileExists() || control.quitting) {
       markRemainingSkipped(state, currentStepIndex);
       break;
     }
@@ -392,6 +396,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (step === undefined) break;
     const executionIndex = adjudicating ? steps.length : index;
     const executionTotalSteps = adjudicating ? steps.length + 1 : steps.length;
+    const ctx = loopStateRunStepContext(state, control);
     const stepContextPolicy = resolveContextPolicy(step, { contextPolicy: globalContextPolicy });
     const needsStoryFacts = !adjudicating && (
       step.gate !== undefined ||
@@ -648,7 +653,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     let stepStartTime = Date.now();
     let gatePausedAt: number | undefined;
     const requestBrokerOwner = createRequestBrokerOwner({
-      state,
+      requests: ctx.reporter.requests,
       client,
       repoDir,
       configDir,
@@ -705,12 +710,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       return { status: "failed", sessionID, errorMessage: reason };
     };
     const stopAfterInterruptedHealthWait = (sessionID: string, stepIdx: number): StepRunResult => {
-      if (state.restartRequested) {
-        const reason = state.restartReason ?? "manual";
+      if (control.restartRequested) {
+        const reason = control.restartReason ?? "manual";
         logStepLine(stepIdx, `[looper] server health check stopped by ${reason} restart request for session ${sessionID}`);
         return { status: "restart", sessionID, restartReason: reason };
       }
-      if (state.quitting || stopFileExists()) {
+      if (control.quitting || stopFileExists()) {
         const reason = `stop requested while checking session ${sessionID}`;
         attempt.lastErrorMessage = reason;
         logStepLine(stepIdx, `[looper] ${reason}`);
@@ -728,7 +733,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         repoDir,
         sessionID,
         log: (line) => logStepLine(stepIdx, line),
-        shouldStop: () => state.quitting || stopFileExists() || state.skipRequested || state.restartRequested,
+        shouldStop: () => control.quitting || stopFileExists() || control.skipRequested || control.restartRequested,
       });
 
     if (pendingResume !== undefined) {
@@ -774,7 +779,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               });
             }
             pendingResult = await reattachOpenCodeStep({
-              state,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,
@@ -872,7 +877,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ? withAdjudicationReason(promptText(step), adjudication?.store.readMarker() ?? null)
           : promptText(step);
         result = await runOpenCodeStep({
-          state,
+          ctx,
           stepIndex: currentStepIndex,
           prompt: withLooperContext(contextBlock, attempt.resumePrompt ?? stepBasePrompt),
           client,
@@ -900,10 +905,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         });
       }
       attempt.resumePrompt = undefined;
-      const requestedRestartReason = state.restartReason;
-      state.skipRequested = false;
-      state.restartRequested = false;
-      state.restartReason = undefined;
+      const requestedRestartReason = control.restartReason;
+      control.clearStepRequests();
       notify();
 
       if (result.messageID !== undefined) attempt.lastPromptMessageID = result.messageID;
@@ -928,8 +931,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         }
 
         const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
-        const waitResult = await waitForLoopContinuationIdle({ state, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
-        if (waitResult === "idle" && !state.quitting && !stopFileExists()) {
+        const waitResult = await waitForLoopContinuationIdle({ ctx, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
+        if (waitResult === "idle" && !control.quitting && !stopFileExists()) {
           attempt.resumeSessionID = waitSessionID;
           attempt.resumePrompt = backgroundContinuationPrompt();
           pushAgentLine(state, `[looper] background tasks idle; resuming session ${attempt.resumeSessionID}`);
@@ -938,7 +941,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           continue;
         }
 
-        if (waitResult === "resumed" && !state.quitting && !stopFileExists()) {
+        if (waitResult === "resumed" && !control.quitting && !stopFileExists()) {
           // Track the continuation hook's own user message so the resumed
           // turn's outcome decides the step result; classifying against
           // attempt.lastPromptMessageID would grade the already-completed prior turn.
@@ -962,7 +965,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             pushStepOutputLine(state, currentStepIndex, line);
             notify();
             pendingResult = await reattachOpenCodeStep({
-              state,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,
@@ -979,7 +982,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           }
         }
 
-        if (waitResult === "orphaned" && !state.quitting && !stopFileExists()) {
+        if (waitResult === "orphaned" && !control.quitting && !stopFileExists()) {
           attempt.orphanNudgeCount += 1;
           const orphanNudgeDecision = nextActionForOrphanedBackgroundNudge(attempt.orphanNudgeCount);
           if (orphanNudgeDecision.kind === "fail") {
@@ -1002,7 +1005,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         }
 
         if (waitResult === "restart") {
-          const reason: StepRestartReason = state.restartReason ?? "manual";
+          const reason: StepRestartReason = control.restartReason ?? "manual";
           const previousStepIndex = currentStepIndex;
           if (!(await stopStepSession(waitSessionID, previousStepIndex))) {
             result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a restart session");
@@ -1015,8 +1018,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
           pushAgentLine(state, `[looper] restart requested during background wait for session ${waitSessionID}`);
           pushStepOutputLine(state, previousStepIndex, `[looper] restart requested during background wait for session ${waitSessionID}`);
-          state.restartRequested = false;
-          state.restartReason = undefined;
+          control.setRestartRequested(false);
+          control.setRestartReason(undefined);
           resetStepRowToPending(state, currentStepIndex);
           continue;
         }
@@ -1051,7 +1054,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         notify();
       }
 
-      if (result.status === "restart" && !state.quitting && !stopFileExists()) {
+      if (result.status === "restart" && !control.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
         const priorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
         logRecoveryBoundary(currentStepIndex, "restart", priorSessionID, attempt.lastPromptMessageID);
@@ -1072,7 +1075,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
 
       if (result.status === "failed") {
         const errReason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
-        const stopRequested = state.quitting || stopFileExists();
+        const stopRequested = control.quitting || stopFileExists();
         const failureDecision = decideAfterFailurePolicy(attempt, { stopRequested });
 
         if (failureDecision.kind === "fail") {
@@ -1130,7 +1133,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             pushAgentLine(state, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pushStepOutputLine(state, currentStepIndex, `[looper] ${step.name} reattaching (${attempt.reattachCount}/${MAX_REATTACH_PER_STEP}) to session ${priorSessionForCheck} — ${why}`);
             pendingResult = await reattachOpenCodeStep({
-              state,
+              ctx,
               stepIndex: currentStepIndex,
               client,
               repoDir,
@@ -1197,8 +1200,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         pushStepOutputLine(state, failedStepIndex, waitingLine);
         const activeStep = state.steps[currentStepIndex];
         resetStepRowToPending(state, currentStepIndex, { statusMessage: `retry in ${delaySeconds}s` });
-        await sleepInterruptible(state, delayMs);
-        if (!(state.quitting || stopFileExists() || state.skipRequested || state.restartRequested)) {
+        await sleepInterruptible(control, delayMs);
+        if (!(control.quitting || stopFileExists() || control.skipRequested || control.restartRequested)) {
           stepStartTime = Date.now();
           const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
           pushAgentLine(state, retryingLine);
@@ -1268,7 +1271,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (result.status === "failed" && routing.kind === "continue" && !adjudicating) {
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
-      const stopRequested = state.quitting || stopFileExists();
+      const stopRequested = control.quitting || stopFileExists();
       // Terminal failure (retry exhausted / suppressed / stop requested): make
       // sure the step's session is actually stopped so it doesn't keep running
       // server-side after we surface the failure. Use a short budget when the
@@ -1340,7 +1343,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       cancelInheritedTitleTimer();
       const adjSessionID = state.steps[currentStepIndex]?.sessionID;
       if (await stopStepSession(adjSessionID, currentStepIndex)) adjudication?.store.clearSession();
-      if (state.quitting || stopFileExists()) {
+      if (control.quitting || stopFileExists()) {
         markRemainingSkipped(state, currentStepIndex);
         requestBrokerOwner.dispose();
         break;
@@ -1363,7 +1366,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     requestBrokerOwner.dispose();
   }
 
-  return state.quitting || state.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()
+  return control.quitting || control.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()
     ? "stopped"
     : "complete";
 }

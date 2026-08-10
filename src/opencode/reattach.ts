@@ -2,10 +2,11 @@ import type { OpencodeClient, SessionMessagesResponse2, SessionStatus } from "@o
 
 import { DEFAULT_STEP_TIMEOUT_MS, serverRecoveryProbeTimeoutMs, staleBusyResumeThresholdMs } from "../config/tunables.ts";
 import type { PriorSessionEvaluation } from "../core/session-types.ts";
+import type { FinalizeStepStatus } from "../core/step-view.ts";
+import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
-import { beginStepRun, clearPendingRequests, finalizeStepRow, notify, pushAgentEvent, pushAgentLine, pushStepOutputEvent, pushStepOutputLine, pushStepOutputLines, setStepLooperMessageIDs, setStepPromptText, setStepSessionID, type FinalizeStepStatus, type LoopState } from "../lib/state.ts";
-import { stopFileExists } from "../lib/state-files.ts";
+import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
@@ -154,7 +155,7 @@ export async function evaluatePriorSession({
 }
 
 export type ReattachStepOptions = {
-  state: LoopState;
+  ctx: RunStepContext;
   stepIndex: number;
   client: OpencodeClient;
   repoDir: string;
@@ -171,7 +172,7 @@ export type ReattachStepOptions = {
 };
 
 export async function reattachOpenCodeStep({
-  state,
+  ctx,
   stepIndex,
   client,
   repoDir,
@@ -186,8 +187,7 @@ export async function reattachOpenCodeStep({
   timeoutMsOverride,
   requestBrokerOwner,
 }: ReattachStepOptions): Promise<StepRunResult> {
-  const activeStep = state.steps[stepIndex];
-  if (!activeStep) throw new Error(`missing state step at index ${stepIndex}`);
+  if (ctx.reporter.steps.get(stepIndex) === undefined) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
   // Enforce the step timeout during reattach exactly like runOpenCodeStep
   // does for a fresh prompt. Without it, a reattached session with a hung
@@ -196,19 +196,17 @@ export async function reattachOpenCodeStep({
   // session — which recovery then reattaches to again.
   const effectiveTimeoutMs = Math.min(timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS, REATTACH_MAX_WAIT_MS);
 
-  beginStepRun(state, stepIndex, { statusMessage: "reattaching" });
-  setStepSessionID(state, stepIndex, sessionID);
-  if (promptText !== undefined) setStepPromptText(state, stepIndex, promptText);
-  if (looperMessageIDs !== undefined) setStepLooperMessageIDs(state, stepIndex, looperMessageIDs);
+  ctx.reporter.steps.begin(stepIndex, { statusMessage: "reattaching" });
+  ctx.reporter.steps.setSessionID(stepIndex, sessionID);
+  if (promptText !== undefined) ctx.reporter.steps.setPromptText(stepIndex, promptText);
+  if (looperMessageIDs !== undefined) ctx.reporter.steps.setLooperMessageIDs(stepIndex, looperMessageIDs);
 
   const pushLine = (line: string, at?: number) => {
-    pushAgentLine(state, line, at);
-    pushStepOutputLine(state, stepIndex, line, at);
+    ctx.reporter.out.line(stepIndex, line, at);
   };
   const pushLines = (lines: string[], at?: number) => {
     if (lines.length === 0) return;
-    for (const line of lines) pushAgentLine(state, line, at);
-    pushStepOutputLines(state, stepIndex, lines, at);
+    ctx.reporter.out.lines(stepIndex, lines, at);
   };
 
   pushLine(`[looper] reattaching to session ${sessionID} (outcomeMessageID=${outcomeMessageID}) for ${step.name}`);
@@ -236,15 +234,14 @@ export async function reattachOpenCodeStep({
 
   const watcher = setInterval(() => {
     if (cancellationAction !== null) return;
-    if (state.restartRequested) requestCancellation("restart");
-    else if (state.skipRequested || state.quitting || stopFileExists()) requestCancellation("skip");
+    if (ctx.control.restartRequested) requestCancellation("restart");
+    else if (ctx.control.skipRequested || ctx.control.quitting || stopFileExists()) requestCancellation("skip");
   }, 100);
   const onStepTimeout = (): void => {
     if (cancellationAction !== null) return;
     pushLine(`[looper] reattach exceeded step timeout after ${Math.round(effectiveTimeoutMs / 1000)}s for ${step.name}; aborting session and restarting in a fresh session`);
-    state.restartRequested = true;
-    state.restartReason = "timeout";
-    notify();
+    ctx.control.requestRestart("timeout");
+    ctx.reporter.notify();
     requestCancellation("restart");
   };
   let consumerPromise: Promise<void> | undefined;
@@ -275,14 +272,11 @@ export async function reattachOpenCodeStep({
   const clearReattachingStatus = (): void => {
     if (streamActivitySeen) return;
     streamActivitySeen = true;
-    if (activeStep.statusMessage === "reattaching") {
-      activeStep.statusMessage = undefined;
-      notify();
-    }
+    ctx.reporter.steps.clearStatusMessageIf(stepIndex, "reattaching");
   };
-  const hiddenUserMessageIDs = new Set<string>(looperMessageIDs ?? activeStep.looperMessageIDs ?? []);
+  const hiddenUserMessageIDs = new Set<string>(looperMessageIDs ?? ctx.reporter.steps.get(stepIndex)?.looperMessageIDs ?? []);
   const brokerOwner = requestBrokerOwner ?? createRequestBrokerOwner({
-    state,
+    requests: ctx.reporter.requests,
     client,
     repoDir,
     step,
@@ -301,8 +295,7 @@ export async function reattachOpenCodeStep({
     pushLines,
     onEvent: (event, at) => {
       clearReattachingStatus();
-      pushAgentEvent(state, event, at);
-      pushStepOutputEvent(state, stepIndex, event, at);
+      ctx.reporter.out.event(stepIndex, event, at);
     },
     ...requestBroker.callbacks,
     onSessionError: (message) => {
@@ -409,14 +402,14 @@ export async function reattachOpenCodeStep({
       }
     }
     localBrokerOwner?.dispose();
-    if (requestBrokerOwner === undefined) clearPendingRequests(state);
+    if (requestBrokerOwner === undefined) ctx.reporter.requests.clearAll();
   }
 
   const finalize = (
     statusValue: FinalizeStepStatus,
     extras?: { errorMessage?: string; statusMessage?: string },
   ): StepRunResult => {
-    finalizeStepRow(state, stepIndex, statusValue, extras?.statusMessage !== undefined ? { statusMessage: extras.statusMessage } : {});
+    ctx.reporter.steps.finalize(stepIndex, statusValue, extras?.statusMessage !== undefined ? { statusMessage: extras.statusMessage } : {});
     return {
       status: statusValue,
       sessionID,
@@ -444,7 +437,7 @@ export async function reattachOpenCodeStep({
     repoDir,
     sessionID,
     parentMessageID: outcomeMessageID,
-    shouldStop: () => state.quitting || state.skipRequested || state.restartRequested || stopFileExists(),
+    shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
     log: pushLine,
   });
   if (classification.kind === "done") {
@@ -456,12 +449,9 @@ export async function reattachOpenCodeStep({
       pushLine(`[looper] continuation lookup after reattach threw: ${toError(error).message}`);
     }
     if (record !== null) {
-      setContinuationStatus(state, stepIndex, record);
-      logContinuationState(state, stepIndex, record, "background tasks active after reattach");
-      activeStep.status = "waiting";
-      activeStep.finishedAt = undefined;
-      state.activeStepIndex = null;
-      notify();
+      setContinuationStatus(ctx, stepIndex, record);
+      logContinuationState(ctx, stepIndex, record, "background tasks active after reattach");
+      ctx.reporter.steps.markWaitingForBackground(stepIndex);
       return { status: "waiting", sessionID: record.sessionID, messageID: outcomeMessageID };
     }
     return finalize("done");

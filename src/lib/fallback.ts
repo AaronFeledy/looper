@@ -20,6 +20,7 @@ import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
 import { clearPermissionAudit } from "../opencode/permission-audit.ts";
+import { createRunControl } from "../engine/run-control.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -214,6 +215,7 @@ export async function runNonTtyIterations({
     ...(adjudicationStore !== undefined ? { store: adjudicationStore } : {}),
     ...(configuredPrdFlipThreshold !== undefined ? { configuredThreshold: configuredPrdFlipThreshold } : {}),
   });
+  const control = createRunControl();
   const result = await runEngine<LoopState, typeof client>({
     fresh: options.fresh,
     maxIterations: options.maxIterations,
@@ -222,6 +224,7 @@ export async function runNonTtyIterations({
     repoDir,
     configDir,
     client,
+    control,
     store: runStateStore,
     loadSteps: () => loadSteps(configDir),
     currentBranch,
@@ -241,7 +244,7 @@ export async function runNonTtyIterations({
     adjudication,
     stall: { iterations: stallIterationLimit(stall?.iterations), adjudications: stallAdjudicationLimit(stall?.adjudications) },
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
-    hooks: createFallbackEngineHooks(currentBranch),
+    hooks: createFallbackEngineHooks(currentBranch, control),
   });
   if (result.kind === "max-iterations") process.exitCode = 1;
 }

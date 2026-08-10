@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { resumeSessionWorkState, waitForLoopContinuationIdle } from "../src/lib/runner.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
@@ -96,13 +97,18 @@ function state(): LoopState {
   return s;
 }
 
+function waitState() {
+  const loopState = state();
+  return { ctx: loopStateRunStepContext(loopState, loopState.control) };
+}
+
 describe("waitForLoopContinuationIdle — stale marker no longer means dead", () => {
   test("active+stale marker with parent idle and NO live children -> orphaned", async () => {
     const repoDir = freshRepo();
     writeActiveStaleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("orphaned");
   });
@@ -112,7 +118,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeActiveStaleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "idle", child1: "busy" }, children: ["child1"] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
 
     expect(result).toBe("timeout");
   });
@@ -122,7 +128,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeActiveStaleRecord(repoDir);
     const client = makeClient({ statusError: true });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
 
     expect(result).toBe("timeout");
   });
@@ -132,7 +138,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeActiveStaleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
 
     expect(result).toBe("timeout");
   });
@@ -142,7 +148,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeIdleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "idle" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("idle");
   });
@@ -152,7 +158,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeIdleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("resumed");
   });
@@ -161,7 +167,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     const repoDir = freshRepo();
     const client = makeClient({ statusMap: { [SID]: "busy" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("resumed");
   });
@@ -171,7 +177,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeIdleRecord(repoDir);
     const client = makeClient({ statusMap: { [SID]: "retry" }, children: [] });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 60_000 });
 
     expect(result).toBe("resumed");
   });
@@ -181,7 +187,7 @@ describe("waitForLoopContinuationIdle — stale marker no longer means dead", ()
     writeIdleRecord(repoDir);
     const client = makeClient({ statusError: true });
 
-    const result = await waitForLoopContinuationIdle({ state: state(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
+    const result = await waitForLoopContinuationIdle({ ...waitState(), client, stepIndex: 0, repoDir, sessionID: SID, timeoutMs: 1 });
 
     expect(result).toBe("timeout");
   });

@@ -1,6 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { describe, expect, test } from "bun:test";
 
+import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { clearContinuationStatus, setContinuationStatus, waitForLoopContinuationIdle } from "../src/opencode/background-tasks.ts";
 import type { RunContinuationRecord } from "../src/opencode/continuation-records.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
@@ -39,7 +40,7 @@ describe("continuation indicator", () => {
     const loopState = state();
 
     // When
-    setContinuationStatus(loopState, 0, record("waiting for delegated work"));
+    setContinuationStatus(loopStateRunStepContext(loopState, loopState.control), 0, record("waiting for delegated work"));
 
     // Then
     expect(loopState.steps[0]?.continuation).toEqual({
@@ -51,10 +52,11 @@ describe("continuation indicator", () => {
   test("clears the continuation indicator", () => {
     // Given
     const loopState = state();
-    setContinuationStatus(loopState, 0, record("waiting for delegated work"));
+    const ctx = loopStateRunStepContext(loopState, loopState.control);
+    setContinuationStatus(ctx, 0, record("waiting for delegated work"));
 
     // When
-    clearContinuationStatus(loopState, 0);
+    clearContinuationStatus(ctx, 0);
 
     // Then
     expect(loopState.steps[0]?.continuation).toBeUndefined();
@@ -66,7 +68,7 @@ describe("continuation indicator", () => {
     expect(loopState.steps[0]?.backgroundAgents).toEqual([]);
 
     // When
-    setContinuationStatus(loopState, 0, record());
+    setContinuationStatus(loopStateRunStepContext(loopState, loopState.control), 0, record());
 
     // Then
     expect(loopState.steps[0]?.continuation?.reason).toBe("background tasks active");
@@ -75,12 +77,13 @@ describe("continuation indicator", () => {
   test("clears continuation when the wait exits through restart", async () => {
     // Given
     const loopState = state();
-    setContinuationStatus(loopState, 0, record("waiting for delegated work"));
+    const ctx = loopStateRunStepContext(loopState, loopState.control);
+    setContinuationStatus(ctx, 0, record("waiting for delegated work"));
     loopState.restartRequested = true;
 
     // When
     const result = await waitForLoopContinuationIdle({
-      state: loopState,
+      ctx,
       client: client(),
       stepIndex: 0,
       repoDir: "/tmp",

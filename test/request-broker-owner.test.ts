@@ -1,6 +1,7 @@
 import { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { describe, expect, test } from "bun:test";
 
+import { createLoopStateStepReporter } from "../src/lib/loop-state-reporter.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { createRequestBrokerOwner } from "../src/opencode/request-broker-owner.ts";
 import type { TeardownClock } from "../src/opencode/request-teardown.ts";
@@ -24,7 +25,7 @@ describe("createRequestBrokerOwner", () => {
     // Given
     const friction = { counts: new Map<string, number>(), requestIDs: new Set<string>() };
     const owner = createRequestBrokerOwner({
-      state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }),
+      requests: createLoopStateStepReporter(createLoopState({ maxIterations: 1, stepNames: ["Build"] })).requests,
       client: new OpencodeClient(),
       repoDir: "/repo",
       step: { name: "Build", prompt: "build" },
@@ -55,7 +56,7 @@ describe("createRequestBrokerOwner", () => {
       },
     } });
     const owner = createRequestBrokerOwner({
-      state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }),
+      requests: createLoopStateStepReporter(createLoopState({ maxIterations: 1, stepNames: ["Build"] })).requests,
       client,
       repoDir: "/repo",
       step: { name: "Build", prompt: "build" },
@@ -88,7 +89,7 @@ describe("createRequestBrokerOwner", () => {
       status: async () => ({ data: { "ses-old": { type: "busy" } } }),
     } });
     const owner = createRequestBrokerOwner({
-      state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }),
+      requests: createLoopStateStepReporter(createLoopState({ maxIterations: 1, stepNames: ["Build"] })).requests,
       client,
       repoDir: "/repo",
       step: { name: "Build", prompt: "build" },

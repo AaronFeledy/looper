@@ -1,7 +1,7 @@
 import { appendFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 
-import { tolerantRm } from "../lib/state-files.ts";
+import { tolerantRm } from "../persistence/state-file-operations.ts";
 
 export const PERMISSION_AUDIT_FILE_NAME = ".looper-permission-log.jsonl";
 

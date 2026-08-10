@@ -1,21 +1,39 @@
-import type { LooperEvent } from "../core/events.ts";
+import { looperLogEventFromLine, type LooperEvent } from "../core/events.ts";
+import type {
+  FinalizeStepStatus,
+  StepRestartReason,
+  StepStatus,
+  TodoItem,
+} from "../core/step-view.ts";
+import type {
+  PendingPermission,
+  PendingQuestion,
+  PendingRequest,
+  PendingRequestDecision,
+  PendingRequestDecisionAction,
+  PendingRequestIdentity,
+} from "../core/pending-request.ts";
+import { createRunControl, type RunControl } from "../engine/run-control.ts";
 
-export type StepStatus = "pending" | "running" | "waiting" | "done" | "failed" | "skipped";
-
-/** Terminal display statuses a step row settles into once its attempt is over. */
-export type TerminalStepStatus = "done" | "failed" | "skipped";
-
-/**
- * Statuses accepted by {@link finalizeStepRow}: the terminals plus `"restart"`,
- * which is a {@link StepStatus}-less signal that resets the row back to
- * `pending` (the runner returns `"restart"` as a {@link import("./runner.ts").StepResult},
- * never as a displayed status).
- */
-export type FinalizeStepStatus = TerminalStepStatus | "restart";
+export type {
+  FinalizeStepStatus,
+  StepRestartReason,
+  StepRowView,
+  StepStatus,
+  TerminalStepStatus,
+  TodoItem,
+} from "../core/step-view.ts";
+export type {
+  PendingPermission,
+  PendingQuestion,
+  PendingRequest,
+  PendingRequestDecision,
+  PendingRequestDecisionAction,
+  PendingRequestIdentity,
+  PendingRequestStatus,
+} from "../core/pending-request.ts";
 
 export type LoopPane = "steps" | "output" | "github";
-
-export type StepRestartReason = "manual" | "timeout";
 
 export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "end";
 
@@ -197,52 +215,6 @@ export type RecoveryPrompt = {
   sessionID?: string;
 };
 
-export type PendingPermission = {
-  requestID: string;
-  sessionID: string;
-  permission: string;
-  patterns: string[];
-  metadata?: Record<string, unknown>;
-  generation: number;
-  askedAt?: number;
-};
-
-export type PendingQuestion = {
-  requestID: string;
-  sessionID: string;
-  questions: unknown[];
-  generation: number;
-  askedAt?: number;
-};
-
-export type PendingRequestStatus = "open" | "resolving" | "error";
-export type PendingRequestDecisionAction = "once" | "always" | "reject" | "skip";
-
-type PendingRequestState = {
-  status: PendingRequestStatus;
-  decision?: PendingRequestDecisionAction;
-  lastError?: string;
-};
-
-export type PendingRequest =
-  | ({ kind: "permission" } & PendingPermission & PendingRequestState)
-  | ({ kind: "question" } & PendingQuestion & PendingRequestState);
-
-export type PendingRequestIdentity = {
-  requestID: string;
-  generation: number;
-};
-
-export type PendingRequestDecision = PendingRequestIdentity & {
-  action: PendingRequestDecisionAction;
-};
-
-export type TodoItem = {
-  content: string;
-  status: string;
-  priority: string;
-};
-
 export type EscConfirmMode = "reset" | "stop";
 
 export type LoopState = {
@@ -258,6 +230,7 @@ export type LoopState = {
   manualStepSelection: boolean;
   activeStepIndex: number | null;
   started: boolean;
+  control: RunControl;
   paused: boolean;
   quitting: boolean;
   stopAfterIteration: boolean;
@@ -409,12 +382,6 @@ function trimPairedEvents(events: LooperEvent[], times: number[]): number {
   return overflow;
 }
 
-function looperLogEventFromLine(line: string): LooperEvent | null {
-  const prefix = "[looper] ";
-  if (!line.startsWith(prefix)) return null;
-  return { kind: "looper.log", message: line.slice(prefix.length) };
-}
-
 function getSelectedStep(state: LoopState): LoopStep | null {
   const selectedStepIndex = clampStepIndex(getStepCount(state), state.selectedStepIndex);
   if (selectedStepIndex === null) return null;
@@ -428,9 +395,11 @@ function notifyStateChange(): void {
 export function createLoopState({
   maxIterations,
   stepNames,
+  control = createRunControl(),
 }: {
   maxIterations: number;
   stepNames: string[];
+  control?: RunControl;
 }): LoopState {
   return {
     iteration: 0,
@@ -445,12 +414,43 @@ export function createLoopState({
     manualStepSelection: false,
     activeStepIndex: null,
     started: false,
-    paused: false,
-    quitting: false,
-    stopAfterIteration: false,
-    skipRequested: false,
-    restartRequested: false,
-    restartReason: undefined,
+    control,
+    get paused() {
+      return control.paused;
+    },
+    set paused(value: boolean) {
+      control.setPaused(value);
+    },
+    get quitting() {
+      return control.quitting;
+    },
+    set quitting(value: boolean) {
+      control.setQuitting(value);
+    },
+    get stopAfterIteration() {
+      return control.stopAfterIteration;
+    },
+    set stopAfterIteration(value: boolean) {
+      control.setStopAfterIteration(value);
+    },
+    get skipRequested() {
+      return control.skipRequested;
+    },
+    set skipRequested(value: boolean) {
+      control.setSkipRequested(value);
+    },
+    get restartRequested() {
+      return control.restartRequested;
+    },
+    set restartRequested(value: boolean) {
+      control.setRestartRequested(value);
+    },
+    get restartReason() {
+      return control.restartReason;
+    },
+    set restartReason(value: StepRestartReason | undefined) {
+      control.setRestartReason(value);
+    },
     recovery: null,
     pendingRequests: [],
     todos: [],
@@ -1099,6 +1099,23 @@ export function markStepWaiting(state: LoopState, stepIndex: number): void {
   step.status = "waiting";
   step.statusMessage = undefined;
   notify();
+}
+
+export function markStepWaitingForBackground(state: LoopState, stepIndex: number): void {
+  const step = state.steps[stepIndex];
+  if (!step) return;
+  step.status = "waiting";
+  step.finishedAt = undefined;
+  state.activeStepIndex = null;
+  notify();
+}
+
+export function clearStepStatusMessageIf(state: LoopState, stepIndex: number, expected: string): void {
+  const step = state.steps[stepIndex];
+  if (step?.statusMessage === expected) {
+    step.statusMessage = undefined;
+    notify();
+  }
 }
 
 /**
