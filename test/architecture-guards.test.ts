@@ -14,7 +14,7 @@ const LOOP_STATE_RE = /\bLoopState\b/;
 const AGENT_TREE_STATE_IMPORT_RE = /from\s+"\.\.\/lib\/agent-tree-state\.ts"/;
 /** Control flags that must move behind RunControl */
 const CONTROL_FLAG_RE =
-  /\bstate\.(quitting|paused|skipRequested|restartRequested|restartReason|stopAfterIteration)\b/;
+  /\bstate\.(?:control\.)?(quitting|paused|skipRequested|restartRequested|restartReason|stopAfterIteration)\b/;
 
 type Offense = {
   readonly file: string;
@@ -129,18 +129,23 @@ describe("architecture guard self-test", () => {
   });
 
   test("CONTROL_FLAG_RE matches each control flag accessor", () => {
-    const flags = [
-      "state.quitting",
-      "state.paused",
-      "state.skipRequested",
-      "state.restartRequested",
-      "state.restartReason",
-      "state.stopAfterIteration",
+    // Given: the six LoopState control flags
+    const flagNames = [
+      "quitting",
+      "paused",
+      "skipRequested",
+      "restartRequested",
+      "restartReason",
+      "stopAfterIteration",
     ] as const;
-    for (const flag of flags) {
-      expect(CONTROL_FLAG_RE.test(flag)).toBe(true);
+    // When/Then: direct state.<flag> and nested state.control.<flag> both match
+    for (const name of flagNames) {
+      expect(CONTROL_FLAG_RE.test(`state.${name}`)).toBe(true);
+      expect(CONTROL_FLAG_RE.test(`state.control.${name}`)).toBe(true);
     }
+    // Then: unrelated properties and non-state identifiers do not match
     expect(CONTROL_FLAG_RE.test("state.steps")).toBe(false);
+    expect(CONTROL_FLAG_RE.test("state.control.steps")).toBe(false);
     expect(CONTROL_FLAG_RE.test("myState.quitting")).toBe(false);
   });
 });
