@@ -293,7 +293,7 @@ export async function reattachOpenCodeStep({
     () => {
       const remainingMs = stepTimeout.extend();
       if (remainingMs === undefined) return undefined;
-      pushLine(`[looper] step timeout doubled; ${Math.round(remainingMs / 1000)}s remaining`);
+      pushLine(`[looper] step timeout extended; ${Math.round(remainingMs / 1000)}s remaining`);
       return { remainingMs };
     },
     () => {
