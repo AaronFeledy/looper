@@ -48,7 +48,7 @@ import {
   type AdjudicationRuntime,
 } from "./adjudication-routing.ts";
 import { evaluateGate, runGateScript } from "./step-gate.ts";
-import type { RunControl, RunControlView } from "./run-control.ts";
+import { remainingStepBudgetMs, type RunControl, type RunControlView } from "./run-control.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -651,6 +651,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     }
     const budgetMs = step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
     let stepStartTime = Date.now();
+    control.clearTimeoutBonus();
+    const remainingBudget = () => remainingStepBudgetMs(budgetMs, stepStartTime, control.timeoutBonusMs);
     let gatePausedAt: number | undefined;
     const requestBrokerOwner = createRequestBrokerOwner({
       requests: ctx.reporter.requests,
@@ -788,7 +790,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               outcomeMessageID: resumeInfo.messageID,
               ...(resumeInfo.promptText !== undefined ? { promptText: resumeInfo.promptText } : {}),
               ...(resumeInfo.looperMessageIDs !== undefined ? { looperMessageIDs: resumeInfo.looperMessageIDs } : {}),
-              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+              timeoutMsOverride: remainingBudget(),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -890,7 +892,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           repoDir,
           step,
           sessionID: attempt.resumeSessionID,
-          timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+          timeoutMsOverride: remainingBudget(),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
           ...(questionPolicy !== undefined ? { questionPolicy } : {}),
           ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -936,7 +938,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           break;
         }
 
-        const remainingMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
+        const remainingMs = remainingBudget();
         const waitResult = await waitForLoopContinuationIdle({ ctx, client, stepIndex: currentStepIndex, repoDir, sessionID: waitSessionID, timeoutMs: remainingMs });
         if (waitResult === "idle" && !control.quitting && !stopFileExists()) {
           attempt.resumeSessionID = waitSessionID;
@@ -978,7 +980,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               step,
               sessionID: waitSessionID,
               outcomeMessageID: resumedMessageID,
-              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+              timeoutMsOverride: remainingBudget(),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -1074,6 +1076,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
         stepIndexForTitle = currentStepIndex;
         stepStartTime = Date.now();
+        control.clearTimeoutBonus();
         attempt.resumeSessionID = undefined;
         attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
         continue;
@@ -1082,8 +1085,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (result.status === "failed") {
         const errReason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
         const stopRequested = control.quitting || stopFileExists();
-        const remainingBudgetMs = Math.max(0, budgetMs - (Date.now() - stepStartTime));
-        const failureDecision = decideAfterFailurePolicy(attempt, { stopRequested, remainingBudgetMs });
+        let remainingBudgetMs = remainingBudget();
+        let failureDecision = decideAfterFailurePolicy(attempt, { stopRequested, remainingBudgetMs });
 
         if (failureDecision.kind === "fail") {
           const skipReason = failureDecision.reason;
@@ -1150,7 +1153,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
               step,
               sessionID: priorSessionForCheck,
               outcomeMessageID: attempt.lastPromptMessageID,
-              timeoutMsOverride: Math.max(0, budgetMs - (Date.now() - stepStartTime)),
+              timeoutMsOverride: remainingBudget(),
               ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
               ...(questionPolicy !== undefined ? { questionPolicy } : {}),
               ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
@@ -1194,6 +1197,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           }
         }
 
+        remainingBudgetMs = remainingBudget();
+        failureDecision = decideAfterFailurePolicy(attempt, {
+          stopRequested: control.quitting || stopFileExists(),
+          remainingBudgetMs,
+        });
+        if (failureDecision.kind === "fail") {
+          const skipReason = failureDecision.reason;
+          logRecoveryBoundary(currentStepIndex, "skip", state.steps[currentStepIndex]?.sessionID, attempt.lastPromptMessageID);
+          const line = `[looper] ${step.name} failed: ${errReason} \u2014 not retrying: ${skipReason}`;
+          pushAgentLine(state, line);
+          pushStepOutputLine(state, currentStepIndex, line);
+          if (skipReason === "retry budget exhausted") {
+            writeStop?.(`${step.name} failed after retry budget exhausted: ${errReason}`);
+          }
+          notify();
+          break;
+        }
         attempt.failureRetryCount = failureDecision.attempt;
         const delayMs = Math.min(
           applyFailureRetryJitter(failureDecision.delayMs, Math.random() * 2 - 1, failureRetryJitterRatio()),

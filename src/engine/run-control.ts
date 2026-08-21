@@ -16,6 +16,7 @@ export type RunControlView = {
   readonly restartRequested: boolean;
   readonly restartReason: StepRestartReason | undefined;
   readonly stopAfterIteration: boolean;
+  readonly timeoutBonusMs: number;
   readonly requestRestart: (reason: StepRestartReason) => void;
   readonly bindTimeoutExtender: (
     extend: (() => TimeoutExtendResult | undefined) | undefined,
@@ -36,7 +37,12 @@ export type RunControl = RunControlView & {
   readonly setRestartReason: (reason: StepRestartReason | undefined) => void;
   readonly clearStepRequests: () => void;
   readonly clearRunRequests: () => void;
+  readonly clearTimeoutBonus: () => void;
 };
+
+export function remainingStepBudgetMs(budgetMs: number, stepStartTime: number, bonusMs: number, nowMs: number = Date.now()): number {
+  return Math.max(0, budgetMs + bonusMs - (nowMs - stepStartTime));
+}
 
 export function createRunControl(options?: { onChange?: () => void }): RunControl {
   const onChange = options?.onChange ?? (() => {});
@@ -48,6 +54,7 @@ export function createRunControl(options?: { onChange?: () => void }): RunContro
   let stopAfterIteration = false;
   let timeoutExtender: (() => TimeoutExtendResult | undefined) | undefined;
   let timeoutClock: (() => TimeoutSnapshot | undefined) | undefined;
+  let timeoutBonusMs = 0;
 
   return {
     get quitting() {
@@ -67,6 +74,9 @@ export function createRunControl(options?: { onChange?: () => void }): RunContro
     },
     get stopAfterIteration() {
       return stopAfterIteration;
+    },
+    get timeoutBonusMs() {
+      return timeoutBonusMs;
     },
     setQuitting(value: boolean) {
       quitting = value;
@@ -95,10 +105,17 @@ export function createRunControl(options?: { onChange?: () => void }): RunContro
       timeoutClock = extend === undefined ? undefined : snapshot;
     },
     extendTimeout() {
-      return timeoutExtender?.();
+      const originalMs = timeoutClock?.()?.originalMs ?? 0;
+      const result = timeoutExtender?.();
+      if (result === undefined) return undefined;
+      timeoutBonusMs += originalMs;
+      return result;
     },
     timeoutSnapshot() {
       return timeoutClock?.();
+    },
+    clearTimeoutBonus() {
+      timeoutBonusMs = 0;
     },
     setStopAfterIteration(value: boolean) {
       stopAfterIteration = value;

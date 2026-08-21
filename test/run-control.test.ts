@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createRunControl } from "../src/engine/run-control.ts";
+import { createRunControl, remainingStepBudgetMs } from "../src/engine/run-control.ts";
 
 describe("createRunControl", () => {
   test("initial values are all false with undefined restartReason", () => {
@@ -264,5 +264,38 @@ describe("createRunControl", () => {
     expect(control.timeoutSnapshot()).toEqual({ remainingMs: 40, originalMs: 100 });
     control.bindTimeoutExtender(undefined);
     expect(control.timeoutSnapshot()).toBeUndefined();
+  });
+
+  test("extendTimeout adds the snapshot original duration to timeoutBonusMs", () => {
+    const control = createRunControl();
+    expect(control.timeoutBonusMs).toBe(0);
+    control.bindTimeoutExtender(
+      () => ({ remainingMs: 160 }),
+      () => ({ remainingMs: 60, originalMs: 100 }),
+    );
+    expect(control.extendTimeout()).toEqual({ remainingMs: 160 });
+    expect(control.timeoutBonusMs).toBe(100);
+    expect(control.extendTimeout()).toEqual({ remainingMs: 160 });
+    expect(control.timeoutBonusMs).toBe(200);
+    control.clearTimeoutBonus();
+    expect(control.timeoutBonusMs).toBe(0);
+  });
+
+  test("extendTimeout without a snapshot does not invent a timeout bonus", () => {
+    const control = createRunControl();
+    control.bindTimeoutExtender(() => ({ remainingMs: 1 }));
+    expect(control.extendTimeout()).toEqual({ remainingMs: 1 });
+    expect(control.timeoutBonusMs).toBe(0);
+  });
+});
+
+describe("remainingStepBudgetMs", () => {
+  test("includes operator timeout bonus in leftover budget", () => {
+    expect(remainingStepBudgetMs(100_000, 1_000, 0, 41_000)).toBe(60_000);
+    expect(remainingStepBudgetMs(100_000, 1_000, 100_000, 41_000)).toBe(160_000);
+  });
+
+  test("floors at zero when wall time has consumed the budget", () => {
+    expect(remainingStepBudgetMs(100_000, 1_000, 0, 200_000)).toBe(0);
   });
 });
