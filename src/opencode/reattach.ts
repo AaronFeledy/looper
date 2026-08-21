@@ -289,6 +289,19 @@ export async function reattachOpenCodeStep({
   const localBrokerOwner = requestBrokerOwner === undefined ? brokerOwner : undefined;
   const requestBroker = brokerOwner.bind(sessionID).broker;
   const stepTimeout = createPausableTimeout({ durationMs: effectiveTimeoutMs, onElapsed: onStepTimeout });
+  ctx.control.bindTimeoutExtender(
+    () => {
+      const remainingMs = stepTimeout.extend();
+      if (remainingMs === undefined) return undefined;
+      pushLine(`[looper] step timeout doubled; ${Math.round(remainingMs / 1000)}s remaining`);
+      return { remainingMs };
+    },
+    () => {
+      const remainingMs = stepTimeout.remainingMs();
+      if (remainingMs === undefined) return undefined;
+      return { remainingMs, originalMs: stepTimeout.originalMs() };
+    },
+  );
   const unsubscribeHumanGate = brokerOwner.subscribeHumanGate(stepTimeout.setGateOpen);
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
@@ -373,6 +386,7 @@ export async function reattachOpenCodeStep({
   } finally {
     clearInterval(watcher);
     unsubscribeHumanGate();
+    ctx.control.bindTimeoutExtender(undefined);
     stepTimeout.dispose();
     ctrl.abort();
     if (consumerPromise) {
