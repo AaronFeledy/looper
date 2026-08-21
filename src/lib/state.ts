@@ -271,7 +271,8 @@ export type FlatRow =
       count: number;
       parentSessionID: string | null;
       depth: number;
-    };
+    }
+  | { kind: "pause" };
 
 export function completeGroupKey(stepIndex: number, parentSessionID: string | null): string {
   return parentSessionID === null ? `${stepIndex}` : `${stepIndex}:${parentSessionID}`;
@@ -753,7 +754,33 @@ export function flattenRows(state: LoopState): FlatRow[] {
 
     emitChildren(null, 1);
   });
-  return rows;
+  return insertPauseMarker(state, rows);
+}
+
+function insertPauseMarker(state: LoopState, rows: FlatRow[]): FlatRow[] {
+  if (!state.paused) return rows;
+  let insertAt = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i];
+    if (row === undefined || row.kind === "pause") continue;
+    const step = state.steps[row.stepIndex];
+    if (step !== undefined && step.status !== "pending") insertAt = i + 1;
+  }
+  const next = rows.slice();
+  next.splice(insertAt, 0, { kind: "pause" });
+  return next;
+}
+
+function isSelectableFlatRow(row: FlatRow): boolean {
+  return row.kind !== "pause";
+}
+
+function nearestSelectableRow(rows: readonly FlatRow[], start: number, direction: 1 | -1): FlatRow | null {
+  for (let i = start; i >= 0 && i < rows.length; i += direction) {
+    const row = rows[i];
+    if (row !== undefined && isSelectableFlatRow(row)) return row;
+  }
+  return null;
 }
 
 export function isCompleteGroupExpanded(
@@ -931,6 +958,7 @@ function pinStepOutputToBottom(state: LoopState, stepIndex: number): boolean {
 }
 
 function applyRowSelection(state: LoopState, row: FlatRow): void {
+  if (row.kind === "pause") return;
   const nextSessionID =
     row.kind === "background"
       ? row.sessionID
@@ -964,7 +992,7 @@ export function activateStepListRow(state: LoopState, rowIndex: number): void {
     return;
   }
   const row = flattenRows(state)[rowIndex];
-  if (row === undefined) return;
+  if (row === undefined || row.kind === "pause") return;
   if (row.kind === "background-complete") {
     applyRowSelection(state, row);
     toggleCompleteGroupExpanded(state, row.stepIndex, row.parentSessionID);
@@ -995,7 +1023,7 @@ export function selectStepListRow(state: LoopState, rowIndex: number): void {
     return;
   }
   const row = flattenRows(state)[rowIndex];
-  if (row === undefined) return;
+  if (row === undefined || row.kind === "pause") return;
   applyRowSelection(state, row);
 }
 
@@ -1032,8 +1060,9 @@ export function selectPreviousStep(state: LoopState): FlatRow | null {
   const rows = flattenRows(state);
   if (rows.length === 0) return null;
   const current = currentRowIndex(state, rows);
-  const nextIndex = current === null ? rows.length - 1 : Math.max(0, current - 1);
-  const next = rows[nextIndex]!;
+  const start = current === null ? rows.length - 1 : current - 1;
+  const next = nearestSelectableRow(rows, start, -1);
+  if (next === null) return null;
   applyRowSelection(state, next);
   return next;
 }
@@ -1042,8 +1071,9 @@ export function selectNextStep(state: LoopState): FlatRow | null {
   const rows = flattenRows(state);
   if (rows.length === 0) return null;
   const current = currentRowIndex(state, rows);
-  const nextIndex = current === null ? 0 : Math.min(rows.length - 1, current + 1);
-  const next = rows[nextIndex]!;
+  const start = current === null ? 0 : current + 1;
+  const next = nearestSelectableRow(rows, start, 1);
+  if (next === null) return null;
   applyRowSelection(state, next);
   return next;
 }

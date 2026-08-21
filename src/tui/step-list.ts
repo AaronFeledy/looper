@@ -38,6 +38,29 @@ export function isLiveStepStatus(status: StepStatus): boolean {
   return status === "running" || status === "waiting";
 }
 
+export function isPauseEngaged(state: Pick<LoopState, "paused" | "steps">): boolean {
+  if (!state.paused) return false;
+  for (const step of state.steps) {
+    if (isLiveStepStatus(step.status)) return false;
+  }
+  return true;
+}
+
+export type PauseRowAppearance = {
+  readonly content: string;
+  readonly fg: string;
+  readonly bold: boolean;
+};
+
+export function pauseRowAppearance(state: Pick<LoopState, "paused" | "steps">): PauseRowAppearance {
+  const engaged = isPauseEngaged(state);
+  return {
+    content: formatRow("⏸ Pause", ""),
+    fg: engaged ? COLOR_WAITING : COLOR_MUTED,
+    bold: engaged,
+  };
+}
+
 function hasLiveRow(state: LoopState): boolean {
   for (const step of state.steps) {
     if (isLiveStepStatus(step.status)) return true;
@@ -191,6 +214,7 @@ function rowBackgroundColor(isSelected: boolean, isFocused: boolean): string | u
 }
 
 function isRowSelected(state: LoopState, row: FlatRow): boolean {
+  if (row.kind === "pause") return false;
   const selectedStepIndex = state.manualStepSelection
     ? state.selectedStepIndex
     : state.selectedStepIndex ?? state.activeStepIndex;
@@ -344,6 +368,14 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
     rows.forEach((row, index) => {
       const renderable = rowRenderables[index];
       if (!renderable) return;
+      if (row.kind === "pause") {
+        const appearance = pauseRowAppearance(state);
+        renderable.content = appearance.content;
+        renderable.fg = appearance.fg;
+        renderable.bg = "transparent";
+        renderable.attributes = appearance.bold ? TextAttributes.BOLD : TextAttributes.NONE;
+        return;
+      }
       const step = state.steps[row.stepIndex];
       if (!step) return;
       const isSelected = isRowSelected(state, row);
