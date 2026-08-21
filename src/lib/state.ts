@@ -1635,6 +1635,13 @@ export function pushAgentEvent(state: LoopState, event: LooperEvent, at: number 
   trimPairedEvents(state.agentEvents, state.agentEventTimes);
 }
 
+function trimHistoryOverflow(state: LoopState): void {
+  const overflow = state.history.length - HISTORY_MAX_ENTRIES;
+  if (overflow <= 0) return;
+  state.history.splice(0, overflow);
+  if (state.historyView !== null) state.historyView.entryIndex = Math.max(0, state.historyView.entryIndex - overflow);
+}
+
 export function snapshotIterationToHistory(state: LoopState): void {
   if (state.iteration < 1 || state.steps.length === 0) return;
   const steps: HistoryStepSnapshot[] = state.steps.map((step) => ({
@@ -1649,11 +1656,28 @@ export function snapshotIterationToHistory(state: LoopState): void {
     ...(step.finishedAt !== undefined ? { finishedAt: step.finishedAt } : {}),
   }));
   state.history.push({ iteration: state.iteration, branch: state.branch, startedAt: state.iterationStartedAt, steps });
-  const overflow = state.history.length - HISTORY_MAX_ENTRIES;
-  if (overflow > 0) {
-    state.history.splice(0, overflow);
-    if (state.historyView !== null) state.historyView.entryIndex = Math.max(0, state.historyView.entryIndex - overflow);
+  trimHistoryOverflow(state);
+}
+
+export function trimLoopStateMemory(state: LoopState): void {
+  trimPairedLines(state.agentLines, state.agentLineTimes);
+  trimPairedEvents(state.agentEvents, state.agentEventTimes);
+  for (const step of state.steps) {
+    trimStepOutputBuffer(step);
+    trimStepOutputEventBuffer(step);
+    for (const agent of step.backgroundAgents) {
+      const removed = trimPairedLines(agent.outputLines, agent.outputLineTimes);
+      if (removed > 0) agent.outputScrollTop = Math.max(0, agent.outputScrollTop - removed);
+      if (agent.outputEvents !== undefined && agent.outputEventTimes !== undefined) {
+        trimPairedEvents(agent.outputEvents, agent.outputEventTimes);
+      }
+    }
   }
+  if (state.historyView !== null) {
+    trimPairedLines(state.historyView.lines, state.historyView.lineTimes);
+    trimPairedEvents(state.historyView.events, state.historyView.eventTimes);
+  }
+  trimHistoryOverflow(state);
 }
 
 export function historyStepSessionKey(entryIndex: number, stepIndex: number, sessionID: string | undefined): string | null {
