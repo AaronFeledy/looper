@@ -1,5 +1,14 @@
 import type { StepRestartReason } from "../core/step-view.ts";
 
+export type TimeoutExtendResult = {
+  readonly remainingMs: number;
+};
+
+export type TimeoutSnapshot = {
+  readonly remainingMs: number;
+  readonly originalMs: number;
+};
+
 export type RunControlView = {
   readonly quitting: boolean;
   readonly paused: boolean;
@@ -8,6 +17,12 @@ export type RunControlView = {
   readonly restartReason: StepRestartReason | undefined;
   readonly stopAfterIteration: boolean;
   readonly requestRestart: (reason: StepRestartReason) => void;
+  readonly bindTimeoutExtender: (
+    extend: (() => TimeoutExtendResult | undefined) | undefined,
+    snapshot?: () => TimeoutSnapshot | undefined,
+  ) => void;
+  readonly extendTimeout: () => TimeoutExtendResult | undefined;
+  readonly timeoutSnapshot: () => TimeoutSnapshot | undefined;
 };
 
 export type RunControl = RunControlView & {
@@ -31,6 +46,8 @@ export function createRunControl(options?: { onChange?: () => void }): RunContro
   let restartRequested = false;
   let restartReason: StepRestartReason | undefined;
   let stopAfterIteration = false;
+  let timeoutExtender: (() => TimeoutExtendResult | undefined) | undefined;
+  let timeoutClock: (() => TimeoutSnapshot | undefined) | undefined;
 
   return {
     get quitting() {
@@ -72,6 +89,16 @@ export function createRunControl(options?: { onChange?: () => void }): RunContro
       restartRequested = true;
       restartReason = reason;
       onChange();
+    },
+    bindTimeoutExtender(extend, snapshot) {
+      timeoutExtender = extend;
+      timeoutClock = extend === undefined ? undefined : snapshot;
+    },
+    extendTimeout() {
+      return timeoutExtender?.();
+    },
+    timeoutSnapshot() {
+      return timeoutClock?.();
     },
     setStopAfterIteration(value: boolean) {
       stopAfterIteration = value;

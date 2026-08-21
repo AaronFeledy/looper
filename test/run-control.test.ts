@@ -212,4 +212,57 @@ describe("createRunControl", () => {
     expect(control.restartRequested).toBe(true);
     expect(control.restartReason).toBe("timeout");
   });
+
+  test("extendTimeout is a no-op until a live extender is bound", () => {
+    // Given a control with no live step timeout.
+    const control = createRunControl();
+
+    // When the operator asks to extend.
+    const result = control.extendTimeout();
+
+    // Then nothing is extended.
+    expect(result).toBeUndefined();
+  });
+
+  test("extendTimeout invokes the bound extender and forgets it after unbind", () => {
+    // Given a bound extender.
+    const control = createRunControl();
+    let remainingMs = 10;
+    control.bindTimeoutExtender(() => {
+      remainingMs *= 2;
+      return { remainingMs };
+    });
+
+    // When the operator extends twice, then the extender is unbound.
+    expect(control.extendTimeout()).toEqual({ remainingMs: 20 });
+    expect(control.extendTimeout()).toEqual({ remainingMs: 40 });
+    control.bindTimeoutExtender(undefined);
+
+    // Then later extends do nothing.
+    expect(control.extendTimeout()).toBeUndefined();
+    expect(remainingMs).toBe(40);
+  });
+
+  test("bindTimeoutExtender and extendTimeout do not fire onChange", () => {
+    let calls = 0;
+    const control = createRunControl({ onChange: () => {
+      calls += 1;
+    } });
+    control.bindTimeoutExtender(() => ({ remainingMs: 1 }));
+    expect(control.extendTimeout()).toEqual({ remainingMs: 1 });
+    control.bindTimeoutExtender(undefined);
+    expect(calls).toBe(0);
+  });
+
+  test("timeoutSnapshot follows the bound clock and clears on unbind", () => {
+    const control = createRunControl();
+    expect(control.timeoutSnapshot()).toBeUndefined();
+    control.bindTimeoutExtender(
+      () => ({ remainingMs: 1 }),
+      () => ({ remainingMs: 40, originalMs: 100 }),
+    );
+    expect(control.timeoutSnapshot()).toEqual({ remainingMs: 40, originalMs: 100 });
+    control.bindTimeoutExtender(undefined);
+    expect(control.timeoutSnapshot()).toBeUndefined();
+  });
 });
