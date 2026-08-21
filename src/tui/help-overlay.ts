@@ -9,7 +9,7 @@ export function helpLines(): string[] {
     "q       quit",
     "p       pause between steps",
     "s       skip active step",
-    "r       restart in fresh session",
+    "r       restart; t double timeout",
     "e       end after this iteration",
     "y/a/d/s answer permission ask",
     "d/s     reject/skip a question",

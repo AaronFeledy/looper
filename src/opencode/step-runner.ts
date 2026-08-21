@@ -133,6 +133,19 @@ export async function runOpenCodeStep({
   let sessionEventError: Error | undefined;
   let finalError: Error | undefined;
   timeoutController = createPausableTimeout({ durationMs: effectiveTimeoutMs, onElapsed: onTimeout });
+  ctx.control.bindTimeoutExtender(
+    () => {
+      const remainingMs = timeoutController.extend();
+      if (remainingMs === undefined) return undefined;
+      pushLine(`[looper] step timeout extended; ${Math.round(remainingMs / 1000)}s remaining`);
+      return { remainingMs };
+    },
+    () => {
+      const remainingMs = timeoutController.remainingMs();
+      if (remainingMs === undefined) return undefined;
+      return { remainingMs, originalMs: timeoutController.originalMs() };
+    },
+  );
 
   try {
     let sid = cancellation.activeSessionID;
@@ -245,6 +258,7 @@ export async function runOpenCodeStep({
   } finally {
     clearInterval(watcher);
     unsubscribeHumanGate?.();
+    ctx.control.bindTimeoutExtender(undefined);
     timeoutController?.dispose();
     subscription.ctrl?.abort();
     ctrl.abort();

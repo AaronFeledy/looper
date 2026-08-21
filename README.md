@@ -165,12 +165,14 @@ has no effect and should be removed.
 
 ### Prompt context
 
-Every prompt looper sends (fresh step, recovery nudge, restart, retry, background continuation) is
+Every prompt that opens a new session (fresh step, restart, retry) is
 prefixed with a small `<looper-context>` block giving the agent situational facts it would otherwise
 have to rediscover: current datetime, repo dir, loop position, this step's timebox, an uncached VCS
 delta, optional PRD progress, and the opencode session IDs of this iteration's already-finished steps (heading `Opencode
 sessions from earlier steps this iteration:`). The block is read-only context, never instructions, and
-never contains anything from a past iteration.
+never contains anything from a past iteration. Follow-up turns on an already-running session (recovery
+nudge, background continuation, orphaned-background nudge) are sent without that block — the original
+prompt is already in the session history.
 
 Control it with `context:`, at the top level of the config file and/or per-step, both optional and
 defaulting to everything on:
@@ -382,3 +384,7 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_PROMPT_VCS_TIMEOUT_MS` &mdash; timeout for prompt-context VCS lookup (default: `5000`)
 - `LOOPER_INHERITED_TITLE_DELAY_MS` &mdash; delay before applying an inherited title to later-step sessions (default: `5000`)
 - `LOOPER_TITLE_GEN_TIMEOUT_MS` &mdash; timeout for title generation sessions (default: `60000`)
+- `LOOPER_FAILURE_RETRY_BASE_MS` &mdash; first automatic failure-retry delay (default: `15000`; doubles each attempt)
+- `LOOPER_FAILURE_RETRY_MAX_DELAY_MS` &mdash; cap on that delay (default: `300000`)
+- `LOOPER_FAILURE_RETRY_MIN_REMAINING_MS` &mdash; stop retrying when remaining step timeout is at or below this (default: `5000`)
+- `LOOPER_FAILURE_RETRY_JITTER` &mdash; delay jitter ratio 0–1 (default: `0.2`; `0` disables)

@@ -60,10 +60,11 @@ export function createStepAttemptState(): StepAttemptState {
 
 export function decideAfterFailurePolicy(
   attempt: Readonly<StepAttemptState>,
-  input: { readonly stopRequested: boolean },
+  input: { readonly stopRequested: boolean; readonly remainingBudgetMs: number },
 ): FailureRetryDecision {
   return nextActionForFailure({
     failureRetryCount: attempt.failureRetryCount,
+    remainingBudgetMs: input.remainingBudgetMs,
     suppressFailureRetry: attempt.suppressFailureRetry,
     ...(attempt.suppressReason !== undefined ? { suppressReason: attempt.suppressReason } : {}),
     stopRequested: input.stopRequested,

@@ -58,7 +58,6 @@ describe("createHeader server badge", () => {
 
     const line = headerLine(captureCharFrame());
     expect(line).toContain("Looper · waiting to start");
-    expect(line).toContain("branch main");
     const trimmed = line.trimEnd();
     expect(trimmed.endsWith("● OpenCode v1.2.3")).toBe(true);
     // Badge is inset by exactly one terminal column: its last glyph lands one
@@ -100,7 +99,6 @@ describe("createHeader server badge", () => {
 
     const line = headerLine(captureCharFrame());
     expect(line).toContain("Looper · resume iteration 3/5");
-    expect(line).toContain("branch feat/x");
     expect(line).not.toContain("waiting to start");
     renderer.destroy();
   });

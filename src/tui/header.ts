@@ -20,15 +20,14 @@ function formatElapsed(startedAt: number): string {
 }
 
 function headerContent(state: LoopState): string {
-  const branch = state.branch || "detached";
   if (!state.started) {
     if (state.resumable && state.iteration > 0) {
-      return `Looper · resume iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}`;
+      return `Looper · resume iteration ${state.iteration}/${state.maxIterations}`;
     }
-    return `Looper · waiting to start  ·  branch ${branch}`;
+    return `Looper · waiting to start`;
   }
 
-  return `Looper · iteration ${state.iteration}/${state.maxIterations}  ·  branch ${branch}  ·  ${formatElapsed(
+  return `Looper · iteration ${state.iteration}/${state.maxIterations}  ·  ${formatElapsed(
     state.iterationStartedAt,
   )}`;
 }

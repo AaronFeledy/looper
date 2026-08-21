@@ -6,6 +6,9 @@ export interface TimeoutScheduler {
 
 export type PausableTimeout = {
   readonly setGateOpen: (open: boolean) => void;
+  readonly extend: () => number | undefined;
+  readonly remainingMs: () => number | undefined;
+  readonly originalMs: () => number;
   readonly dispose: () => void;
 };
 
@@ -30,17 +33,26 @@ export function createPausableTimeout(options: {
   readonly scheduler?: TimeoutScheduler;
 }): PausableTimeout {
   const scheduler = options.scheduler ?? systemScheduler;
-  let remainingMs = Math.max(0, options.durationMs);
+  const originalDurationMs = Math.max(0, options.durationMs);
+  let remainingMs = originalDurationMs;
   let armedAt = scheduler.now;
   let handle: object | undefined;
   let paused = false;
   let disposed = false;
+
+  const settle = (): void => {
+    if (paused || handle === undefined) return;
+    scheduler.clearTimeout(handle);
+    handle = undefined;
+    remainingMs = Math.max(0, remainingMs - (scheduler.now - armedAt));
+  };
 
   const arm = (): void => {
     if (disposed || paused || handle !== undefined) return;
     armedAt = scheduler.now;
     handle = scheduler.setTimeout(() => {
       handle = undefined;
+      remainingMs = 0;
       if (!disposed) options.onElapsed();
     }, Math.max(0, remainingMs));
   };
@@ -49,14 +61,28 @@ export function createPausableTimeout(options: {
   return {
     setGateOpen(open) {
       if (disposed || open === paused) return;
-      paused = open;
       if (open) {
-        if (handle !== undefined) scheduler.clearTimeout(handle);
-        handle = undefined;
-        remainingMs = Math.max(0, remainingMs - (scheduler.now - armedAt));
+        settle();
+        paused = true;
         return;
       }
+      paused = false;
       arm();
+    },
+    extend() {
+      if (disposed) return undefined;
+      settle();
+      remainingMs += originalDurationMs;
+      if (!paused) arm();
+      return remainingMs;
+    },
+    remainingMs() {
+      if (disposed) return undefined;
+      if (paused || handle === undefined) return remainingMs;
+      return Math.max(0, remainingMs - (scheduler.now - armedAt));
+    },
+    originalMs() {
+      return originalDurationMs;
     },
     dispose() {
       if (disposed) return;

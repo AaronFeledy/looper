@@ -522,18 +522,26 @@ describe("runIteration reattach policy propagation", () => {
     expect(state.steps[0]?.outputLines.some((line) => line.includes("reattaching (5/5)") && line.includes("assistant message still in-progress"))).toBe(true);
   }, 10000);
 
-  test("gives a fresh failure retry the full step timeout budget after the retry backoff", async () => {
+  test("keeps remaining step timeout on a same-session failure retry", async () => {
     // Given
     repoDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-repo-"));
     configDir = mkdtempSync(join(tmpdir(), "looper-iter-retry-budget-config-"));
     const activeRepoDir = repoDir;
     const promptPath = join(configDir, "prompt.txt");
     writeFileSync(promptPath, "retry safely\n");
-    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n    timeout: 1s\n`);
+    writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: ${promptPath}\n    timeout: 1h\n`);
     initStatePaths({ configDir });
+    const originalBase = process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+    const originalMax = process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+    const originalMin = process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+    const originalJitter = process.env.LOOPER_FAILURE_RETRY_JITTER;
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
     const createdSessionIDs: string[] = [];
     const promptedSessionIDs: string[] = [];
-    let firstMessageID = "";
+    let prompts = 0;
     let retryPromptAbortedEarly = false;
 
     const client = {
@@ -545,8 +553,8 @@ describe("runIteration reattach policy propagation", () => {
         },
         prompt: async (params: { sessionID: string; messageID: string }, options: { signal: AbortSignal }) => {
           promptedSessionIDs.push(params.sessionID);
-          if (params.sessionID === "ses_retry_1") {
-            firstMessageID = params.messageID;
+          prompts += 1;
+          if (prompts === 1) {
             throw new Error("first prompt failed before opencode finished");
           }
           await Bun.sleep(20);
@@ -559,8 +567,8 @@ describe("runIteration reattach policy propagation", () => {
           writeIdleContinuationRecord(activeRepoDir, params.sessionID);
           return { data: {} };
         },
-        status: async () => ({ data: { ses_retry_1: { type: "idle" }, ses_retry_2: { type: "idle" }, ses_retry_3: { type: "idle" } } }),
-        messages: async (params: { sessionID: string }) => ({ data: params.sessionID === "ses_retry_1" ? [assistantRetryableError(firstMessageID)] : [assistantDone("msg_retry_success")] }),
+        status: async () => ({ data: { ses_retry_1: { type: "idle" } } }),
+        messages: async () => ({ data: [] }),
         children: async () => ({ data: [] }),
         abort: async () => ({ data: {} }),
       },
@@ -571,14 +579,25 @@ describe("runIteration reattach policy propagation", () => {
 
     const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
 
-    // When
-    const result = await runIteration({ state, iteration: 1, client, repoDir, configDir });
+    try {
+      // When
+      const result = await runIteration({ state, iteration: 1, client, repoDir, configDir });
 
-    // Then
-    expect(result).toBe("complete");
-    expect(retryPromptAbortedEarly).toBe(false);
-    expect(createdSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
-    expect(promptedSessionIDs).toEqual(["ses_retry_1", "ses_retry_2"]);
+      // Then
+      expect(result).toBe("complete");
+      expect(retryPromptAbortedEarly).toBe(false);
+      expect(createdSessionIDs).toEqual(["ses_retry_1"]);
+      expect(promptedSessionIDs).toEqual(["ses_retry_1", "ses_retry_1"]);
+    } finally {
+      if (originalBase === undefined) delete process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+      else process.env.LOOPER_FAILURE_RETRY_BASE_MS = originalBase;
+      if (originalMax === undefined) delete process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = originalMax;
+      if (originalMin === undefined) delete process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = originalMin;
+      if (originalJitter === undefined) delete process.env.LOOPER_FAILURE_RETRY_JITTER;
+      else process.env.LOOPER_FAILURE_RETRY_JITTER = originalJitter;
+    }
   }, 10000);
 });
 

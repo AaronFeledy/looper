@@ -144,6 +144,31 @@ export function titleGenTimeoutMs(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
 }
 
+const FAILURE_RETRY_BASE_MS_DEFAULT = 15_000;
+const FAILURE_RETRY_MAX_DELAY_MS_DEFAULT = 300_000;
+const FAILURE_RETRY_MIN_REMAINING_MS_DEFAULT = 5_000;
+const FAILURE_RETRY_JITTER_DEFAULT = 0.2;
+
+export function failureRetryBaseMs(): number {
+  return positiveIntegerEnv("LOOPER_FAILURE_RETRY_BASE_MS", FAILURE_RETRY_BASE_MS_DEFAULT);
+}
+
+export function failureRetryMaxDelayMs(): number {
+  return positiveIntegerEnv("LOOPER_FAILURE_RETRY_MAX_DELAY_MS", FAILURE_RETRY_MAX_DELAY_MS_DEFAULT);
+}
+
+export function failureRetryMinRemainingMs(): number {
+  return nonNegativeIntegerEnv("LOOPER_FAILURE_RETRY_MIN_REMAINING_MS", FAILURE_RETRY_MIN_REMAINING_MS_DEFAULT);
+}
+
+export function failureRetryJitterRatio(): number {
+  const value = process.env["LOOPER_FAILURE_RETRY_JITTER"];
+  if (value === undefined || value.trim() === "") return FAILURE_RETRY_JITTER_DEFAULT;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return FAILURE_RETRY_JITTER_DEFAULT;
+  return Math.min(1, parsed);
+}
+
 export function configuredAttachValidationTimeoutMs(timeoutMs: number | undefined): number {
   if (timeoutMs !== undefined) return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
   const raw = process.env["LOOPER_ATTACH_VALIDATION_TIMEOUT_MS"];

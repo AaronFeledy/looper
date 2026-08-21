@@ -2,12 +2,12 @@ import { BoxRenderable, TextRenderable } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import { describe, expect, test } from "bun:test";
 
-import { createFooter } from "../src/tui/footer.ts";
+import { createFooter, footerBranchLabel, footerHelpHint, footerStatus } from "../src/tui/footer.ts";
 import { bindKeys, type KeyHooks } from "../src/tui/keys.ts";
 import { createHelpOverlay, helpLines } from "../src/tui/help-overlay.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
 
-type KeyEventLike = { name?: string; ctrl?: boolean; sequence?: string; raw?: string; preventDefault?: () => void };
+type KeyEventLike = { name?: string; ctrl?: boolean; sequence?: string; raw?: string; preventDefault?: () => void; stopPropagation?: () => void };
 
 function fakeRenderer(selectedText = ""): { renderer: never; press: (k: KeyEventLike) => void; copied: string[]; clearedCount: () => number } {
   const handlers: ((k: KeyEventLike) => void)[] = [];
@@ -84,11 +84,13 @@ describe("help overlay keys", () => {
     const state = makeState();
     const fake = fakeRenderer();
     let escapeCalls = 0;
+    let stopped = 0;
     bindKeys(fake.renderer, state, noopHooks({ onEscape: () => { escapeCalls += 1; } }));
     fake.press({ sequence: "?" });
-    fake.press({ name: "escape" });
+    fake.press({ name: "escape", stopPropagation: () => { stopped += 1; } });
     expect(state.helpVisible).toBe(false);
     expect(escapeCalls).toBe(0);
+    expect(stopped).toBe(1);
   });
 });
 
@@ -105,6 +107,22 @@ describe("prompt overlay keys", () => {
     expect(state.promptModalVisible).toBe(false);
   });
 
+
+  test("esc closes the prompt modal without arming the stop confirmation", () => {
+    const state = makeState();
+    const step = state.steps[0];
+    if (step) step.promptText = "hello prompt";
+    const fake = fakeRenderer();
+    let escapeCalls = 0;
+    let stopped = 0;
+    bindKeys(fake.renderer, state, noopHooks({ onEscape: () => { escapeCalls += 1; } }));
+    fake.press({ name: "v" });
+    expect(state.promptModalVisible).toBe(true);
+    fake.press({ name: "escape", stopPropagation: () => { stopped += 1; } });
+    expect(state.promptModalVisible).toBe(false);
+    expect(escapeCalls).toBe(0);
+    expect(stopped).toBe(1);
+  });
   test("help lines mention the prompt modal key", () => {
     expect(helpLines().some((line) => line.startsWith("v "))).toBe(true);
   });
@@ -121,6 +139,20 @@ describe("config overlay keys", () => {
     expect(state.configModalVisible).toBe(false);
   });
 
+
+  test("esc closes the config modal without arming the stop confirmation", () => {
+    const state = makeState();
+    const fake = fakeRenderer();
+    let escapeCalls = 0;
+    let stopped = 0;
+    bindKeys(fake.renderer, state, noopHooks({ onEscape: () => { escapeCalls += 1; } }));
+    fake.press({ name: "c" });
+    expect(state.configModalVisible).toBe(true);
+    fake.press({ name: "escape", stopPropagation: () => { stopped += 1; } });
+    expect(state.configModalVisible).toBe(false);
+    expect(escapeCalls).toBe(0);
+    expect(stopped).toBe(1);
+  });
   test("any key closes config without triggering its normal action", () => {
     const state = makeState();
     const fake = fakeRenderer();
@@ -213,7 +245,8 @@ describe("helpLines", () => {
   });
 
   test("renders every binding, complete borders, and the footer in the 40x24 application root", async () => {
-    const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 40, height: 24 });
+    // Wider than the dialog-only snapshot: footer is branch + status + [? keys].
+    const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 72, height: 24 });
     const state = makeState();
     state.helpVisible = true;
     const root = new BoxRenderable(renderer, {
@@ -243,3 +276,52 @@ describe("helpLines", () => {
     expect(frame).toContain("press any key to close help");
   });
 });
+
+describe("footerStatus", () => {
+  test("default footer has no key cheat sheet in the status slot", () => {
+    const state = makeState();
+    expect(footerStatus(state)).toBe("");
+    state.started = true;
+    expect(footerStatus(state)).toBe("");
+    expect(footerHelpHint()).toBe("[?] keys");
+    expect(footerStatus(state)).not.toContain("[q]uit");
+    expect(footerStatus(state)).not.toContain("[p]ause");
+  });
+
+  test("shows active run flags without the general binding list", () => {
+    const state = makeState();
+    state.started = true;
+    state.paused = true;
+    state.stopAfterIteration = true;
+    const text = footerStatus(state);
+    expect(text).toContain("paused");
+    expect(text).toContain("ending after iteration");
+    expect(text).not.toContain("[?] keys");
+    expect(text).not.toContain("[s]kip step");
+  });
+});
+
+describe("footer branch", () => {
+  test("renders Branch: on the left and [? keys] on the right", async () => {
+    const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 40, height: 3 });
+    const state = makeState();
+    state.branch = "feat/x";
+    renderer.root.add(createFooter(renderer, state));
+    await renderOnce();
+    const frame = captureCharFrame();
+    renderer.destroy();
+    expect(frame).toContain("Branch: feat/x");
+    expect(frame).toContain("[?] keys");
+    expect(footerBranchLabel(state)).toBe("Branch: feat/x");
+    const line = frame.split("\n").find((candidate) => candidate.includes("Branch:"));
+    expect(line).toBeDefined();
+    expect(line!.indexOf("Branch:")).toBeLessThan(line!.indexOf("[?] keys"));
+  });
+
+  test("falls back to detached when branch is empty", () => {
+    const state = makeState();
+    state.branch = "";
+    expect(footerBranchLabel(state)).toBe("Branch: detached");
+  });
+});
+

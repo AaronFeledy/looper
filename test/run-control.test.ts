@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createRunControl } from "../src/engine/run-control.ts";
+import { createRunControl, remainingStepBudgetMs } from "../src/engine/run-control.ts";
 
 describe("createRunControl", () => {
   test("initial values are all false with undefined restartReason", () => {
@@ -211,5 +211,91 @@ describe("createRunControl", () => {
     control.requestRestart("timeout");
     expect(control.restartRequested).toBe(true);
     expect(control.restartReason).toBe("timeout");
+  });
+
+  test("extendTimeout is a no-op until a live extender is bound", () => {
+    // Given a control with no live step timeout.
+    const control = createRunControl();
+
+    // When the operator asks to extend.
+    const result = control.extendTimeout();
+
+    // Then nothing is extended.
+    expect(result).toBeUndefined();
+  });
+
+  test("extendTimeout invokes the bound extender and forgets it after unbind", () => {
+    // Given a bound extender.
+    const control = createRunControl();
+    let remainingMs = 10;
+    control.bindTimeoutExtender(() => {
+      remainingMs *= 2;
+      return { remainingMs };
+    });
+
+    // When the operator extends twice, then the extender is unbound.
+    expect(control.extendTimeout()).toEqual({ remainingMs: 20 });
+    expect(control.extendTimeout()).toEqual({ remainingMs: 40 });
+    control.bindTimeoutExtender(undefined);
+
+    // Then later extends do nothing.
+    expect(control.extendTimeout()).toBeUndefined();
+    expect(remainingMs).toBe(40);
+  });
+
+  test("bindTimeoutExtender and extendTimeout do not fire onChange", () => {
+    let calls = 0;
+    const control = createRunControl({ onChange: () => {
+      calls += 1;
+    } });
+    control.bindTimeoutExtender(() => ({ remainingMs: 1 }));
+    expect(control.extendTimeout()).toEqual({ remainingMs: 1 });
+    control.bindTimeoutExtender(undefined);
+    expect(calls).toBe(0);
+  });
+
+  test("timeoutSnapshot follows the bound clock and clears on unbind", () => {
+    const control = createRunControl();
+    expect(control.timeoutSnapshot()).toBeUndefined();
+    control.bindTimeoutExtender(
+      () => ({ remainingMs: 1 }),
+      () => ({ remainingMs: 40, originalMs: 100 }),
+    );
+    expect(control.timeoutSnapshot()).toEqual({ remainingMs: 40, originalMs: 100 });
+    control.bindTimeoutExtender(undefined);
+    expect(control.timeoutSnapshot()).toBeUndefined();
+  });
+
+  test("extendTimeout adds the snapshot original duration to timeoutBonusMs", () => {
+    const control = createRunControl();
+    expect(control.timeoutBonusMs).toBe(0);
+    control.bindTimeoutExtender(
+      () => ({ remainingMs: 160 }),
+      () => ({ remainingMs: 60, originalMs: 100 }),
+    );
+    expect(control.extendTimeout()).toEqual({ remainingMs: 160 });
+    expect(control.timeoutBonusMs).toBe(100);
+    expect(control.extendTimeout()).toEqual({ remainingMs: 160 });
+    expect(control.timeoutBonusMs).toBe(200);
+    control.clearTimeoutBonus();
+    expect(control.timeoutBonusMs).toBe(0);
+  });
+
+  test("extendTimeout without a snapshot does not invent a timeout bonus", () => {
+    const control = createRunControl();
+    control.bindTimeoutExtender(() => ({ remainingMs: 1 }));
+    expect(control.extendTimeout()).toEqual({ remainingMs: 1 });
+    expect(control.timeoutBonusMs).toBe(0);
+  });
+});
+
+describe("remainingStepBudgetMs", () => {
+  test("includes operator timeout bonus in leftover budget", () => {
+    expect(remainingStepBudgetMs(100_000, 1_000, 0, 41_000)).toBe(60_000);
+    expect(remainingStepBudgetMs(100_000, 1_000, 100_000, 41_000)).toBe(160_000);
+  });
+
+  test("floors at zero when wall time has consumed the budget", () => {
+    expect(remainingStepBudgetMs(100_000, 1_000, 0, 200_000)).toBe(0);
   });
 });

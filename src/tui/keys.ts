@@ -42,6 +42,27 @@ function normalizeKeyName(event: KeyEvent): string {
   return (event.name ?? "").toLowerCase().replaceAll("_", "").replaceAll(" ", "");
 }
 
+function consumeKey(event: KeyEvent): void {
+  if (typeof event.preventDefault === "function") event.preventDefault();
+  if (typeof event.stopPropagation === "function") event.stopPropagation();
+}
+
+function dismissOverlay(state: LoopState, overlay: ReturnType<typeof modalFocusWinner>): boolean {
+  if (overlay === "help") {
+    hideHelp(state);
+    return true;
+  }
+  if (overlay === "prompt") {
+    hidePromptModal(state);
+    return true;
+  }
+  if (overlay === "config") {
+    hideConfigModal(state);
+    return true;
+  }
+  return false;
+}
+
 export function isInterruptKey(event: KeyEvent): boolean {
   const keyName = normalizeKeyName(event);
   return (event.ctrl && (keyName === "c" || keyName === "ctrlc")) || event.sequence === "\u0003" || event.raw === "\u0003";
@@ -106,8 +127,14 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     const keyName = normalizeKeyName(event);
     const isEscape = keyName === "escape" || keyName === "esc";
 
-    // Interrupt and escape stay reachable above every modal layer.
+    // Overlay dialogs consume interrupt the same way they consume escape: they
+    // close, and neither copy-selection nor the run interrupt sees the key.
+    // Permission/recovery still keep interrupt reachable above those layers.
     if (isInterruptKey(event)) {
+      if (dismissOverlay(state, modalFocusWinner(state))) {
+        consumeKey(event);
+        return;
+      }
       if (state.escConfirm !== null) dismissEscConfirm(state);
       const selectedText = renderer.getSelection()?.getSelectedText() ?? "";
       if (selectedText.length > 0) {
@@ -116,17 +143,19 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       } else {
         hooks.onInterrupt();
       }
-      if (typeof event.preventDefault === "function") {
-        event.preventDefault();
-      }
+      consumeKey(event);
       return;
     }
 
     if (isEscape) {
-      hooks.onEscape();
-      if (typeof event.preventDefault === "function") {
-        event.preventDefault();
+      // Overlay dialogs consume esc entirely: they close, and neither the two-press
+      // stop/reset confirm nor later OpenTUI renderable handlers see the key.
+      if (dismissOverlay(state, modalFocusWinner(state))) {
+        consumeKey(event);
+        return;
       }
+      hooks.onEscape();
+      consumeKey(event);
       return;
     }
 
@@ -149,18 +178,7 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     }
 
     // Help / prompt / config overlays are modal: while they own focus, the next keypress only closes them.
-    if (winner === "help") {
-      hideHelp(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-    if (winner === "prompt") {
-      hidePromptModal(state);
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      return;
-    }
-    if (winner === "config") {
-      hideConfigModal(state);
+    if (dismissOverlay(state, winner)) {
       if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }
@@ -230,6 +248,10 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
                 ? hooks.onRestart
                 : keyName === "s"
                   ? hooks.onSkip
+                  : keyName === "t"
+                    ? () => {
+                        state.control.extendTimeout();
+                      }
                   : keyName === "tab"
                     ? () => {
                         toggleFocusedPane(state);

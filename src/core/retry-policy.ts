@@ -1,10 +1,8 @@
+import { failureRetryBaseMs, failureRetryMaxDelayMs, failureRetryMinRemainingMs } from "../config/tunables.ts";
+
 export const MAX_BACKGROUND_RESUMES_PER_STEP = 10;
-export const MAX_FAILURE_RETRIES_PER_STEP = 2;
 export const MAX_REATTACH_PER_STEP = 5;
 export const MAX_ORPHANED_BACKGROUND_NUDGES_PER_STEP = 1;
-
-const FAILURE_RETRY_BASE_DELAY_MS = 2_000;
-const FAILURE_RETRY_MAX_DELAY_MS = 30_000;
 
 export type FailureRetryDecision =
   | { readonly kind: "retry"; readonly attempt: number; readonly delayMs: number }
@@ -12,6 +10,7 @@ export type FailureRetryDecision =
 
 export type FailureRetryInput = {
   readonly failureRetryCount: number;
+  readonly remainingBudgetMs: number;
   readonly suppressFailureRetry: boolean;
   readonly suppressReason?: string;
   readonly stopRequested: boolean;
@@ -26,16 +25,25 @@ export type OrphanedBackgroundNudgeDecision =
   | { readonly kind: "fail"; readonly reason: string };
 
 export function failureRetryDelayMs(attempt: number): number {
-  const exp = FAILURE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1);
-  return Math.min(exp, FAILURE_RETRY_MAX_DELAY_MS);
+  const exp = failureRetryBaseMs() * 2 ** (attempt - 1);
+  return Math.min(exp, failureRetryMaxDelayMs());
+}
+
+export function applyFailureRetryJitter(delayMs: number, unit: number, ratio: number): number {
+  if (ratio <= 0) return delayMs;
+  const bounded = Math.min(1, Math.max(-1, unit));
+  return Math.max(0, Math.round(delayMs * (1 + bounded * ratio)));
 }
 
 export function nextActionForFailure(input: FailureRetryInput): FailureRetryDecision {
   if (input.suppressFailureRetry) return { kind: "fail", reason: `retry suppressed (${input.suppressReason ?? "background-wait outcome"})` };
-  if (input.failureRetryCount >= MAX_FAILURE_RETRIES_PER_STEP) return { kind: "fail", reason: `retry limit reached (${MAX_FAILURE_RETRIES_PER_STEP})` };
   if (input.stopRequested) return { kind: "fail", reason: "stop requested" };
+  const minRemainingMs = failureRetryMinRemainingMs();
+  if (input.remainingBudgetMs <= minRemainingMs) return { kind: "fail", reason: "retry budget exhausted" };
   const attempt = input.failureRetryCount + 1;
-  return { kind: "retry", attempt, delayMs: failureRetryDelayMs(attempt) };
+  const scheduledMs = failureRetryDelayMs(attempt);
+  const delayMs = Math.min(scheduledMs, Math.max(0, input.remainingBudgetMs - minRemainingMs));
+  return { kind: "retry", attempt, delayMs };
 }
 
 export function nextActionForBackgroundResume(resumeCount: number): BackgroundResumeDecision {

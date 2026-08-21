@@ -1,10 +1,16 @@
 import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
-import { focusPaneTabLabel, nextFocusedPane, selectedOrActiveStep, subscribe } from "../lib/state.ts";
+import { focusPaneTabLabel, nextFocusedPane, subscribe } from "../lib/state.ts";
 import { modalFocusWinner } from "./permission-gate.ts";
+import { isPauseEngaged } from "./step-list.ts";
+import { timeoutExtendHintText } from "./timeout-hint.ts";
 
-function footerContent(state: LoopState): string {
+/**
+ * Middle-row contextual status (flags, gates, overlays). General key hints live in
+ * the `?` help overlay; the right-side footer only points at that overlay.
+ */
+export function footerStatus(state: LoopState): string {
   if (state.escConfirm === "reset") {
     return `Press [esc] again to reset to a fresh run  ·  any other key cancels`;
   }
@@ -41,35 +47,41 @@ function footerContent(state: LoopState): string {
   if (state.configModalVisible) {
     return `press any key to close config`;
   }
-  if (!state.started) {
-    const reset = state.resumable ? "  [esc] reset" : "";
-    return `[q]uit  [g]o/start  [e]nd after iteration  [h]istory${reset}  Up/Down: select step  [?] keys`;
-  }
 
-  const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
-  const focusHint =
-    state.focusedPane === "steps"
-      ? `Tab: ${tabTarget}  Up/Down: select`
-      : state.focusedPane === "github"
-        ? `Tab: ${tabTarget}  Enter: open PR`
-        : `Tab: ${tabTarget}  Up/Down/PageUp/PageDown/Home/End: scroll`;
-
-  const pause = state.paused ? "[p]aused before next step — press p to resume" : "[p]ause after step";
-  const end = state.stopAfterIteration ? "ending after iteration" : "[e]nd after iteration";
-  const restart = state.restartRequested ? "restarting step" : "[r]estart step";
-  const skip = state.skipRequested ? "skipping step" : "[s]kip step";
-  const history = state.history.length > 0 ? "  [h]istory" : "";
-  const prompt = selectedOrActiveStep(state)?.promptText ? "  [v]iew prompt" : "";
-  return `[q]uit  ${pause}  ${skip}  ${restart}  ${end}  [esc] stop${history}${prompt}  ${focusHint}  [?] keys`;
+  const flags: string[] = [];
+  if (isPauseEngaged(state)) flags.push("paused — press p to resume");
+  if (state.stopAfterIteration) flags.push("ending after iteration");
+  if (state.restartRequested) flags.push("restarting step");
+  if (state.skipRequested) flags.push("skipping step");
+  const timeoutHint = timeoutExtendHintText(state.control.timeoutSnapshot());
+  if (timeoutHint !== undefined) flags.push(timeoutHint);
+  return flags.join("  ·  ");
 }
 
-function footerColor(state: LoopState): string {
+export function footerStatusDivider(state: LoopState): string {
+  return footerStatus(state).length > 0 ? "·" : "";
+}
+
+export function footerBranchLabel(state: LoopState): string {
+  return `Branch: ${state.branch || "detached"}`;
+}
+
+export function footerHelpHint(): string {
+  return "[?] keys";
+}
+
+export function footerColor(state: LoopState): string {
   if (state.escConfirm !== null) return "#f38ba8";
   if (state.recovery !== null) return "#f38ba8";
   if (state.pendingRequests.length > 0) return "#f9e2af";
   if (state.historyView !== null) return "#cba6f7";
-  return state.paused || state.stopAfterIteration || state.skipRequested || state.restartRequested ? "#f9e2af" : "#6c7086";
+  const actionable = isPauseEngaged(state) || state.stopAfterIteration || state.skipRequested || state.restartRequested
+    || timeoutExtendHintText(state.control.timeoutSnapshot()) !== undefined;
+  return actionable ? "#f9e2af" : "#6c7086";
 }
+
+const BRANCH_COLOR = "#a6adc8";
+const HELP_COLOR = "#6c7086";
 
 export function createFooter(renderer: CliRenderer, state: LoopState): BoxRenderable {
   const footer = new BoxRenderable(renderer, {
@@ -79,24 +91,68 @@ export function createFooter(renderer: CliRenderer, state: LoopState): BoxRender
     flexDirection: "row",
   });
 
-  const text = new TextRenderable(renderer, {
-    id: "loop-footer-text",
-    width: "100%",
+  const branch = new TextRenderable(renderer, {
+    id: "loop-footer-branch",
+    flexShrink: 0,
     height: 1,
-    content: footerContent(state),
+    content: footerBranchLabel(state),
+    fg: BRANCH_COLOR,
+    truncate: true,
+  });
+
+  const divider = new TextRenderable(renderer, {
+    id: "loop-footer-divider",
+    flexShrink: 0,
+    height: 1,
+    marginLeft: 1,
+    content: footerStatusDivider(state),
+    fg: HELP_COLOR,
+    visible: footerStatusDivider(state).length > 0,
+  });
+
+  const status = new TextRenderable(renderer, {
+    id: "loop-footer-text",
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 0,
+    height: 1,
+    marginLeft: 1,
+    content: footerStatus(state),
     fg: footerColor(state),
     truncate: true,
   });
 
-  footer.add(text);
-
-  const unsubscribe = subscribe(() => {
-    text.content = footerContent(state);
-    text.fg = footerColor(state);
-    renderer.requestRender();
+  const help = new TextRenderable(renderer, {
+    id: "loop-footer-help",
+    flexShrink: 0,
+    height: 1,
+    marginLeft: 1,
+    content: footerHelpHint(),
+    fg: HELP_COLOR,
+    truncate: true,
   });
 
+  footer.add(branch);
+  footer.add(divider);
+  footer.add(status);
+  footer.add(help);
+
+  const paint = () => {
+    const dividerText = footerStatusDivider(state);
+    branch.content = footerBranchLabel(state);
+    divider.content = dividerText;
+    divider.visible = dividerText.length > 0;
+    status.content = footerStatus(state);
+    status.fg = footerColor(state);
+    help.content = footerHelpHint();
+    renderer.requestRender();
+  };
+
+  const unsubscribe = subscribe(paint);
+  const timer = setInterval(paint, 1_000);
+
   footer.on(RenderableEvents.DESTROYED, () => {
+    clearInterval(timer);
     unsubscribe();
   });
 
