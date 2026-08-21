@@ -18,6 +18,7 @@ import {
 } from "../lib/state.ts";
 import { agentRowLabel, continuationIndicatorText, isIdleBackgroundAgent } from "../presentation/tui/agent-rows.ts";
 import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
+import { displayWidth, truncateDisplay } from "./text-layout.ts";
 
 const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const LIST_WIDTH = 28;
@@ -112,58 +113,6 @@ export function formatRow(label: string, right: string, max: number = ROW_WIDTH)
   const truncatedLabel = truncateDisplay(label, labelMax);
   const padded = `${truncatedLabel}${" ".repeat(Math.max(0, labelMax - displayWidth(truncatedLabel)))}`;
   return truncateDisplay(`${padded} ${right}`, max);
-}
-
-function truncateDisplay(value: string, maxWidth: number): string {
-  if (maxWidth <= 0) return "";
-  if (displayWidth(value) <= maxWidth) return value;
-  const ellipsisWidth = displayWidth("…");
-  const targetWidth = Math.max(0, maxWidth - ellipsisWidth);
-  let result = "";
-  let width = 0;
-  for (const char of value) {
-    const charWidth = charDisplayWidth(char);
-    if (width + charWidth > targetWidth) break;
-    result += char;
-    width += charWidth;
-  }
-  return `${result}…`;
-}
-
-function displayWidth(value: string): number {
-  let width = 0;
-  for (const char of value) width += charDisplayWidth(char);
-  return width;
-}
-
-function charDisplayWidth(char: string): number {
-  const codePoint = char.codePointAt(0);
-  if (codePoint === undefined) return 0;
-  if (codePoint === 0) return 0;
-  if (codePoint < 32 || (codePoint >= 0x7f && codePoint < 0xa0)) return 0;
-  if (codePoint === 0x200d) return 0; // zero-width joiner (emoji sequences)
-  if (codePoint >= 0xfe00 && codePoint <= 0xfe0f) return 0; // variation selectors
-  if (codePoint >= 0x300 && codePoint <= 0x36f) return 0;
-  if (codePoint >= 0x1ab0 && codePoint <= 0x1aff) return 0;
-  if (codePoint >= 0x1dc0 && codePoint <= 0x1dff) return 0;
-  if (codePoint >= 0x20d0 && codePoint <= 0x20ff) return 0;
-  if (codePoint >= 0xfe20 && codePoint <= 0xfe2f) return 0;
-  if (
-    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
-    codePoint === 0x2329 ||
-    codePoint === 0x232a ||
-    (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f) ||
-    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
-    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
-    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
-    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
-    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
-    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
-    (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
-    (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
-    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
-  ) return 2;
-  return 1;
 }
 
 const COLOR_STEP_DONE = "#a6e3a1";
