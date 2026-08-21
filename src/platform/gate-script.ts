@@ -41,11 +41,13 @@ function signalProcessGroup(pid: number, signal: "SIGTERM" | "SIGKILL"): void {
 
 export async function runGateScript(script: string, options: GateScriptOptions): Promise<GateScriptResult> {
   const timeoutMs = options.timeoutMs ?? gateScriptTimeoutMs();
+  const startedAt = Date.now();
   let subprocess: ReturnType<typeof Bun.spawn>;
   try {
     subprocess = Bun.spawn(["bash", "-c", script], {
       cwd: options.repoDir,
       detached: true,
+      timeout: timeoutMs,
       env: {
         ...process.env,
         LOOPER_BRANCH: options.branch ?? "",
@@ -67,14 +69,29 @@ export async function runGateScript(script: string, options: GateScriptOptions):
 
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const outcome = await Promise.race([
-    subprocess.exited.then((exitCode) => ({ kind: "exited", exitCode }) as const),
+    subprocess.exited.then((exitCode) => ({ kind: "exited" as const, exitCode })),
     new Promise<{ readonly kind: "timeout" }>((resolve) => {
       timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
     }),
   ]);
   if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 
-  if (outcome.kind === "exited") return { ran: true, exitCode: outcome.exitCode };
+  const groupStillAlive = (): boolean => {
+    try {
+      return processGroupExists(subprocess.pid);
+    } catch {
+      return false;
+    }
+  };
+
+  const treatAsTimeout =
+    outcome.kind === "timeout" ||
+    Date.now() >= startedAt + timeoutMs ||
+    (outcome.kind === "exited" && groupStillAlive());
+
+  if (!treatAsTimeout && outcome.kind === "exited") {
+    return { ran: true, exitCode: outcome.exitCode };
+  }
 
   signalProcessGroup(subprocess.pid, "SIGTERM");
   await Bun.sleep(TERMINATION_GRACE_MS);
