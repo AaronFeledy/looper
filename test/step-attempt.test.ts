@@ -6,7 +6,7 @@ import {
   decideAfterPriorEvaluation,
   decideAfterPriorHealth,
 } from "../src/core/step-attempt.ts";
-import { MAX_FAILURE_RETRIES_PER_STEP, MAX_REATTACH_PER_STEP } from "../src/core/retry-policy.ts";
+import { MAX_REATTACH_PER_STEP } from "../src/core/retry-policy.ts";
 
 describe("step-attempt staged decisions", () => {
   test("decideAfterFailurePolicy fails when retries are suppressed or exhausted", () => {
@@ -14,19 +14,24 @@ describe("step-attempt staged decisions", () => {
       {
         name: "suppressed",
         configure: () => ({ ...createStepAttemptState(), suppressFailureRetry: true, suppressReason: "unsafe retry" }),
+        remainingBudgetMs: 3_600_000,
         expected: { kind: "fail", reason: "retry suppressed (unsafe retry)" },
       },
       {
-        name: "retry cap",
-        configure: () => ({ ...createStepAttemptState(), failureRetryCount: MAX_FAILURE_RETRIES_PER_STEP }),
-        expected: { kind: "fail", reason: `retry limit reached (${MAX_FAILURE_RETRIES_PER_STEP})` },
+        name: "budget exhausted",
+        configure: () => createStepAttemptState(),
+        remainingBudgetMs: 0,
+        expected: { kind: "fail", reason: "retry budget exhausted" },
       },
     ] as const;
 
     for (const item of cases) {
       const attempt = item.configure();
 
-      const decision = decideAfterFailurePolicy(attempt, { stopRequested: false });
+      const decision = decideAfterFailurePolicy(attempt, {
+        stopRequested: false,
+        remainingBudgetMs: item.remainingBudgetMs,
+      });
 
       expect(decision, item.name).toEqual(item.expected);
     }
