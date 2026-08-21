@@ -42,6 +42,11 @@ function normalizeKeyName(event: KeyEvent): string {
   return (event.name ?? "").toLowerCase().replaceAll("_", "").replaceAll(" ", "");
 }
 
+function consumeKey(event: KeyEvent): void {
+  if (typeof event.preventDefault === "function") event.preventDefault();
+  if (typeof event.stopPropagation === "function") event.stopPropagation();
+}
+
 export function isInterruptKey(event: KeyEvent): boolean {
   const keyName = normalizeKeyName(event);
   return (event.ctrl && (keyName === "c" || keyName === "ctrlc")) || event.sequence === "\u0003" || event.raw === "\u0003";
@@ -123,10 +128,26 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     }
 
     if (isEscape) {
-      hooks.onEscape();
-      if (typeof event.preventDefault === "function") {
-        event.preventDefault();
+      // Overlay dialogs consume esc entirely: they close, and neither the two-press
+      // stop/reset confirm nor later OpenTUI renderable handlers see the key.
+      const overlay = modalFocusWinner(state);
+      if (overlay === "help") {
+        hideHelp(state);
+        consumeKey(event);
+        return;
       }
+      if (overlay === "prompt") {
+        hidePromptModal(state);
+        consumeKey(event);
+        return;
+      }
+      if (overlay === "config") {
+        hideConfigModal(state);
+        consumeKey(event);
+        return;
+      }
+      hooks.onEscape();
+      consumeKey(event);
       return;
     }
 
@@ -230,6 +251,10 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
                 ? hooks.onRestart
                 : keyName === "s"
                   ? hooks.onSkip
+                  : keyName === "t"
+                    ? () => {
+                        state.control.extendTimeout();
+                      }
                   : keyName === "tab"
                     ? () => {
                         toggleFocusedPane(state);
