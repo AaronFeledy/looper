@@ -5,7 +5,7 @@ This file is for non-obvious repo context only. Keep it short and current.
 ## Stack
 
 - Bun + TypeScript, no bundler. `tsc -b` typecheck only, `noEmit: true`.
-- Runtime deps: `@opentui/core`, `@opencode-ai/sdk`, `yaml`. No other production deps; do not add them lightly.
+- Runtime deps: `@opentui/core`, `@opencode-ai/sdk`. Config YAML is Bun.YAML.parse. No other production deps; do not add them lightly.
 
 ## Commands
 

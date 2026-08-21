@@ -14,8 +14,7 @@
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.10",
-    "@opentui/core": "0.2.13",
-    "yaml": "2.9.0"
+    "@opentui/core": "0.2.13"
   },
   "devDependencies": {
     "@types/bun": "^1.4.0"

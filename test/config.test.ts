@@ -49,6 +49,12 @@ describe("loadSteps config parsing", () => {
     });
   });
 
+  test("keeps the last timeout when the same key is repeated", () => {
+    withConfigDir("timeout: 10m\ntimeout: 30m\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(loadSteps(dir)[0]!.timeoutMs).toBe(30 * 60 * 1000);
+    });
+  });
+
   test("applies per-step permissionPolicy and questionPolicy overrides", () => {
     withConfigDir(
       [
