@@ -347,6 +347,7 @@ A step ends the loop by writing `.looper-stop` in the config directory (with a r
 ```bash
 bun install
 bun run typecheck
+bun run test:unit        # parallel unit suite (excludes e2e)
 bun test                  # runs everything (~50s end-to-end)
 ```
 

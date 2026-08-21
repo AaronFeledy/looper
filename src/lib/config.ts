@@ -1,6 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import YAML from "yaml";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
 import { STORY_PHASE_ORDER, isValidPhase, type StoryPhase } from "./story-state-files.ts";
@@ -448,6 +447,8 @@ export function readConfigFileSource(configDir: string): ConfigFileSource | unde
   return undefined;
 }
 
+// Bun.YAML last-wins on duplicate keys (npm yaml threw). Looper configs do not use duplicate keys.
+// Unquoted dates remain strings for our fixtures (do not assume Date).
 function loadRawConfig(configDir: string): RawConfig {
   const configFile = readConfigFileSource(configDir);
   if (configFile === undefined) {
@@ -456,7 +457,7 @@ function loadRawConfig(configDir: string): RawConfig {
 
   let parsed: unknown;
   try {
-    parsed = YAML.parse(configFile.content);
+    parsed = Bun.YAML.parse(configFile.content);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`${configFile.path} is not valid YAML: ${detail}`);

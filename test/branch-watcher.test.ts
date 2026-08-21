@@ -163,6 +163,26 @@ describe("watchBranch", () => {
     }
   });
 
+  test("detects git checkout via fs.watch without waiting for poll", async () => {
+    const observed: string[] = [];
+    const watcher = await watchBranch({
+      repoDir: dir,
+      pollIntervalMs: 60_000,
+      onChange: (branch) => observed.push(branch),
+    });
+    expect(watcher).not.toBeNull();
+
+    try {
+      await $`git checkout -q -b feature`.cwd(dir).quiet();
+      await waitForBranch(observed, (b) => b.at(-1) === "feature", 2000);
+
+      await $`git checkout -q main`.cwd(dir).quiet();
+      await waitForBranch(observed, (b) => b.at(-1) === "main", 2000);
+    } finally {
+      watcher!.stop();
+    }
+  });
+
   test("refresh() picks up changes immediately without waiting for the poll", async () => {
     const observed: string[] = [];
     // Use a long poll interval so any detection within the test window must

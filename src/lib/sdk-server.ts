@@ -3,6 +3,7 @@ import { spawn, type Subprocess } from "bun";
 export type ServerHandle = {
   url: string;
   close: () => Promise<void>;
+  [Symbol.asyncDispose]: () => Promise<void>;
 };
 
 const LISTENING_RE = /opencode server listening on\s+(https?:\/\/\S+)/i;
@@ -154,18 +155,26 @@ export async function startOrAttachServer(options: {
 }): Promise<ServerHandle> {
   if (options.signal?.aborted) throw abortReason(options.signal);
   if (options.attachUrl !== undefined) {
-    return {
+    const handle: ServerHandle = {
       url: options.attachUrl,
       async close() {},
+      async [Symbol.asyncDispose]() {
+        await this.close();
+      },
     };
+    return handle;
   }
 
   const { url, proc } = await spawnOpencodeServer(options.opencodeBin, options.signal);
 
-  return {
+  const handle: ServerHandle = {
     url,
     async close() {
       await terminateProcess(proc, "shutdown");
     },
+    async [Symbol.asyncDispose]() {
+      await this.close();
+    },
   };
+  return handle;
 }

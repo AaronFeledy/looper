@@ -29,6 +29,7 @@ import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/reco
 import { lookupServerVersion } from "./lib/server-version.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
+import { installMemoryPressureTrimmer } from "./lib/memory-pressure.ts";
 import {
   applyResumableBootUi,
   cancelPendingNotify,
@@ -417,6 +418,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   process.on("SIGINT", handleSigint);
   process.on("SIGTERM", handleSigterm);
 
+  const detachMemoryPressure = installMemoryPressureTrimmer(() => state);
   try {
     renderer = await createCliRenderer({
       exitOnCtrlC: false,
@@ -817,6 +819,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     if (bootAbort.signal.aborted) return finish(130, exitReason ?? "looper startup interrupted");
     throw error;
   } finally {
+    detachMemoryPressure();
     cleanupBootInterrupt?.();
     cleanupKeys?.();
     cleanupBell?.();

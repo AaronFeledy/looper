@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import YAML from "yaml";
 
 import {
   applyManagedOpencodeResources,
@@ -62,7 +61,7 @@ describe("opencode managed resources", () => {
     const content = TITLE_AGENT_RESOURCE.desiredContent();
     const match = /^---\n([\s\S]*?)\n---/.exec(content);
     expect(match).not.toBeNull();
-    const frontmatter = YAML.parse(match![1]!) as {
+    const frontmatter = Bun.YAML.parse(match![1]!) as {
       mode?: string;
       tools?: Record<string, unknown>;
       permission?: Record<string, unknown>;

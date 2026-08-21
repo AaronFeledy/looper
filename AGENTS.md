@@ -5,13 +5,14 @@ This file is for non-obvious repo context only. Keep it short and current.
 ## Stack
 
 - Bun + TypeScript, no bundler. `tsc -b` typecheck only, `noEmit: true`.
-- Runtime deps: `@opentui/core`, `@opencode-ai/sdk`, `yaml`. No other production deps; do not add them lightly.
+- Runtime deps: `@opentui/core`, `@opencode-ai/sdk`. Config YAML is Bun.YAML.parse. No other production deps; do not add them lightly.
 
 ## Commands
 
 - `bun install`
 - `bun run typecheck`
-- `bun test` &mdash; includes a real-network e2e against opencode + gpt-5.5; self-skips when `opencode` is not on `PATH`. ~50 seconds, ~zero cost.
+- `bun run test:unit` — parallel unit suite; excludes `test/e2e.test.ts`
+- `bun test` — full suite including the real-network e2e against opencode + gpt-5.5; self-skips when `opencode` is not on `PATH`. ~50 seconds, ~zero cost.
 
 ## Architecture
 
@@ -63,4 +64,6 @@ This file is for non-obvious repo context only. Keep it short and current.
 - `src/opencode/event-stream.ts`'s event watchdog is tunable via `LOOPER_EVENT_WATCHDOG_POLL_MS` (default 15s), `LOOPER_EVENT_STALL_MS` (default 45s; how long no events may pass before it probes `session.status`), and `LOOPER_EVENT_RESUBSCRIBE_BACKOFF_MS` (default 1s floor between reconnects). A stream that ends cleanly triggers an immediate probe regardless of the stall window. `createSessionEventConsumer` keeps print/dedup state across reconnects so resubscribe + `backfill()` never double-prints.
 - The e2e test uses `agent: build` + `model: openai/gpt-5.5` + `variant: low`. Reasoning-only models (e.g. claude-haiku-4-5) reject the build agent's adaptive-thinking variant with a 400 &mdash; if you change the model, also align the agent/variant.
 - Test scratch dirs land under `test/.tmp/` and are auto-cleaned unless `LOOPER_E2E_KEEP=1`.
+- Duplicate YAML keys: `Bun.YAML.parse` last-wins (npm `yaml` threw). Looper configs must not rely on duplicate-key errors.
+- `displayWidth` is `Bun.stringWidth` (ANSI-aware, ZWJ grapheme). Do not reintroduce the East-Asian lookup table.
 - `test/architecture-guards.test.ts` is the executable boundary enforcement for "`src/opencode/*` must not depend on `LoopState`": an unexpected import of `lib/state.ts` (or a control-flag read) from `src/opencode`/`src/engine` fails that test, not just code review.

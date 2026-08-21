@@ -1,5 +1,5 @@
 import { $ } from "bun";
-import { readFileSync } from "node:fs";
+import { readFileSync, watch, type FSWatcher } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 const HEAD_REF_PREFIX = "ref: refs/heads/";
@@ -71,10 +71,10 @@ export type BranchWatcher = {
 };
 
 /**
- * Poll HEAD every `pollIntervalMs` and invoke `onChange` whenever the branch
- * changes. Polling is used instead of `fs.watch` because Bun's inotify
- * integration silently drops the rename events that `git checkout` emits —
- * direct writes to HEAD fire events, but real-world checkouts do not.
+ * Watch HEAD via `fs.watch` and invoke `onChange` whenever the branch changes.
+ * The file watch is primary; the 5s poll and the 60s safety timer in setup
+ * remain because a replaced inode can drop the file watch until re-arm, and
+ * checkout must never be missed.
  *
  * - `onChange` is called with the initial value (if any) before this function
  *   returns, so the caller can seed its UI without a separate read.
@@ -97,6 +97,8 @@ export async function watchBranch(opts: {
 
   let lastBranch = initial;
   let stopped = false;
+  let watcher: FSWatcher | undefined;
+  let arming = false;
 
   const refresh = (): void => {
     if (stopped) return;
@@ -106,10 +108,39 @@ export async function watchBranch(opts: {
     opts.onChange(next);
   };
 
+  const armWatch = (): void => {
+    if (stopped || arming) return;
+    arming = true;
+    try {
+      try {
+        watcher?.close();
+      } catch {
+        // no-excuse-ok: catch — closing a dead watcher must not block re-arm
+      }
+      watcher = watch(headPath, (eventType) => {
+        refresh();
+        if (eventType === "rename") armWatch();
+      });
+      watcher.on("error", () => {
+        try {
+          armWatch();
+        } catch {
+          // no-excuse-ok: catch — poll remains
+        }
+      });
+      watcher.unref?.();
+    } catch {
+      // no-excuse-ok: catch — fail-open; poll remains
+    } finally {
+      arming = false;
+    }
+  };
+
   const interval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timer = setInterval(refresh, interval);
   // Don't keep the event loop alive just for this background poller.
   timer.unref?.();
+  armWatch();
 
   return {
     initial,
@@ -118,6 +149,12 @@ export async function watchBranch(opts: {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      try {
+        watcher?.close();
+      } catch {
+        // no-excuse-ok: catch — teardown must not throw
+      }
+      watcher = undefined;
     },
   };
 }
