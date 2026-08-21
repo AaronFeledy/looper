@@ -384,7 +384,7 @@ test("session error events fail the current step", async () => {
   expect(state.steps[0]?.status).toBe("failed");
 });
 
-test("runIteration retries session errors twice before surfacing terminal failure", async () => {
+test("runIteration retries session errors on the existing session until the step budget is gone", async () => {
 
   const retryDir = join(SCRATCH, "session-error-retries");
   const configDir = join(retryDir, ".local", "looper");
@@ -401,9 +401,19 @@ test("runIteration retries session errors twice before surfacing terminal failur
       "    model: openai/gpt-5.5",
       "    variant: low",
       "    prompt: prompt.md",
+      "    timeout: 1s",
       "",
     ].join("\n"),
   );
+
+  const originalBase = process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+  const originalMax = process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+  const originalMin = process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+  const originalJitter = process.env.LOOPER_FAILURE_RETRY_JITTER;
+  process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+  process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+  process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+  process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
 
   let promptCount = 0;
   async function* stream() {
@@ -442,17 +452,23 @@ test("runIteration retries session errors twice before surfacing terminal failur
     });
   } catch (error) {
     failed = error;
+  } finally {
+    if (originalBase === undefined) delete process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+    else process.env.LOOPER_FAILURE_RETRY_BASE_MS = originalBase;
+    if (originalMax === undefined) delete process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+    else process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = originalMax;
+    if (originalMin === undefined) delete process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+    else process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = originalMin;
+    if (originalJitter === undefined) delete process.env.LOOPER_FAILURE_RETRY_JITTER;
+    else process.env.LOOPER_FAILURE_RETRY_JITTER = originalJitter;
   }
   expect(failed).toBeInstanceOf(StepFailureError);
 
-  expect(promptCount).toBe(3);
-  expect(state.steps.map((step) => step.status)).toEqual(["failed", "failed", "failed"]);
+  expect(promptCount).toBeGreaterThan(1);
+  expect(state.steps.map((step) => step.status)).toEqual(["failed"]);
   const outputLines = state.steps.flatMap((step) => step.outputLines);
-  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 1/2)"))).toBe(true);
-  expect(outputLines.some((line) => line.includes("retrying now (attempt 1/2)"))).toBe(true);
-  expect(outputLines.some((line) => line.includes("waiting") && line.includes("before retry (attempt 2/2)"))).toBe(true);
-  expect(outputLines.some((line) => line.includes("retrying now (attempt 2/2)"))).toBe(true);
-  expect(outputLines.some((line) => line.includes("not retrying: retry limit reached (2)"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("will retry on the existing session"))).toBe(true);
+  expect(outputLines.some((line) => line.includes("not retrying: retry budget exhausted"))).toBe(true);
 }, 15000);
 
 test("reattach honors an older session-scoped active continuation record", async () => {

@@ -150,7 +150,7 @@ function makeFailureRetryClient({ repoDir }: { repoDir: string }): {
       },
       prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
         promptTexts.push(params.parts.map((part) => part.text).join("\n"));
-        if (params.sessionID === "ses_failed") throw new Error("provider rejected request");
+        if (params.sessionID === "ses_failed" && promptTexts.length === 1) throw new Error("provider rejected request");
         writeIdleContinuationRecord(repoDir, params.sessionID);
         return { data: {} };
       },
@@ -245,27 +245,48 @@ describe("clean manual and timeout restarts", () => {
     });
   });
 
-  test("failure retry inserts a new step row and tells the new session where to tail context", async () => {
-    const { repoDir, configDir, state } = setup("1h");
-    const stub = makeFailureRetryClient({ repoDir });
+  test("failure retry reuses the idle session with a continue nudge", async () => {
+    const originalBase = process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+    const originalMax = process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+    const originalMin = process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+    const originalJitter = process.env.LOOPER_FAILURE_RETRY_JITTER;
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
+    try {
+      const { repoDir, configDir, state } = setup("1h");
+      const stub = makeFailureRetryClient({ repoDir });
 
-    const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
+      const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
 
-    expect(result).toBe("complete");
-    expect(stub.createdSessionIDs).toEqual(["ses_failed", "ses_retry"]);
-    expect(state.steps.map((step) => step.sessionID)).toEqual(["ses_failed", "ses_retry"]);
-    expect(state.steps.map((step) => step.status)).toEqual(["failed", "done"]);
-    expect(state.steps.map((step) => step.name)).toEqual(["Build", "Build"]);
-    expect(stub.promptTexts[1]).toContain("This is a retry");
-    expect(stub.promptTexts[1]).toContain("ses_failed");
-    expect(stub.promptTexts[1]).toContain("tail");
-    expect(stub.promptTexts[1]).toContain("build from scratch\n");
+      expect(result).toBe("complete");
+      expect(stub.createdSessionIDs).toEqual(["ses_failed"]);
+      expect(state.steps.map((step) => step.sessionID)).toEqual(["ses_failed"]);
+      expect(state.steps.map((step) => step.status)).toEqual(["done"]);
+      expect(stub.promptTexts[1]).toContain("Continue working to completion if you haven't already.");
+      expect(stub.promptTexts[1]).not.toContain("This is a retry");
+      expect(stub.promptTexts[1]).not.toContain("<looper-context>");
+    } finally {
+      if (originalBase === undefined) delete process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+      else process.env.LOOPER_FAILURE_RETRY_BASE_MS = originalBase;
+      if (originalMax === undefined) delete process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = originalMax;
+      if (originalMin === undefined) delete process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = originalMin;
+      if (originalJitter === undefined) delete process.env.LOOPER_FAILURE_RETRY_JITTER;
+      else process.env.LOOPER_FAILURE_RETRY_JITTER = originalJitter;
+    }
   }, 15000);
 
   test("recovery snapshots option logs a safe retry boundary without reverting files", async () => {
     const { repoDir, configDir, state } = setup("1h");
     const stub = makeFailureRetryClient({ repoDir });
 
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, recoverySnapshots: "before-retry" });
 
     expect(result).toBe("complete");

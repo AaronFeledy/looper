@@ -225,6 +225,29 @@ describe("recoveryNudge prompt injection", () => {
     });
   });
 
+  test("recoveryNudge to an existing idle session does not prepend <looper-context>", async () => {
+    // Given a failed idle session that recovery can reuse.
+    const { repoDir, configDir, state } = setup();
+    const stub = makeIdleResumeClient(repoDir);
+
+    // When the operator nudges that existing session (context policy left at default/on).
+    const result = await runIteration({
+      state,
+      iteration: 1,
+      client: stub.client,
+      repoDir,
+      configDir,
+      recoveryNudge: true,
+      resume: { sessionID: "ses_old", messageID: "msg_old", stepName: "Build", promptText: stub.priorPrompt, looperMessageIDs: ["msg_old"] },
+    });
+
+    // Then the follow-up turn is sent to the existing session without a new-session context block.
+    expect(result).toBe("complete");
+    expect(stub.created).toEqual([]);
+    expect(stub.prompted).toEqual(["ses_old"]);
+    expect(stub.promptTexts[0]).not.toContain("<looper-context>");
+  });
+
   test("recoveryNudge with a reusable idle resume appends to the same failed step row", async () => {
     // Given a failed row whose identity, output history, and start time are already visible.
     const { repoDir, configDir, state } = setup();

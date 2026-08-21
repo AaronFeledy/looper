@@ -158,25 +158,45 @@ describe("runIteration story phase wiring", () => {
     expect(stub.prompts[0]).toContain("story:\n  branch: us-074-story-state\n  storyId: US-074\n  passes: true\n  phase: reviewed");
   });
 
-  test("refreshes story facts before a retry prompt", async () => {
+  test("same-session failure retry does not rebuild looper-context", async () => {
     // Given a passing story whose first prompt attempt changes PRD state and fails.
-    const scratch = await setup();
-    let promptCount = 0;
-    const stub = clientFor(scratch.repoDir, () => {
-      promptCount += 1;
-      if (promptCount === 1) {
-        writePrd(scratch.prdDir, false);
-        throw new Error("retry after PRD change");
-      }
-    });
+    const originalBase = process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+    const originalMax = process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+    const originalMin = process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+    const originalJitter = process.env.LOOPER_FAILURE_RETRY_JITTER;
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
+    try {
+      const scratch = await setup();
+      let promptCount = 0;
+      const stub = clientFor(scratch.repoDir, () => {
+        promptCount += 1;
+        if (promptCount === 1) {
+          writePrd(scratch.prdDir, false);
+          throw new Error("retry after PRD change");
+        }
+      });
 
-    // When the step retries with a fresh prompt.
-    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
+      // When the idle failed session is retried in place.
+      await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
 
-    // Then each prompt reflects story facts read immediately before that send.
-    expect(stub.prompts).toHaveLength(2);
-    expect(stub.prompts[0]).toContain("passes: true");
-    expect(stub.prompts[1]).toContain("passes: false");
+      // Then the follow-up turn is a continue nudge, not a new-session context rebuild.
+      expect(stub.prompts).toHaveLength(2);
+      expect(stub.prompts[0]).toContain("passes: true");
+      expect(stub.prompts[1]).not.toContain("<looper-context>");
+      expect(stub.prompts[1]).toContain("Continue working to completion if you haven't already.");
+    } finally {
+      if (originalBase === undefined) delete process.env.LOOPER_FAILURE_RETRY_BASE_MS;
+      else process.env.LOOPER_FAILURE_RETRY_BASE_MS = originalBase;
+      if (originalMax === undefined) delete process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = originalMax;
+      if (originalMin === undefined) delete process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
+      else process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = originalMin;
+      if (originalJitter === undefined) delete process.env.LOOPER_FAILURE_RETRY_JITTER;
+      else process.env.LOOPER_FAILURE_RETRY_JITTER = originalJitter;
+    }
   });
 
   test("story-state write failure leaves the durable pointer on the step", async () => {

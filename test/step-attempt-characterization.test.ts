@@ -46,14 +46,14 @@ type Harness = {
 const scratchDirs: string[] = [];
 const savedEnv = new Map<string, string | undefined>();
 
-function setupScratch(): { repoDir: string; configDir: string; state: LoopState } {
+function setupScratch(timeout = "1h"): { repoDir: string; configDir: string; state: LoopState } {
   const repoDir = mkdtempSync(join(tmpdir(), "looper-step-attempt-"));
   scratchDirs.push(repoDir);
   const configDir = join(repoDir, ".local", "looper");
   mkdirSync(configDir, { recursive: true });
   initStatePaths({ configDir });
   writeFileSync(join(configDir, "build.md"), "build from scratch\n");
-  writeFileSync(join(configDir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n    timeout: 1h\n");
+  writeFileSync(join(configDir, "looper.yaml"), `steps:\n  build:\n    prompt: build.md\n    timeout: ${timeout}\n`);
   return { repoDir, configDir, state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }) };
 }
 
@@ -212,6 +212,10 @@ describe("runIteration fail-path characterization", () => {
       "LOOPER_CONTINUATION_POLL_MS",
       "LOOPER_EMPTY_ASSISTANT_GRACE_MS",
       "LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS",
+      "LOOPER_FAILURE_RETRY_BASE_MS",
+      "LOOPER_FAILURE_RETRY_MAX_DELAY_MS",
+      "LOOPER_FAILURE_RETRY_MIN_REMAINING_MS",
+      "LOOPER_FAILURE_RETRY_JITTER",
     ]) {
       savedEnv.set(key, process.env[key]);
     }
@@ -225,6 +229,10 @@ describe("runIteration fail-path characterization", () => {
     // fail-path matrix still exercises it without waiting the 10s default.
     process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = "5";
     process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = "1";
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
   });
 
   afterEach(() => {
@@ -348,11 +356,11 @@ describe("runIteration fail-path characterization", () => {
     expectExactLog(input.state, "[looper] background task resume limit exceeded for session ses_bg");
   }, 15_000);
 
-  test("(f) three failed fresh sessions exhaust two failure retries", async () => {
+  test("(f) an idle failed session is retried in place until the step budget is gone", async () => {
     // Given
-    const input = setupScratch();
+    const input = setupScratch("1s");
     const harness = makeHarness({
-      sessionIDs: ["ses_1", "ses_2", "ses_3"],
+      sessionIDs: ["ses_1"],
       prompt: async ({ sessionID }) => {
         throw new Error(`provider rejected ${sessionID}`);
       },
@@ -362,10 +370,12 @@ describe("runIteration fail-path characterization", () => {
     const error = await captureFailure(execute(input, harness));
 
     // Then
-    expect(error.message).toBe("Build failed after 2 retries: provider rejected ses_3");
-    expect(input.state.steps.map((row) => row.status)).toEqual(["failed", "failed", "failed"]);
-    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_1", "create:ses_2", "create:ses_3"]);
-    expectExactLog(input.state, "[looper] Build failed: provider rejected ses_3 — not retrying: retry limit reached (2)");
+    expect(error.message).toContain("Build failed after");
+    expect(error.message).toContain("provider rejected ses_1");
+    expect(input.state.steps.map((row) => row.status)).toEqual(["failed"]);
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_1"]);
+    expect(harness.calls.filter((call) => call === "prompt:ses_1").length).toBeGreaterThan(1);
+    expectExactLog(input.state, "[looper] Build failed: provider rejected ses_1 — not retrying: retry budget exhausted");
   }, 15_000);
 
   test("(g) no fresh session is created until the prior resume session is confirmed idle", async () => {
@@ -504,14 +514,16 @@ describe("runIteration fail-path characterization", () => {
   test("(j) empty assistant classification becomes the retry reason before recovery", async () => {
     // Given
     const input = setupScratch();
+    let prompts = 0;
     const harness = makeHarness({
-      sessionIDs: ["ses_empty", "ses_retry"],
+      sessionIDs: ["ses_empty"],
       prompt: async ({ sessionID }) => {
-        if (sessionID === "ses_retry") writeContinuation(input.repoDir, sessionID, "idle");
+        prompts += 1;
+        if (prompts > 1) writeContinuation(input.repoDir, sessionID, "idle");
       },
       messages: async ({ sessionID }) => {
         const parentID = harness.promptMessageIDs.get(sessionID) ?? "missing";
-        return sessionID === "ses_empty" ? [assistantEmpty(parentID)] : [];
+        return prompts <= 1 ? [assistantEmpty(parentID)] : [assistantDone(parentID, sessionID)];
       },
     });
 
@@ -520,22 +532,24 @@ describe("runIteration fail-path characterization", () => {
 
     // Then
     expect(result).toBe("complete");
-    expect(input.state.steps.map((row) => row.status)).toEqual(["failed", "done"]);
-    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_empty", "create:ses_retry"]);
+    expect(input.state.steps.map((row) => row.status)).toEqual(["done"]);
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_empty"]);
     const reason = `assistant message asst_empty completed without assistant output or tool activity`;
-    expectExactLog(input.state, `[looper] Build failed: ${reason} — waiting 2s before retry (attempt 1/2); will retry with a fresh session`);
+    expectExactLog(input.state, `[looper] Build failed: ${reason} — waiting 0s before retry (attempt 1); will retry on the existing session`);
   }, 10_000);
 
-  test("(k1) a running prior session is stopped and confirmed before fresh retry", async () => {
+  test("(k1) a running prior session is stopped and confirmed before retrying", async () => {
     // Given
     const input = setupScratch();
     let promptFailed = false;
     let evaluationStatusSeen = false;
     let aborted = false;
+    let prompts = 0;
     const harness = makeHarness({
-      sessionIDs: ["ses_old", "ses_retry"],
+      sessionIDs: ["ses_old"],
       prompt: async ({ sessionID }) => {
-        if (sessionID === "ses_old") {
+        prompts += 1;
+        if (prompts === 1) {
           promptFailed = true;
           throw new Error("request failed");
         }
@@ -548,11 +562,10 @@ describe("runIteration fail-path characterization", () => {
       status: async () => {
         if (promptFailed && !evaluationStatusSeen) {
           evaluationStatusSeen = true;
-          return { ses_old: { type: "idle" }, ses_retry: { type: "idle" } };
+          return { ses_old: { type: "idle" } };
         }
         return {
           ses_old: { type: aborted ? "idle" : promptFailed ? "busy" : "idle" },
-          ses_retry: { type: "idle" },
         };
       },
     });
@@ -562,9 +575,10 @@ describe("runIteration fail-path characterization", () => {
 
     // Then
     expect(result).toBe("complete");
-    expect(input.state.steps.map((row) => row.status)).toEqual(["failed", "done"]);
-    expect(harness.calls.indexOf("abort:ses_old")).toBeLessThan(harness.calls.indexOf("create:ses_retry"));
-    expectExactLog(input.state, "[looper] Build: prior session ses_old still pending; aborting before retrying in a fresh session");
+    expect(input.state.steps.map((row) => row.status)).toEqual(["done"]);
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_old"]);
+    expect(harness.calls.indexOf("abort:ses_old")).toBeLessThan(harness.calls.lastIndexOf("prompt:ses_old"));
+    expectExactLog(input.state, "[looper] Build: prior session ses_old still pending; aborting before retrying");
   }, 10_000);
 
   test("(k2) an unconfirmed running prior session blocks the fresh retry", async () => {
@@ -599,13 +613,15 @@ describe("runIteration fail-path characterization", () => {
     expectExactLog(input.state, `[looper] ${reason}`);
   }, 10_000);
 
-  test("(l) a fresh retry inserts a second row and completes end-to-end", async () => {
+  test("(l) an idle failure retries on the existing session and completes end-to-end", async () => {
     // Given
     const input = setupScratch();
+    let prompts = 0;
     const harness = makeHarness({
-      sessionIDs: ["ses_failed", "ses_retry"],
+      sessionIDs: ["ses_failed"],
       prompt: async ({ sessionID }) => {
-        if (sessionID === "ses_failed") throw new Error("provider rejected request");
+        prompts += 1;
+        if (prompts === 1) throw new Error("provider rejected request");
         writeContinuation(input.repoDir, sessionID, "idle");
       },
     });
@@ -615,9 +631,9 @@ describe("runIteration fail-path characterization", () => {
 
     // Then
     expect(result).toBe("complete");
-    expect(input.state.steps.map((row) => row.status)).toEqual(["failed", "done"]);
-    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_failed", "create:ses_retry"]);
-    expectExactLog(input.state, "[looper] Build failed: provider rejected request — waiting 2s before retry (attempt 1/2); will retry with a fresh session");
-    expectExactLog(input.state, "[looper] Build retrying now (attempt 1/2)");
+    expect(input.state.steps.map((row) => row.status)).toEqual(["done"]);
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_failed"]);
+    expectExactLog(input.state, "[looper] Build failed: provider rejected request — waiting 0s before retry (attempt 1); will retry on the existing session");
+    expectExactLog(input.state, "[looper] Build retrying now (attempt 1)");
   }, 10_000);
 });

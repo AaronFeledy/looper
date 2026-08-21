@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { $ } from "bun";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
@@ -79,12 +79,13 @@ async function setupGitScratch(steps: StepSpec[], featureCommits: number): Promi
   return { repoDir, configDir };
 }
 
-/** All-succeed (or `failIDs`-marked-fail) client: no `vcs` capability, so the fresh prompt-context VCS fetch always throws and is silently omitted. */
-function makeClient(opts: { repoDir: string; sessionIDs: string[]; failIDs?: Set<string> }): {
+/** All-succeed (or `failRemaining`-counted-fail) client: no `vcs` capability, so the fresh prompt-context VCS fetch always throws and is silently omitted. */
+function makeClient(opts: { repoDir: string; sessionIDs: string[]; failRemaining?: Record<string, number> }): {
   client: OpencodeClient;
   promptTexts: string[];
 } {
-  const { repoDir, sessionIDs, failIDs = new Set<string>() } = opts;
+  const { repoDir, sessionIDs, failRemaining = {} } = opts;
+  const remainingFails = { ...failRemaining };
   const createdSessionIDs: string[] = [];
   const promptTexts: string[] = [];
   const statusMap: Record<string, { type: string }> = {};
@@ -100,7 +101,11 @@ function makeClient(opts: { repoDir: string; sessionIDs: string[]; failIDs?: Set
       },
       prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
         promptTexts.push(params.parts.map((part) => part.text).join("\n"));
-        if (failIDs.has(params.sessionID)) throw new Error(`provider rejected request for ${params.sessionID}`);
+        const left = remainingFails[params.sessionID] ?? 0;
+        if (left > 0) {
+          remainingFails[params.sessionID] = left - 1;
+          throw new Error(`provider rejected request for ${params.sessionID}`);
+        }
         writeIdleContinuationRecord(repoDir, params.sessionID);
         return { data: {} };
       },
@@ -199,8 +204,23 @@ function makeRestartClient(opts: { repoDir: string; state: LoopState; oldID: str
 
 describe("runIteration <looper-context> prompt injection", () => {
   const scratchDirs: string[] = [];
+  const savedEnv = new Map<string, string | undefined>();
+  beforeEach(() => {
+    for (const key of ["LOOPER_FAILURE_RETRY_BASE_MS", "LOOPER_FAILURE_RETRY_MAX_DELAY_MS", "LOOPER_FAILURE_RETRY_MIN_REMAINING_MS", "LOOPER_FAILURE_RETRY_JITTER"]) {
+      savedEnv.set(key, process.env[key]);
+    }
+    process.env.LOOPER_FAILURE_RETRY_BASE_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS = "20";
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "0";
+    process.env.LOOPER_FAILURE_RETRY_JITTER = "0";
+  });
   afterEach(() => {
     for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    savedEnv.clear();
   });
 
   test("first step's prompt starts with a block carrying iteration/step/timebox and lists no prior sessions", async () => {
@@ -274,12 +294,12 @@ describe("runIteration <looper-context> prompt injection", () => {
     const { repoDir, configDir } = setupScratch([{ key: "build" }]);
     scratchDirs.push(repoDir);
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
-    const stub = makeClient({ repoDir, sessionIDs: ["ses_failed", "ses_retry"], failIDs: new Set(["ses_failed"]) });
+    const stub = makeClient({ repoDir, sessionIDs: ["ses_failed"], failRemaining: { ses_failed: 1 } });
 
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
 
     expect(result).toBe("complete");
-    expect(stub.promptTexts[1]).toContain("This is a retry");
+    expect(stub.promptTexts[1]).not.toContain("<looper-context>");
     expect(stub.promptTexts[1]).not.toContain(SESSIONS_HEADING);
     expect(stub.promptTexts[1]).not.toContain("prior steps this iteration");
   }, 10000);
@@ -294,6 +314,7 @@ describe("runIteration <looper-context> prompt injection", () => {
 
     expect(result).toBe("complete");
     expect(stub.promptTexts[1]).toContain("clean restart in a new session");
+    expect(stub.promptTexts[1]).toContain("<looper-context>");
     expect(stub.promptTexts[1]).not.toContain(SESSIONS_HEADING);
     expect(stub.promptTexts[1]).not.toContain("prior steps this iteration");
   });
@@ -304,8 +325,8 @@ describe("runIteration <looper-context> prompt injection", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["A", "B", "C"] });
     const stub = makeClient({
       repoDir,
-      sessionIDs: ["ses_a", "ses_b1", "ses_b2", "ses_b3", "ses_c"],
-      failIDs: new Set(["ses_b1", "ses_b2"]),
+      sessionIDs: ["ses_a", "ses_b", "ses_c"],
+      failRemaining: { ses_b: 2 },
     });
 
     const result = await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir });
@@ -314,15 +335,13 @@ describe("runIteration <looper-context> prompt injection", () => {
     // B's first attempt: A is a genuinely distinct, earlier, completed step.
     expect(stub.promptTexts[1]).toContain(`${SESSIONS_HEADING}\nA -> ses_a`);
     expect(stub.promptTexts[1]).not.toContain("B ->");
-    // B's two retries: still see A, never see themselves as "B".
-    expect(stub.promptTexts[2]).toContain("This is a retry");
-    expect(stub.promptTexts[2]).toContain(`${SESSIONS_HEADING}\nA -> ses_a`);
+    // B's two same-session retries are follow-up turns, so they omit <looper-context>.
+    expect(stub.promptTexts[2]).not.toContain("<looper-context>");
     expect(stub.promptTexts[2]).not.toContain("B ->");
-    expect(stub.promptTexts[3]).toContain("This is a retry");
-    expect(stub.promptTexts[3]).toContain(`${SESSIONS_HEADING}\nA -> ses_a`);
+    expect(stub.promptTexts[3]).not.toContain("<looper-context>");
     expect(stub.promptTexts[3]).not.toContain("B ->");
-    // C sees B exactly once, at its FINAL (successful) session id.
-    expect(stub.promptTexts[4]).toContain(`${SESSIONS_HEADING}\nA -> ses_a\nB -> ses_b3`);
+    // C sees B exactly once, at its reused session id.
+    expect(stub.promptTexts[4]).toContain(`${SESSIONS_HEADING}\nA -> ses_a\nB -> ses_b`);
     expect(stub.promptTexts[4]).toContain("prior steps this iteration: A=done, B=done");
   }, 20000);
 
