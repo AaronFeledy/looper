@@ -4,6 +4,7 @@ import {
   createLoopState,
   enterHistoryView,
   exitHistoryView,
+  HISTORY_MAX_ENTRIES,
   historyMoveIteration,
   historyMoveStep,
   selectStepListRow,
@@ -60,6 +61,17 @@ describe("iteration history capture", () => {
 
     expect(state.history[0]?.steps[0]?.promptText).toBe("owned prompt");
     expect(state.history[0]?.steps[0]?.looperMessageIDs).toEqual(["msg_owned"]);
+  });
+
+  test("drops oldest entries when history exceeds HISTORY_MAX_ENTRIES", () => {
+    const state = createLoopState({ maxIterations: 1000, stepNames: ["a"] });
+    for (let i = 1; i <= HISTORY_MAX_ENTRIES + 3; i += 1) {
+      state.iteration = i;
+      snapshotIterationToHistory(state);
+    }
+
+    expect(state.history).toHaveLength(HISTORY_MAX_ENTRIES);
+    expect(state.history[0]?.iteration).toBe(4);
   });
 });
 
@@ -123,5 +135,26 @@ describe("history view navigation", () => {
 
     selectStepListRow(state, 99);
     expect(state.historyView!.stepIndex).toBe(2);
+  });
+
+  test("clamps historyView.entryIndex when overflow drops the oldest entries", () => {
+    const state = createLoopState({ maxIterations: 1000, stepNames: ["a"] });
+    for (let i = 1; i <= HISTORY_MAX_ENTRIES; i += 1) {
+      state.iteration = i;
+      snapshotIterationToHistory(state);
+    }
+
+    expect(enterHistoryView(state)).toBe(true);
+    historyMoveIteration(state, -HISTORY_MAX_ENTRIES);
+    expect(state.historyView?.entryIndex).toBe(0);
+
+    for (let i = HISTORY_MAX_ENTRIES + 1; i <= HISTORY_MAX_ENTRIES + 3; i += 1) {
+      state.iteration = i;
+      snapshotIterationToHistory(state);
+    }
+
+    const overflow = 3;
+    expect(state.history).toHaveLength(HISTORY_MAX_ENTRIES);
+    expect(state.historyView?.entryIndex).toBe(Math.max(0, 0 - overflow));
   });
 });

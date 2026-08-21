@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import {
+  AGENT_MAX_LINES,
   applyResumableBootUi,
   cancelPendingNotify,
   clearPendingRequest,
@@ -11,6 +12,7 @@ import {
   enqueuePendingQuestion,
   hydrateResumableBootStep,
   prdPassingGain,
+  pushAgentLine,
   resetPrdIterationBaseline,
   setBranchDiffStatus,
   setPrdStatus,
@@ -462,5 +464,21 @@ describe("applyResumableBootUi", () => {
     expect(state.steps[0]?.sessionID).toBe("ses_build");
     expect(state.steps[0]?.status).toBe("pending");
     expect(state.steps[1]?.status).toBe("pending");
+  });
+});
+
+describe("agent line overflow", () => {
+  test("pushAgentLine drops the oldest lines and paired times past AGENT_MAX_LINES", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["a"] });
+    const total = AGENT_MAX_LINES + 3;
+    for (let i = 0; i < total; i += 1) {
+      pushAgentLine(state, `line-${i}`, i);
+    }
+
+    expect(state.agentLines).toHaveLength(AGENT_MAX_LINES);
+    expect(state.agentLines[0]).toBe("line-3");
+    expect(state.agentLineTimes).toHaveLength(AGENT_MAX_LINES);
+    expect(state.agentLineTimes[0]).toBe(3);
+    expect(state.agentLineTimes.at(-1)).toBe(total - 1);
   });
 });
