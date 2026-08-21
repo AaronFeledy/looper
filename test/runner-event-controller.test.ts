@@ -1,5 +1,5 @@
 /**
- * Pinned SDK characterization: package.json uses @opencode-ai/sdk 1.18.10.
+ * Pinned SDK characterization: package.json uses @opencode-ai/sdk 1.18.21.
  * Verbatim from node_modules/@opencode-ai/sdk/dist/v2/gen/types.gen.d.ts:
  *
  * permission.asked properties: {

@@ -70,7 +70,7 @@ export function createPrdPanel(renderer: CliRenderer, state: LoopState): BoxRend
     while (rows.length > count) {
       const row = rows.pop();
       if (row === undefined) continue;
-      panel.remove(row.id);
+      panel.remove(row);
       row.destroy();
     }
     while (rows.length < count) {

@@ -119,7 +119,7 @@ export function createBootScreen(renderer: CliRenderer): BootScreen {
     destroy() {
       if (destroyed) return;
       destroyed = true;
-      renderer.root.remove(container.id);
+      renderer.root.remove(container);
       container.destroy();
       renderer.requestRender();
     },

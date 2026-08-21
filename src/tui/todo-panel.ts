@@ -89,7 +89,7 @@ export function createTodoPanel(renderer: CliRenderer, state: LoopState): BoxRen
   const ensureRowCount = (count: number) => {
     while (rows.length > count) {
       const row = rows.pop()!;
-      panel.remove(row.id);
+      panel.remove(row);
       row.destroy();
     }
     while (rows.length < count) {
