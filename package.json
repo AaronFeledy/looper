@@ -9,7 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc -p .",
-    "test": "bun test"
+    "test": "bun test",
+    "test:unit": "bun test --parallel --path-ignore-patterns test/e2e.test.ts"
   },
   "dependencies": {
     "@opencode-ai/sdk": "1.18.10",
@@ -17,7 +18,7 @@
     "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@types/bun": "^1.3.14"
+    "@types/bun": "^1.4.0"
   },
   "peerDependencies": {
     "typescript": "^6.0.3"

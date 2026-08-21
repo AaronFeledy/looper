@@ -11,7 +11,8 @@ This file is for non-obvious repo context only. Keep it short and current.
 
 - `bun install`
 - `bun run typecheck`
-- `bun test` &mdash; includes a real-network e2e against opencode + gpt-5.5; self-skips when `opencode` is not on `PATH`. ~50 seconds, ~zero cost.
+- `bun run test:unit` — parallel unit suite; excludes `test/e2e.test.ts`
+- `bun test` — full suite including the real-network e2e against opencode + gpt-5.5; self-skips when `opencode` is not on `PATH`. ~50 seconds, ~zero cost.
 
 ## Architecture
 
