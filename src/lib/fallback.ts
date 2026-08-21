@@ -5,6 +5,7 @@ import { loadSteps, type ContextPolicy, type PermissionPolicy, type QuestionPoli
 import { stallAdjudicationLimit, stallIterationLimit } from "../config/tunables.ts";
 import { runIteration } from "./orchestrator.ts";
 import { startOrAttachServer } from "./sdk-server.ts";
+import { installMemoryPressureTrimmer } from "./memory-pressure.ts";
 import { assertManagedOpencodeResourcesLoaded, LOOPER_MANAGED_RESOURCES } from "./opencode-managed-resources.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist } from "./attached-server-agents.ts";
 import type { LoopState } from "./state.ts";
@@ -89,44 +90,40 @@ export async function runNonTty({
   process.stdout.write(`${label("Steps", "reload from looper.yaml before each step")}\n`);
   process.stdout.write(`${ui.dim("│ edit looper.yaml while running to add, remove, or reorder steps")}\n`);
 
-  const server = await startOrAttachServer({ opencodeBin, attachUrl });
+  await using server = await startOrAttachServer({ opencodeBin, attachUrl });
   const client = createOpencodeClient({ baseUrl: server.url });
 
-  try {
-    if (attachUrl !== undefined) {
-      await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
-      await assertManagedOpencodeResourcesLoaded({
-        client,
-        repoDir,
-        serverUrl: server.url,
-        requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
-      });
-    }
-    if (validateResources) {
-      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)) });
-    }
-    await runNonTtyIterations({
-      options,
-      repoDir,
-      configDir,
+  if (attachUrl !== undefined) {
+    await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
+    await assertManagedOpencodeResourcesLoaded({
       client,
-      ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
-      recoverySnapshots,
-      ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-      ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-      ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
-      ...(prdDir !== undefined ? { prdDir } : {}),
-      ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
-      ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
-      ...(stall !== undefined ? { stall } : {}),
-      adjudicationStore,
-      storyStateStore,
-      ...(contextPolicy !== undefined ? { contextPolicy } : {}),
-      currentBranch,
+      repoDir,
+      serverUrl: server.url,
+      requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
     });
-  } finally {
-    await server.close();
   }
+  if (validateResources) {
+    await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)) });
+  }
+  await runNonTtyIterations({
+    options,
+    repoDir,
+    configDir,
+    client,
+    ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
+    recoverySnapshots,
+    ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+    ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+    ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+    ...(prdDir !== undefined ? { prdDir } : {}),
+    ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
+    ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+    ...(stall !== undefined ? { stall } : {}),
+    adjudicationStore,
+    storyStateStore,
+    ...(contextPolicy !== undefined ? { contextPolicy } : {}),
+    currentBranch,
+  });
 }
 
 /**
@@ -216,7 +213,11 @@ export async function runNonTtyIterations({
     ...(configuredPrdFlipThreshold !== undefined ? { configuredThreshold: configuredPrdFlipThreshold } : {}),
   });
   const control = createRunControl();
-  const result = await runEngine<LoopState, typeof client>({
+  let currentState: LoopState | null = null;
+  const detachMemoryPressure = installMemoryPressureTrimmer(() => currentState);
+  const hooks = createFallbackEngineHooks(currentBranch, control);
+  try {
+    const result = await runEngine<LoopState, typeof client>({
     fresh: options.fresh,
     maxIterations: options.maxIterations,
     waitProvided: options.waitProvided,
@@ -244,7 +245,18 @@ export async function runNonTtyIterations({
     adjudication,
     stall: { iterations: stallIterationLimit(stall?.iterations), adjudications: stallAdjudicationLimit(stall?.adjudications) },
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
-    hooks: createFallbackEngineHooks(currentBranch, control),
+    hooks: {
+      ...hooks,
+      createIterationState: (input) => {
+        const created = hooks.createIterationState(input);
+        currentState = created;
+        return created;
+      },
+    },
   });
   if (result.kind === "max-iterations") process.exitCode = 1;
+  } finally {
+    detachMemoryPressure();
+    currentState = null;
+  }
 }
