@@ -307,7 +307,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
 
   const replaceOutput = (output: SelectedOutput) => {
     for (const renderable of outputRenderables) {
-      stream.content.remove(renderable.id);
+      stream.content.remove(renderable);
       renderable.destroyRecursively();
     }
 

@@ -231,7 +231,7 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
   const ensureRowCount = (count: number) => {
     while (rowRenderables.length > count) {
       const row = rowRenderables.pop()!;
-      list.remove(row.id);
+      list.remove(row);
       row.destroy();
     }
     while (rowRenderables.length < count) {

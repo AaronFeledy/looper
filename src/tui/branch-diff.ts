@@ -70,7 +70,7 @@ export function createBranchDiffPanel(renderer: CliRenderer, state: LoopState): 
     while (rows.length > count) {
       const row = rows.pop();
       if (row === undefined) continue;
-      panel.remove(row.id);
+      panel.remove(row);
       row.destroy();
     }
     while (rows.length < count) {

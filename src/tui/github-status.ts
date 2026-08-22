@@ -164,7 +164,7 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
   const ensureRowCount = (count: number) => {
     while (rows.length > count) {
       const row = rows.pop()!;
-      panel.remove(row.id);
+      panel.remove(row);
       row.destroy();
     }
     while (rows.length < count) {

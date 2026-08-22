@@ -191,7 +191,12 @@ export function createPromptEventStream({
       pushLine(`[looper] subscribed to events`);
       lastEventAt = Date.now();
       startConsume(stream0);
-      supervisorPromise = supervise();
+      supervisorPromise = supervise().catch((err) => {
+        const error = toError(err);
+        if (isAbortError(error)) return;
+        consumerError ??= error;
+        pushLine(`[error] event supervisor crashed: ${error.message}`);
+      });
     },
     stop: async (): Promise<void> => {
       supervisorStopped = true;
