@@ -262,12 +262,16 @@ export async function runOpenCodeStep({
     timeoutController?.dispose();
     subscription.ctrl?.abort();
     ctrl.abort();
-    await eventStream?.stop();
-    eventStream?.flush();
-    if (cancellation.action !== null && cancellation.activeSessionID !== undefined) {
-      const brokerOwner = requestBrokerOwner ?? localBrokerOwner;
-      const teardown = await brokerOwner?.teardown(cancellation.activeSessionID);
-      if (teardown?.safeToProceed === false) teardownError = teardown.reason;
+    try {
+      await eventStream?.stop();
+      eventStream?.flush();
+      if (cancellation.action !== null && cancellation.activeSessionID !== undefined) {
+        const brokerOwner = requestBrokerOwner ?? localBrokerOwner;
+        const teardown = await brokerOwner?.teardown(cancellation.activeSessionID);
+        if (teardown?.safeToProceed === false) teardownError = teardown.reason;
+      }
+    } catch (error) {
+      if (!(error instanceof Error && isAbortError(error))) finalError ??= toError(error);
     }
     localBrokerOwner?.dispose();
     if (requestBrokerOwner === undefined) ctx.reporter.requests.clearAll();
