@@ -1,7 +1,7 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { VariantConfig } from "../lib/config.ts";
-import { formatRequestError, toError } from "./util.ts";
+import { formatRequestError, isAbortError, toError } from "./util.ts";
 
 /** Opencode sentinel that clears agent-default / reasoning-level variants. */
 export const OPENCODE_DEFAULT_VARIANT = "default";
@@ -46,11 +46,18 @@ function formatAvailable(names: ReadonlySet<string>): string {
   return [...names].sort().join(", ");
 }
 
+function abortError(error: unknown): Error | undefined {
+  if (error instanceof Error && isAbortError(error)) return error;
+  return undefined;
+}
+
 async function modelVariantNames(input: ResolvePromptVariantInput): Promise<ReadonlySet<string> | undefined> {
   const { model, client, repoDir, signal, log } = input;
   if (model === undefined) return undefined;
   try {
     const result = await client.provider.list({ directory: repoDir }, { signal });
+    const aborted = abortError(result.error);
+    if (aborted !== undefined) throw aborted;
     if (result.error || !result.data) {
       log?.(`[looper] provider.list failed while checking variants: ${formatRequestError(result.error)}`);
       return undefined;
@@ -69,6 +76,8 @@ async function modelVariantNames(input: ResolvePromptVariantInput): Promise<Read
     if (variants === undefined) return new Set();
     return new Set(Object.keys(variants));
   } catch (error) {
+    const aborted = abortError(error);
+    if (aborted !== undefined) throw aborted;
     log?.(`[looper] provider.list threw while checking variants: ${toError(error).message}`);
     return undefined;
   }

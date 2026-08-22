@@ -184,4 +184,23 @@ describe("resolvePromptVariant", () => {
     expect(resolved).toBe("high");
     expect(logs.some((line) => line.includes("provider.list failed"))).toBe(true);
   });
+
+  test("rethrows AbortError from provider.list so the step can cancel", async () => {
+    const abort = new DOMException("The operation was aborted.", "AbortError");
+    const client = {
+      provider: {
+        list: async () => {
+          throw abort;
+        },
+      },
+    } as never;
+    await expect(
+      resolvePromptVariant({
+        client,
+        repoDir: "/repo",
+        model: { providerID: "openai", modelID: "gpt-5.5" },
+        variant: "high",
+      }),
+    ).rejects.toBe(abort);
+  });
 });
