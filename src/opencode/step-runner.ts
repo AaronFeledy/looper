@@ -10,13 +10,13 @@ import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
 import type { RunContinuationRecord } from "./continuation-records.ts";
-import { classifyAssistantWithReactivationGrace, sessionReactivatedMessage } from "./assistant-classification.ts";
+import { classifyAssistantWithReactivationGrace, classifyMessagesForCurrentTurn, resolveOutcomeParentID, sessionReactivatedMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
 import type { RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
-import { formatRequestError, isAbortError, toError } from "./util.ts";
+import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
@@ -75,6 +75,8 @@ export async function runOpenCodeStep({
   pushLine(`[looper] starting step ${step.name}`);
 
   let sentMessageID: string | undefined;
+  let outcomeMessageID: string | undefined;
+  let hiddenUserMessageIDs = new Set<string>();
   const ctrl = new AbortController();
   const subscription: { ctrl: AbortController | undefined } = { ctrl: undefined };
   const cancellation: { action: "skip" | "restart" | null; reason: StepRestartReason | undefined; abortSent: boolean; activeSessionID: string | undefined } = {
@@ -108,8 +110,8 @@ export async function runOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sid}: ${toError(error).message}`);
         });
     }
-    subscription.ctrl?.abort();
-    ctrl.abort();
+    abortSubscribeSignal(subscription.ctrl);
+    abortSubscribeSignal(ctrl);
   };
 
   const watcher = setInterval(() => {
@@ -182,7 +184,7 @@ export async function runOpenCodeStep({
     unsubscribeHumanGate = brokerOwner.subscribeHumanGate(timeoutController.setGateOpen);
     const boundBroker = brokerOwner.bind(boundSessionID);
     const ownedSessions = boundBroker.ownedSessions;
-    const hiddenUserMessageIDs = new Set<string>(ctx.reporter.steps.get(stepIndex)?.looperMessageIDs ?? []);
+    hiddenUserMessageIDs = new Set<string>(ctx.reporter.steps.get(stepIndex)?.looperMessageIDs ?? []);
     ctx.reporter.steps.setPromptText(stepIndex, prompt);
 
     requestBroker = boundBroker.broker;
@@ -226,6 +228,7 @@ export async function runOpenCodeStep({
     const agent = step.agent || undefined;
     const messageID = createOpencodeID("msg");
     sentMessageID = messageID;
+    outcomeMessageID = messageID;
     hiddenUserMessageIDs.add(messageID);
     const looperMessageIDs = [...hiddenUserMessageIDs];
     ctx.reporter.steps.setLooperMessageIDs(stepIndex, looperMessageIDs);
@@ -260,8 +263,8 @@ export async function runOpenCodeStep({
     unsubscribeHumanGate?.();
     ctx.control.bindTimeoutExtender(undefined);
     timeoutController?.dispose();
-    subscription.ctrl?.abort();
-    ctrl.abort();
+    abortSubscribeSignal(subscription.ctrl);
+    abortSubscribeSignal(ctrl);
     try {
       await eventStream?.stop();
       eventStream?.flush();
@@ -287,17 +290,30 @@ export async function runOpenCodeStep({
   if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
     const boundSessionID = cancellation.activeSessionID;
     let reactivated = false;
-    const classification = await classifyAssistantWithReactivationGrace({
-      client,
-      repoDir,
-      sessionID: boundSessionID,
-      parentMessageID: sentMessageID,
-      shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
-      log: pushLine,
-      onReactivated: () => {
-        reactivated = true;
-      },
-    });
+    let classification;
+    try {
+      const msgs = await client.session.messages({ sessionID: boundSessionID, directory: repoDir });
+      if (!msgs.error && msgs.data) {
+        outcomeMessageID = resolveOutcomeParentID(msgs.data, sentMessageID) ?? sentMessageID;
+        classification = classifyMessagesForCurrentTurn(msgs.data, sentMessageID);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushLine(`[looper] session snapshot heal failed: ${message}`);
+    }
+    if (classification === undefined || classification.kind === "empty") {
+      classification = await classifyAssistantWithReactivationGrace({
+        client,
+        repoDir,
+        sessionID: boundSessionID,
+        parentMessageID: outcomeMessageID ?? sentMessageID,
+        shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
+        log: pushLine,
+        onReactivated: () => {
+          reactivated = true;
+        },
+      });
+    }
     if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
     // A reactivated session must NOT complete the step: opencode is generating
     // again, and the reattach path owns that session from here.
@@ -328,7 +344,7 @@ export async function runOpenCodeStep({
     if (record !== null) {
       setContinuationStatus(ctx, stepIndex, record);
       logContinuationState(ctx, stepIndex, record, "background tasks active after opencode exit");
-      return { status: "waiting", sessionID: record.sessionID, ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}) };
+      return { status: "waiting", sessionID: record.sessionID, ...(outcomeMessageID !== undefined ? { messageID: outcomeMessageID } : {}) };
     }
   }
 
@@ -338,7 +354,7 @@ export async function runOpenCodeStep({
     status,
     sessionID: cancellation.activeSessionID,
     ...(status === "failed" && finalError ? { errorMessage: finalError.message } : {}),
-    ...(sentMessageID !== undefined ? { messageID: sentMessageID } : {}),
+    ...(outcomeMessageID !== undefined ? { messageID: outcomeMessageID } : {}),
     ...(status === "restart" && cancellation.reason !== undefined ? { restartReason: cancellation.reason } : {}),
   };
 }

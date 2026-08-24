@@ -5,7 +5,7 @@ import type { PriorSessionEvaluation } from "../core/session-types.ts";
 import type { FinalizeStepStatus } from "../core/step-view.ts";
 import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
-import { createSessionEventConsumer } from "../lib/event-consumer.ts";
+import { createSessionEventConsumer, renderSession } from "../lib/event-consumer.ts";
 import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
@@ -13,8 +13,8 @@ import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-bro
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
-import { classifyAssistantForMessage, classifyAssistantWithReactivationGrace } from "./assistant-classification.ts";
-import { formatRequestError, isAbortError, toError } from "./util.ts";
+import { classifyAssistantWithReactivationGrace, classifyCurrentTurn, resolveOutcomeParentID } from "./assistant-classification.ts";
+import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
 
@@ -150,7 +150,7 @@ export async function evaluatePriorSession({
     statusKnown = false;
   }
   const pending = statusKnown && isPendingSessionStatus(status);
-  const classification = await classifyAssistantForMessage(client, repoDir, sessionID, messageID);
+  const classification = await classifyCurrentTurn(client, repoDir, sessionID, messageID);
   return { statusKnown, pending, classification };
 }
 
@@ -188,6 +188,7 @@ export async function reattachOpenCodeStep({
   requestBrokerOwner,
 }: ReattachStepOptions): Promise<StepRunResult> {
   if (ctx.reporter.steps.get(stepIndex) === undefined) throw new Error(`missing state step at index ${stepIndex}`);
+  let resolvedParentID = outcomeMessageID;
   const startedAt = Date.now();
   // Enforce the step timeout during reattach exactly like runOpenCodeStep
   // does for a fresh prompt. Without it, a reattached session with a hung
@@ -228,7 +229,7 @@ export async function reattachOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
         });
     }
-    ctrl.abort();
+    abortSubscribeSignal(ctrl);
     wakeReattachStatusPoll();
   };
 
@@ -336,7 +337,8 @@ export async function reattachOpenCodeStep({
       pushLine(`[error] event consumer crashed during reattach: ${error.message}`);
     });
   } catch (error) {
-    pushLine(`[error] reattach failed to subscribe: ${toError(error).message}`);
+    const err = toError(error);
+    if (!isAbortError(err)) pushLine(`[error] reattach failed to subscribe: ${err.message}`);
   }
 
   try {
@@ -388,8 +390,11 @@ export async function reattachOpenCodeStep({
     unsubscribeHumanGate();
     ctx.control.bindTimeoutExtender(undefined);
     stepTimeout.dispose();
-    ctrl.abort();
-    if (consumerPromise) {
+    // Skip/restart already aborted `ctrl` in requestCancellation. Aborting again
+    // here on the idle/success path rejects the SDK SSE `reader.cancel()` as an
+    // unhandled `The operation was aborted` (seen as a red ERROR right after resume).
+    if (cancellationAction !== null) abortSubscribeSignal(ctrl);
+    if (consumerPromise && cancellationAction !== null) {
       let consumerTimedOut = false;
       await Promise.race([
         consumerPromise,
@@ -402,12 +407,15 @@ export async function reattachOpenCodeStep({
     try {
       const timeoutMs = serverRecoveryProbeTimeoutMs();
       const msgs = await withDeadline(client.session.messages({ sessionID, directory: repoDir }), timeoutMs);
-      if (msgs === DEADLINE_EXCEEDED) pushLine(`[looper] reattach backfill timed out after ${timeoutMs}ms`);
-      else if (!msgs.error && msgs.data) consumer.backfill(msgs.data);
+      consumer.flush();
+      if (msgs === DEADLINE_EXCEEDED) pushLine(`[looper] reattach snapshot timed out after ${timeoutMs}ms`);
+      else if (!msgs.error && msgs.data) {
+        ctx.reporter.out.replaceSession(stepIndex, renderSession(msgs.data, hiddenUserMessageIDs));
+        resolvedParentID = resolveOutcomeParentID(msgs.data, outcomeMessageID) ?? outcomeMessageID;
+      }
     } catch (error) {
-      pushLine(`[looper] reattach backfill failed: ${toError(error).message}`);
+      pushLine(`[looper] reattach snapshot failed: ${toError(error).message}`);
     }
-    consumer.flush();
     if (cancellationAction !== null) {
       const teardown = await brokerOwner.teardown(sessionID);
       if (!teardown.safeToProceed) {
@@ -427,7 +435,7 @@ export async function reattachOpenCodeStep({
     return {
       status: statusValue,
       sessionID,
-      messageID: outcomeMessageID,
+      messageID: resolvedParentID,
       ...(extras?.errorMessage !== undefined ? { errorMessage: extras.errorMessage } : {}),
     };
   };
@@ -446,16 +454,17 @@ export async function reattachOpenCodeStep({
     return finalize("failed", { errorMessage: reason });
   }
 
+  const parentMessageID = resolvedParentID;
   const classification = await classifyAssistantWithReactivationGrace({
     client,
     repoDir,
     sessionID,
-    parentMessageID: outcomeMessageID,
+    parentMessageID,
     shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
     log: pushLine,
   });
   if (classification.kind === "done") {
-    pushLine(`[looper] reattach: assistant message ${outcomeMessageID} completed cleanly`);
+    pushLine(`[looper] reattach: current turn for parent ${parentMessageID} completed cleanly`);
     let record: RunContinuationRecord | null = null;
     try {
       record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
@@ -466,7 +475,7 @@ export async function reattachOpenCodeStep({
       setContinuationStatus(ctx, stepIndex, record);
       logContinuationState(ctx, stepIndex, record, "background tasks active after reattach");
       ctx.reporter.steps.markWaitingForBackground(stepIndex);
-      return { status: "waiting", sessionID: record.sessionID, messageID: outcomeMessageID };
+      return { status: "waiting", sessionID: record.sessionID, messageID: parentMessageID };
     }
     return finalize("done");
   }
@@ -476,8 +485,8 @@ export async function reattachOpenCodeStep({
   }
   const reason =
     classification.kind === "missing"
-      ? `reattach: no assistant message found for prompt ${outcomeMessageID}`
-      : `reattach: assistant message ${outcomeMessageID} still in-progress after status idle`;
+      ? `reattach: no assistant message found for parent ${parentMessageID}`
+      : `reattach: current turn for parent ${parentMessageID} still in-progress after status idle`;
   pushLine(`[looper] ${reason}`);
   return finalize("failed", { errorMessage: reason });
 }

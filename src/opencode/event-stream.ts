@@ -6,10 +6,10 @@ import {
   EVENT_WATCHDOG_POLL_MS,
 } from "../config/tunables.ts";
 import { createSessionEventConsumer, eventSessionID } from "../lib/event-consumer.ts";
-import { classifyAssistantForMessage } from "./assistant-classification.ts";
+import { classifyCurrentTurn } from "./assistant-classification.ts";
 import { EVENT_CONSUMER_CLOSE_TIMEOUT_MS } from "./continuation-records.ts";
 import { sessionStillPending } from "./session-health.ts";
-import { isAbortError, toError } from "./util.ts";
+import { abortSubscribeSignal, isAbortError, toError } from "./util.ts";
 
 export type SessionEventConsumer = ReturnType<typeof createSessionEventConsumer>;
 
@@ -96,7 +96,7 @@ export function createPromptEventStream({
     if (sinceLast < timings.resubscribeBackoffMs) await Bun.sleep(timings.resubscribeBackoffMs - sinceLast);
     if (supervisorStopped || cancellationActive()) return false;
     lastResubscribeAt = Date.now();
-    subscription.ctrl?.abort();
+    abortSubscribeSignal(subscription.ctrl);
     if (consumerPromise) {
       await Promise.race([consumerPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
     }
@@ -156,12 +156,12 @@ export function createPromptEventStream({
       }
 
       if (sentMessageID !== undefined) {
-        const cls = await classifyAssistantForMessage(client, repoDir, sessionID, sentMessageID);
+        const cls = await classifyCurrentTurn(client, repoDir, sessionID, sentMessageID);
         if (supervisorStopped || cancellationActive()) break;
         if (cls.kind === "done" || cls.kind === "failed" || cls.kind === "empty") {
           const silentSeconds = Math.round((Date.now() - lastEventAt) / 1000);
           const detail = cls.kind === "failed" || cls.kind === "empty" ? `: ${cls.errorMessage}` : "";
-          watchdogStallReason = `event watchdog: session ${sessionID} idle with assistant message ${cls.kind}${detail} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
+          watchdogStallReason = `event watchdog: session ${sessionID} idle with current turn ${cls.kind}${detail} but no events for ${silentSeconds}s; aborting prompt to finalize via reattach`;
           pushLine(`[looper] ${watchdogStallReason}`);
           promptAbortController.abort();
           break;
@@ -200,7 +200,7 @@ export function createPromptEventStream({
     },
     stop: async (): Promise<void> => {
       supervisorStopped = true;
-      subscription.ctrl?.abort();
+      abortSubscribeSignal(subscription.ctrl);
       if (supervisorPromise) {
         await Promise.race([supervisorPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
       }
