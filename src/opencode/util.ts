@@ -14,6 +14,28 @@ export function isAbortError(error: Error): boolean {
   return error.name === "AbortError";
 }
 
+/**
+ * Abort the signal passed to `event.subscribe`. The OpenCode SSE client calls
+ * `reader.cancel()` from its abort listener and does not await it; that
+ * rejection surfaces as an unhandled `The operation was aborted`.
+ */
+export function abortSubscribeSignal(controller: AbortController | undefined): void {
+  if (controller === undefined || controller.signal.aborted) return;
+  const proto = ReadableStreamDefaultReader.prototype;
+  const original = proto.cancel;
+  proto.cancel = function (this: ReadableStreamDefaultReader, reason?: unknown): Promise<void> {
+    return original.call(this, reason).catch((error: unknown) => {
+      if (error instanceof Error && isAbortError(error)) return;
+      throw error;
+    });
+  };
+  try {
+    controller.abort();
+  } finally {
+    proto.cancel = original;
+  }
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
