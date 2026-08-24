@@ -32,6 +32,11 @@ export type StepLifecyclePort = {
   readonly get: (stepIndex: number) => StepRowView | undefined;
 };
 
+export type SessionOutputSnapshot = {
+  readonly events: readonly LooperEvent[];
+  readonly eventTimes: readonly number[];
+};
+
 export type StepOutputSink = {
   /** Replaces state.ts `pushAgentLine` plus `pushStepOutputLine`. */
   readonly line: (stepIndex: number, line: string, at?: number) => void;
@@ -39,6 +44,8 @@ export type StepOutputSink = {
   readonly lines: (stepIndex: number, lines: string[], at?: number) => void;
   /** Replaces state.ts `pushAgentEvent` plus `pushStepOutputEvent`. */
   readonly event: (stepIndex: number, event: LooperEvent, at?: number) => void;
+  /** Replace session-derived events; keep Looper overlay logs. */
+  readonly replaceSession: (stepIndex: number, snapshot: SessionOutputSnapshot) => void;
 };
 
 export type PendingRequestPort = {

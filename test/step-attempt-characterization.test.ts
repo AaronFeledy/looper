@@ -508,7 +508,7 @@ describe("runIteration fail-path characterization", () => {
     expect(input.state.steps.map((row) => row.status)).toEqual(["done"]);
     expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual(["create:ses_1"]);
     expectExactLog(input.state, "[looper] Build reattaching (1/5) to session ses_1 — assistant message completed server-side despite client error");
-    expect(input.state.agentLines.some((line) => line.startsWith("[looper] reattach: assistant message ") && line.endsWith(" completed cleanly"))).toBe(true);
+    expect(input.state.agentLines.some((line) => line.includes("reattach:") && line.includes("completed cleanly"))).toBe(true);
   });
 
   test("(j) empty assistant classification becomes the retry reason before recovery", async () => {

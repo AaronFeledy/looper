@@ -7,6 +7,19 @@ import { isRecord, stringValue } from "./util.ts";
 
 export type { AssistantClassification } from "../core/session-types.ts";
 
+export type ClassifiableMessage = {
+  readonly info: {
+    readonly id?: unknown;
+    readonly role?: unknown;
+    readonly parentID?: unknown;
+    readonly time?: unknown;
+    readonly error?: unknown;
+    readonly cost?: unknown;
+    readonly tokens?: unknown;
+  };
+  readonly parts?: unknown[];
+};
+
 export function assistantErrorMessage(error: unknown): string | undefined {
   if (!isRecord(error)) return undefined;
   const name = stringValue(error.name) ?? "Error";
@@ -43,6 +56,89 @@ export function emptyAssistantMessage(messageID: string): string {
   return `assistant message ${messageID} completed without assistant output or tool activity`;
 }
 
+export function latestUserMessageIdFrom(messages: readonly ClassifiableMessage[]): string | undefined {
+  let latest: string | undefined;
+  for (const entry of messages) {
+    if (entry.info.role !== "user") continue;
+    latest = stringValue(entry.info.id) ?? latest;
+  }
+  return latest;
+}
+
+function completedAt(time: unknown): unknown {
+  return isRecord(time) ? time.completed : undefined;
+}
+
+function assistantIsOpen(entry: ClassifiableMessage): boolean {
+  if (entry.info.role !== "assistant" || !isRecord(entry.info.time)) return false;
+  return completedAt(entry.info.time) === undefined;
+}
+
+export function classifyMessagesForParent(
+  messages: readonly ClassifiableMessage[],
+  parentMessageID: string,
+): AssistantClassification {
+  let tracked: AssistantClassification | undefined;
+  let terminalError: AssistantClassification | undefined;
+  for (const entry of messages) {
+    if (entry.info.role !== "assistant") continue;
+    const error = entry.info.error;
+    const errorMessage = assistantErrorMessage(error);
+    if (errorMessage !== undefined && isNonRetryableAssistantError(error)) {
+      terminalError ??= { kind: "failed", errorMessage };
+    }
+    if (stringValue(entry.info.parentID) !== parentMessageID) continue;
+    if (errorMessage !== undefined) {
+      tracked = { kind: "failed", errorMessage };
+      continue;
+    }
+    if (completedAt(entry.info.time) !== undefined) {
+      if (assistantHasMeaningfulActivity(entry)) {
+        tracked = { kind: "done" };
+      } else if (tracked?.kind !== "done") {
+        tracked = { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(entry.info.id) ?? parentMessageID) };
+      }
+    } else {
+      tracked = { kind: "in-progress" };
+    }
+  }
+  if (terminalError !== undefined) return terminalError;
+  return tracked ?? { kind: "missing" };
+}
+
+/** Classify the live turn: any open assistant wins; otherwise the latest user parent. */
+export function resolveOutcomeParentID(
+  messages: readonly ClassifiableMessage[],
+  fallbackParentID?: string,
+): string | undefined {
+  const latest = latestUserMessageIdFrom(messages);
+  if (latest !== undefined && classifyMessagesForParent(messages, latest).kind !== "missing") return latest;
+  return fallbackParentID;
+}
+
+export function classifyMessagesForCurrentTurn(
+  messages: readonly ClassifiableMessage[],
+  fallbackParentID?: string,
+): AssistantClassification {
+  for (const entry of messages) {
+    if (entry.info.role !== "assistant") continue;
+    const errorMessage = assistantErrorMessage(entry.info.error);
+    if (errorMessage !== undefined && isNonRetryableAssistantError(entry.info.error)) {
+      return { kind: "failed", errorMessage };
+    }
+  }
+  if (messages.some(assistantIsOpen)) return { kind: "in-progress" };
+  const latest = latestUserMessageIdFrom(messages);
+  if (latest !== undefined) {
+    const current = classifyMessagesForParent(messages, latest);
+    if (current.kind !== "missing") return current;
+  }
+  if (fallbackParentID !== undefined && fallbackParentID !== latest) {
+    return classifyMessagesForParent(messages, fallbackParentID);
+  }
+  return { kind: "missing" };
+}
+
 /**
  * ID of the newest user message in a session, or undefined when it cannot be
  * determined. Used after opencode's continuation hook re-prompts a session
@@ -61,12 +157,7 @@ export async function latestUserMessageID(
     return undefined;
   }
   if (result.error || !result.data) return undefined;
-  let latest: string | undefined;
-  for (const entry of result.data) {
-    if (entry.info.role !== "user") continue;
-    latest = stringValue(entry.info.id) ?? latest;
-  }
-  return latest;
+  return latestUserMessageIdFrom(result.data);
 }
 
 export async function classifyAssistantForMessage(
@@ -82,33 +173,27 @@ export async function classifyAssistantForMessage(
     return { kind: "missing" };
   }
   if (result.error || !result.data) return { kind: "missing" };
-  let tracked: AssistantClassification | undefined;
-  let terminalError: AssistantClassification | undefined;
-  for (const entry of result.data) {
-    const info = entry.info;
-    if (info.role !== "assistant") continue;
-    const error = (info as { error?: unknown }).error;
-    const errorMessage = assistantErrorMessage(error);
-    if (errorMessage !== undefined && isNonRetryableAssistantError(error)) {
-      terminalError ??= { kind: "failed", errorMessage };
-    }
-    if (info.parentID !== parentMessageID) continue;
-    if (errorMessage !== undefined) {
-      tracked = { kind: "failed", errorMessage };
-      continue;
-    }
-    if (info.time.completed !== undefined) {
-      if (assistantHasMeaningfulActivity(entry)) {
-        tracked = { kind: "done" };
-      } else if (tracked?.kind !== "done") {
-        tracked = { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(info.id) ?? parentMessageID) };
-      }
-    } else {
-      tracked = { kind: "in-progress" };
-    }
+  return classifyMessagesForParent(result.data, parentMessageID);
+}
+
+export async function classifyCurrentTurn(
+  client: OpencodeClient,
+  repoDir: string,
+  sessionID: string,
+  fallbackParentID?: string,
+): Promise<AssistantClassification> {
+  let result;
+  try {
+    result = await client.session.messages({ sessionID, directory: repoDir });
+  } catch {
+    if (fallbackParentID === undefined) return { kind: "missing" };
+    return classifyAssistantForMessage(client, repoDir, sessionID, fallbackParentID);
   }
-  if (terminalError !== undefined) return terminalError;
-  return tracked ?? { kind: "missing" };
+  if (result.error || !result.data) {
+    if (fallbackParentID === undefined) return { kind: "missing" };
+    return classifyAssistantForMessage(client, repoDir, sessionID, fallbackParentID);
+  }
+  return classifyMessagesForCurrentTurn(result.data, fallbackParentID);
 }
 
 export type ReactivationGraceOptions = {

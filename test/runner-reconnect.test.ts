@@ -999,7 +999,7 @@ describe("runOpenCodeStep event stream recovery", () => {
       });
 
       expect(result.status).toBe("done");
-      expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach backfill timed out"))).toBe(true);
+      expect(state.steps[0]!.outputLines.some((line) => line.includes("reattach snapshot timed out"))).toBe(true);
     } finally {
       if (originalProbeTimeout === undefined) delete process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS;
       else process.env.LOOPER_SERVER_RECOVERY_PROBE_TIMEOUT_MS = originalProbeTimeout;

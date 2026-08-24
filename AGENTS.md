@@ -53,6 +53,7 @@ This file is for non-obvious repo context only. Keep it short and current.
 
 ## Gotchas
 
+- OMO continuation user turns carry `<!-- OMO_INTERNAL_* -->` markers. Render strips them and hides marker-only turns (`visibleUserText` in `omo-internal-user.ts`). Outcome classification uses `classifyCurrentTurn` / `resolveOutcomeParentID`: the latest user message that actually has assistant children, falling back to Looper's original prompt. Reattach heals the TUI via `replaceSession` (full `renderSession` snapshot, keeping `[looper]` overlay logs). Do not replace on a busy-stream resubscribe — a partial `session.messages()` snapshot can wipe live output.
 - Path semantics: `repoDir = process.cwd()`. `configDir` is resolved (in `main.ts`) from `--config-dir`, else `LOOPER_CONFIG_DIR`, else the first of `$PWD/.looper`, `$PWD/.local/looper`, `$PWD/.local/.looper` that already holds a config file, else defaults to `$PWD/.looper`. State files live in `configDir`. The CLI auto-creates `configDir` but fails with exit 2 if no config file is present. Config file resolution prefers `looper.yml`, then `looper.yaml`, `.looper.yml`, `.looper.yaml` (see `CONFIG_FILE_NAMES`/`findConfigFile` in `config.ts`).
 - `bin/looper` is a bash wrapper that resolves symlinks itself; symlink it from `~/.local/bin/looper` and it still finds `src/main.ts`.
 - `noUncheckedIndexedAccess: true` is on. `frames[i]` from a literal array still needs `!`.

@@ -5,6 +5,7 @@
  * swapping reporters would reorder printed lines.
  */
 import { looperLogEventFromLine, type LooperEvent } from "../core/events.ts";
+import { replaceSessionEvents } from "../lib/session-output.ts";
 import type {
   PendingPermission,
   PendingQuestion,
@@ -140,6 +141,17 @@ export function createHeadlessStepReporterHarness(options: HeadlessStepReporterO
       },
       event: (stepIndex, event) => {
         stepEvents[stepIndex]?.push(event);
+      },
+      replaceSession: (stepIndex, snapshot) => {
+        const events = stepEvents[stepIndex];
+        const lines = stepLines[stepIndex];
+        if (events === undefined || lines === undefined) return;
+        const times = events.map((_, index) => index);
+        const lineTimes = lines.map((_, index) => index);
+        replaceSessionEvents(
+          { outputEvents: events, outputEventTimes: times, outputLines: lines, outputLineTimes: lineTimes },
+          snapshot,
+        );
       },
     },
     requests: {

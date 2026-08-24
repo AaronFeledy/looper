@@ -1,6 +1,7 @@
 import type { RunControlView } from "../engine/run-control.ts";
 import type { RunStepContext, StepReporter } from "../engine/step-reporter.ts";
 import { setStepContinuation } from "./agent-tree-state.ts";
+import { replaceSessionEvents } from "./session-output.ts";
 import {
   beginStepRun,
   clearPendingRequest,
@@ -53,6 +54,22 @@ export function createLoopStateStepReporter(state: LoopState): StepReporter {
       event: (stepIndex, event, at) => {
         pushAgentEvent(state, event, at);
         pushStepOutputEvent(state, stepIndex, event, at);
+      },
+      replaceSession: (stepIndex, snapshot) => {
+        const step = state.steps[stepIndex];
+        if (step === undefined) return;
+        step.outputEvents ??= [];
+        step.outputEventTimes ??= [];
+        replaceSessionEvents(
+          {
+            outputEvents: step.outputEvents,
+            outputEventTimes: step.outputEventTimes,
+            outputLines: step.outputLines,
+            outputLineTimes: step.outputLineTimes,
+          },
+          snapshot,
+        );
+        notify();
       },
     },
     requests: {
