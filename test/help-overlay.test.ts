@@ -218,9 +218,17 @@ describe("modal ctrl+c", () => {
 describe("helpLines", () => {
   test("documents the undiscoverable bindings", () => {
     const text = helpLines().join("\n");
-    for (const needle of ["ctrl-c", "enter", "?", "tab", "esc", "history", "config"]) {
+    for (const needle of ["enter", "?", "tab", "esc", "history", "config"]) {
       expect(text.toLowerCase()).toContain(needle);
     }
+  });
+
+  test("does not list copy or in-context gate bindings", () => {
+    const text = helpLines().join("\n").toLowerCase();
+    expect(text).not.toContain("ctrl-c");
+    expect(text).not.toContain("right-click");
+    expect(text).not.toContain("permission");
+    expect(text).not.toContain("question");
   });
 
   test("renders every binding and complete borders at 40x24", async () => {
@@ -324,4 +332,3 @@ describe("footer branch", () => {
     expect(footerBranchLabel(state)).toBe("Branch: detached");
   });
 });
-

@@ -11,7 +11,6 @@ import {
   type LoopState,
 } from "../src/lib/state.ts";
 import { createFooter } from "../src/tui/footer.ts";
-import { helpLines } from "../src/tui/help-overlay.ts";
 import { pendingRequestLines } from "../src/tui/pending-request-panel.ts";
 import { BELL, createPermissionBell } from "../src/tui/permission-bell.ts";
 import { createPermissionDialog } from "../src/tui/permission-dialog.ts";
@@ -378,14 +377,6 @@ describe("permission bell", () => {
 });
 
 describe("permission gate surfaces", () => {
-  test("the help overlay documents the decision keys", () => {
-    // Given the help overlay contents.
-    const text = helpLines().join("\n");
-
-    // When / Then every in-Looper decision key is listed.
-    for (const needle of ["y", "a", "d", "s", "permission"]) expect(text).toContain(needle);
-  });
-
   test("the footer shows the decision keys while a permission is queued", async () => {
     // Given a gated run rendered with the footer.
     const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({ width: 120, height: 3 });
