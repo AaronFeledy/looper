@@ -173,14 +173,17 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
             ses_new: { type: "idle" },
           },
         }),
-        messages: async () => ({
-          data: [
-            {
-              info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: Date.now() - 10_000 }, tokens: { output: 1 } },
-              parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "still pending" }],
-            },
-          ],
-        }),
+        messages: async ({ sessionID }: { sessionID: string }) => {
+          if (sessionID !== "ses_old") return { data: [] };
+          return {
+            data: [
+              {
+                info: { id: "asst", role: "assistant", parentID: "msg_old", time: { created: Date.now() - 10_000 }, tokens: { output: 1 } },
+                parts: [{ id: "part_text", messageID: "asst", sessionID: "ses_old", type: "text", text: "still pending" }],
+              },
+            ],
+          };
+        },
         children: async () => ({ data: [] }),
       },
       event: {

@@ -14,7 +14,7 @@ import { createPausableTimeout } from "./pausable-timeout.ts";
 import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
 import { classifyAssistantWithReactivationGrace, classifyCurrentTurn, resolveOutcomeParentID } from "./assistant-classification.ts";
-import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
+import { formatRequestError, isAbortError, toError } from "./util.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
 
@@ -229,7 +229,7 @@ export async function reattachOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
         });
     }
-    abortSubscribeSignal(ctrl);
+    ctrl.abort();
     wakeReattachStatusPoll();
   };
 
@@ -393,7 +393,7 @@ export async function reattachOpenCodeStep({
     // Skip/restart already aborted `ctrl` in requestCancellation. Aborting again
     // here on the idle/success path rejects the SDK SSE `reader.cancel()` as an
     // unhandled `The operation was aborted` (seen as a red ERROR right after resume).
-    if (cancellationAction !== null) abortSubscribeSignal(ctrl);
+    ctrl.abort();
     if (consumerPromise && cancellationAction !== null) {
       let consumerTimedOut = false;
       await Promise.race([
@@ -455,14 +455,17 @@ export async function reattachOpenCodeStep({
   }
 
   const parentMessageID = resolvedParentID;
-  const classification = await classifyAssistantWithReactivationGrace({
-    client,
-    repoDir,
-    sessionID,
-    parentMessageID,
-    shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
-    log: pushLine,
-  });
+  let classification = await classifyCurrentTurn(client, repoDir, sessionID, parentMessageID);
+  if (classification.kind === "empty") {
+    classification = await classifyAssistantWithReactivationGrace({
+      client,
+      repoDir,
+      sessionID,
+      parentMessageID,
+      shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
+      log: pushLine,
+    });
+  }
   if (classification.kind === "done") {
     pushLine(`[looper] reattach: current turn for parent ${parentMessageID} completed cleanly`);
     let record: RunContinuationRecord | null = null;

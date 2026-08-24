@@ -16,7 +16,7 @@ import type { RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
-import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
+import { formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
@@ -110,8 +110,8 @@ export async function runOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sid}: ${toError(error).message}`);
         });
     }
-    abortSubscribeSignal(subscription.ctrl);
-    abortSubscribeSignal(ctrl);
+    subscription.ctrl?.abort();
+    ctrl.abort();
   };
 
   const watcher = setInterval(() => {
@@ -263,8 +263,8 @@ export async function runOpenCodeStep({
     unsubscribeHumanGate?.();
     ctx.control.bindTimeoutExtender(undefined);
     timeoutController?.dispose();
-    abortSubscribeSignal(subscription.ctrl);
-    abortSubscribeSignal(ctrl);
+    subscription.ctrl?.abort();
+    ctrl.abort();
     try {
       await eventStream?.stop();
       eventStream?.flush();
@@ -301,7 +301,9 @@ export async function runOpenCodeStep({
       const message = error instanceof Error ? error.message : String(error);
       pushLine(`[looper] session snapshot heal failed: ${message}`);
     }
-    if (classification === undefined || classification.kind === "empty") {
+    if (classification?.kind === "in-progress") {
+      finalError = new Error(`session ${boundSessionID} still has an in-progress turn; reattaching instead of completing the step`);
+    } else if (classification === undefined || classification.kind === "empty") {
       classification = await classifyAssistantWithReactivationGrace({
         client,
         repoDir,
@@ -314,7 +316,7 @@ export async function runOpenCodeStep({
         },
       });
     }
-    if (classification.kind === "failed" || classification.kind === "empty") finalError = new Error(classification.errorMessage);
+    if (finalError === undefined && (classification.kind === "failed" || classification.kind === "empty")) finalError = new Error(classification.errorMessage);
     // A reactivated session must NOT complete the step: opencode is generating
     // again, and the reattach path owns that session from here.
     else if (reactivated) finalError = new Error(`${sessionReactivatedMessage(boundSessionID)}; reattaching instead of completing the step`);

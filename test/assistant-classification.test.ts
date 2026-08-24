@@ -78,6 +78,27 @@ describe("classifyMessagesForCurrentTurn", () => {
   });
 });
 
+  test("a completed later turn is not blocked by an earlier assistant that has no time object", () => {
+    const messages = [
+      { info: { id: "msg_prompt", role: "user" } },
+      { info: { id: "msg_old", role: "assistant", parentID: "msg_prompt" }, parts: [{ type: "text", text: "old" }] },
+      { info: { id: "msg_omo", role: "user" } },
+      {
+        info: { id: "msg_later", role: "assistant", parentID: "msg_omo", time: { created: 2, completed: 3 }, cost: 1, tokens: { output: 2 } },
+        parts: [{ type: "text", text: "later" }],
+      },
+    ];
+    expect(classifyMessagesForCurrentTurn(messages, "msg_prompt")).toEqual({ kind: "done" });
+  });
+
+  test("treats an assistant with created-but-not-completed time as in-progress", () => {
+    const messages = [
+      { info: { id: "msg_prompt", role: "user" } },
+      { info: { id: "msg_asst", role: "assistant", parentID: "msg_prompt", time: { created: 1 } }, parts: [{ type: "text", text: "working" }] },
+    ];
+    expect(classifyMessagesForCurrentTurn(messages, "msg_prompt")).toEqual({ kind: "in-progress" });
+  });
+
 describe("resolveOutcomeParentID", () => {
   test("keeps the fallback when the latest user turn has no assistant children", () => {
     const messages = [

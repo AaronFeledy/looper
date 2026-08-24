@@ -70,7 +70,8 @@ function completedAt(time: unknown): unknown {
 }
 
 function assistantIsOpen(entry: ClassifiableMessage): boolean {
-  return entry.info.role === "assistant" && completedAt(entry.info.time) === undefined;
+  if (entry.info.role !== "assistant" || !isRecord(entry.info.time)) return false;
+  return completedAt(entry.info.time) === undefined;
 }
 
 export function classifyMessagesForParent(
