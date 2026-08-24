@@ -248,6 +248,25 @@ export function runStepReporterContract(name: string, factory: () => ReporterFix
       expect(reporter.requests.list()).toEqual([]);
     });
 
+    test("replaceSession keeps looper overlay events", () => {
+      // Given
+      const { reporter, readStepEvents } = factory();
+      reporter.out.event(0, { kind: "assistant.text", text: "stale" });
+      reporter.out.event(0, { kind: "looper.log", message: "subscribed" });
+
+      // When
+      reporter.out.replaceSession(0, {
+        events: [{ kind: "assistant.text", text: "healed" }],
+        eventTimes: [1],
+      });
+
+      // Then
+      expect(readStepEvents(0)).toEqual([
+        { kind: "assistant.text", text: "healed" },
+        { kind: "looper.log", message: "subscribed" },
+      ]);
+    });
+
     test("accepts todo updates", () => {
       // Given
       const { reporter } = factory();
