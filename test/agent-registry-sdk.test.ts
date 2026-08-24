@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { startAgentRegistry } from "../src/opencode/agent-registry.ts";
 import {
@@ -170,6 +171,69 @@ describe("SDK agent registry", () => {
     expect(fake.signals[0]?.aborted).toBe(true);
     expect(notifications).toBe(notificationsAfterStop);
     expect(registry.projectRoot("root")).toEqual([]);
+  });
+
+  test("stop does not leak an unhandled AbortError from SDK SSE cancel", async () => {
+    // Given: OpenCode's event.subscribe abortHandler does `void reader.cancel()`
+    // and does not await it. A fetch-body cancel rejects with AbortError.
+    const body = new ReadableStream<Uint8Array>({
+      start() {},
+      cancel() {
+        return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+      },
+    });
+    const reader = body.getReader();
+    void reader.read();
+
+    let subscribed = false;
+    const leaked: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      leaked.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    const client = {
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          options.signal.addEventListener("abort", () => {
+            try {
+              void reader.cancel();
+            } catch {
+              // noop — matches @opencode-ai/sdk serverSentEvents.gen.js
+            }
+          });
+          subscribed = true;
+          const stream = (async function* (): AsyncGenerator<Event> {
+            await new Promise<void>((resolve) => {
+              if (options.signal.aborted) {
+                resolve();
+                return;
+              }
+              options.signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })();
+          return { stream };
+        },
+      },
+      session: {
+        children: async () => ({ data: [] }),
+        messages: async () => ({ data: [] }),
+        status: async () => ({ data: {} }),
+      },
+    } as unknown as OpencodeClient;
+
+    const registry = startAgentRegistry({ client, repoDir: REPO_DIR });
+    await waitUntil(() => subscribed);
+    await drainMicrotasks();
+
+    // When
+    registry.stop();
+    await drainMicrotasks();
+    await Bun.sleep(20);
+    process.off("unhandledRejection", onUnhandled);
+
+    // Then
+    expect(leaked).toEqual([]);
   });
 
   test("prunes descendants when all roots are dropped", async () => {
