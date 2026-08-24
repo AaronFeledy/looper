@@ -71,7 +71,7 @@ describe("responsive text dialogs", () => {
     renderer.root.add(createHelpOverlay(renderer, state));
     await renderOnce();
 
-    expectDialogWithinViewport(captureCharFrame(), "g/enter");
+    expectDialogWithinViewport(captureCharFrame(), "g, enter");
     renderer.destroy();
   });
 
