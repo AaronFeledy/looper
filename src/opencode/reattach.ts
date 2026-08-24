@@ -304,10 +304,12 @@ export async function reattachOpenCodeStep({
     },
   );
   const unsubscribeHumanGate = brokerOwner.subscribeHumanGate(stepTimeout.setGateOpen);
+  let acceptSessionEvents = true;
   const consumer = createSessionEventConsumer(sessionID, {
     pushLine,
     pushLines,
     onEvent: (event, at) => {
+      if (!acceptSessionEvents) return;
       clearReattachingStatus();
       ctx.reporter.out.event(stepIndex, event, at);
     },
@@ -390,11 +392,10 @@ export async function reattachOpenCodeStep({
     unsubscribeHumanGate();
     ctx.control.bindTimeoutExtender(undefined);
     stepTimeout.dispose();
-    // Skip/restart already aborted `ctrl` in requestCancellation. Aborting again
-    // here on the idle/success path rejects the SDK SSE `reader.cancel()` as an
-    // unhandled `The operation was aborted` (seen as a red ERROR right after resume).
+    // Stop the live consumer before snapshot replace so a late SSE event cannot
+    // append on top of the healed session output.
     ctrl.abort();
-    if (consumerPromise && cancellationAction !== null) {
+    if (consumerPromise) {
       let consumerTimedOut = false;
       await Promise.race([
         consumerPromise,
@@ -404,6 +405,7 @@ export async function reattachOpenCodeStep({
       ]).catch(() => undefined);
       if (consumerTimedOut) pushLine(`[looper] event stream did not close within ${EVENT_CONSUMER_CLOSE_TIMEOUT_MS}ms after reattach; continuing`);
     }
+    acceptSessionEvents = false;
     try {
       const timeoutMs = serverRecoveryProbeTimeoutMs();
       const msgs = await withDeadline(client.session.messages({ sessionID, directory: repoDir }), timeoutMs);
