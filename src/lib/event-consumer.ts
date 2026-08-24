@@ -2,7 +2,7 @@ import type { Event, Message, Part } from "@opencode-ai/sdk/v2";
 
 import type { LooperEvent } from "../core/events.ts";
 import { formatLooperEvent } from "../presentation/legacy-line-format.ts";
-import { orderMessagesForRender } from "./omo-internal-user.ts";
+import { orderMessagesForRender, visibleUserText } from "./omo-internal-user.ts";
 
 type PermissionAskedProperties = Extract<Event, { type: "permission.asked" }>["properties"];
 type QuestionAskedProperties = Extract<Event, { type: "question.asked" }>["properties"];
@@ -181,22 +181,33 @@ function printTextHeader(state: TextPartState, emit: EmitLooperEvent): void {
   emit(textStartedEvent(state.kind));
 }
 
+function flushVisibleChunk(state: TextPartState, raw: string, emit: EmitLooperEvent): void {
+  if (state.kind === "user") {
+    const text = visibleUserText(raw);
+    if (text.length === 0) return;
+    printTextHeader(state, emit);
+    emit(textChunkEvent(state.kind, text));
+    return;
+  }
+  printTextHeader(state, emit);
+  emit(textChunkEvent(state.kind, raw));
+}
+
 function flushNewlines(state: TextPartState, emit: EmitLooperEvent): void {
   while (true) {
     const nl = state.buffer.indexOf("\n", state.flushed);
     if (nl === -1) break;
-    printTextHeader(state, emit);
-    emit(textChunkEvent(state.kind, state.buffer.slice(state.flushed, nl)));
+    const raw = state.buffer.slice(state.flushed, nl);
     state.flushed = nl + 1;
+    flushVisibleChunk(state, raw, emit);
   }
 }
 
 function flushRemaining(state: TextPartState, emit: EmitLooperEvent): void {
-  if (state.flushed < state.buffer.length) {
-    printTextHeader(state, emit);
-    emit(textChunkEvent(state.kind, state.buffer.slice(state.flushed)));
-    state.flushed = state.buffer.length;
-  }
+  if (state.flushed >= state.buffer.length) return;
+  const raw = state.buffer.slice(state.flushed);
+  state.flushed = state.buffer.length;
+  flushVisibleChunk(state, raw, emit);
 }
 
 type TextPartInput = {

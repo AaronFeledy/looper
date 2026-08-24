@@ -6,6 +6,7 @@ import {
   isOmoInternalOnlyUserMessage,
   orderMessagesForRender,
   stripOmoInternalMarkers,
+  visibleUserText,
 } from "../src/lib/omo-internal-user.ts";
 
 describe("omo internal user markers", () => {
@@ -18,6 +19,11 @@ describe("omo internal user markers", () => {
     ].join("\n");
     expect(isOmoInternalOnlyText(text)).toBe(true);
     expect(stripOmoInternalMarkers(`real prompt\n${text}`).trim()).toBe("real prompt");
+  });
+
+  test("visibleUserText keeps the body and drops control markers", () => {
+    expect(visibleUserText("do the work\n<!-- OMO_INTERNAL_INITIATOR -->")).toBe("do the work");
+    expect(visibleUserText("<!-- OMO_INTERNAL_NOREPLY -->")).toBe("");
   });
 
   test("classifies marker-only user messages", () => {
@@ -65,7 +71,7 @@ describe("omo internal user markers", () => {
     expect(ordered.map((entry) => entry.info.role)).toEqual(["assistant", "user"]);
   });
 
-  test("offline rendering still shows OMO control turns, below completed work and above open assistants", () => {
+  test("offline rendering hides marker-only turns and strips markers from bodies", () => {
     const rendered = renderSession([
       {
         info: { id: "msg_done", role: "assistant", time: { created: 1, completed: 2 } } as never,
@@ -87,6 +93,18 @@ describe("omo internal user markers", () => {
           } as never,
         ],
       },
+      {
+        info: { id: "msg_body", role: "user", time: { created: 5 } } as never,
+        parts: [
+          {
+            id: "p_body",
+            messageID: "msg_body",
+            type: "text",
+            text: "<system-reminder>\nAll sibling background tasks are complete.\n</system-reminder>\n<!-- OMO_INTERNAL_INITIATOR -->",
+            time: { end: 5 },
+          } as never,
+        ],
+      },
     ]);
 
     const texts = rendered.events
@@ -95,11 +113,9 @@ describe("omo internal user markers", () => {
       )
       .map((event) => event.text);
 
-    expect(texts).toEqual([
-      "finished work",
-      "<!-- OMO_INTERNAL_INITIATOR -->",
-      "<!-- OMO_INTERNAL_NOREPLY -->",
-      "still going",
-    ]);
+    expect(texts.some((text) => text.includes("OMO_INTERNAL"))).toBe(false);
+    expect(texts).toContain("finished work");
+    expect(texts).toContain("still going");
+    expect(texts.join("\n")).toContain("All sibling background tasks are complete.");
   });
 });

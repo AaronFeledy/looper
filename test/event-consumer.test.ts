@@ -537,8 +537,9 @@ describe("user message visibility", () => {
     const promptLines = [
       "TASK: add a regression test",
       "EXPECTED OUTCOME: it fails today",
-      "<!-- OMO_INTERNAL_INITIATOR -->",
+      "and then ship it",
     ];
+    const rawText = [...promptLines, "<!-- OMO_INTERNAL_INITIATOR -->"].join("\n");
 
     // When: the session is rendered offline.
     const { events } = renderSession([
@@ -550,7 +551,7 @@ describe("user message visibility", () => {
             sessionID: SID,
             messageID: "msg_user",
             type: "text",
-            text: promptLines.join("\n"),
+            text: rawText,
             time: { start: userCreated },
           } as never,
         ],
@@ -591,11 +592,10 @@ describe("user message visibility", () => {
       },
     ]);
 
-    // Then: every chunk of the prompt survives, in order...
+    // Then: the prompt body survives in order, markers are stripped, last body line is flushed...
     const userTexts = events.flatMap((event) => (event.kind === "user.text" ? [event.text] : []));
     expect(userTexts).toEqual(promptLines);
-    // ...including the trailing marker, which must be rendered rather than stripped...
-    expect(userTexts).toContain("<!-- OMO_INTERNAL_INITIATOR -->");
+    expect(userTexts.some((text) => text.includes("OMO_INTERNAL"))).toBe(false);
 
     // ...and the whole prompt precedes the assistant's first reasoning/tool event.
     const lastUserTextIndex = events.findLastIndex((event) => event.kind === "user.text");

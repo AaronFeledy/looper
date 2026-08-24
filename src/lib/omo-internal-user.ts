@@ -5,9 +5,14 @@ export function stripOmoInternalMarkers(text: string): string {
   return text.replace(OMO_INTERNAL_MARKER_STRIP, "").trimEnd();
 }
 
+/** User-visible text after dropping OMO control markers. Empty when the turn is control-only. */
+export function visibleUserText(text: string): string {
+  return stripOmoInternalMarkers(text).trim();
+}
+
 export function isOmoInternalOnlyText(text: string): boolean {
   if (!OMO_INTERNAL_MARKER_DETECT.test(text)) return false;
-  return stripOmoInternalMarkers(text).trim().length === 0;
+  return visibleUserText(text).length === 0;
 }
 
 export function textPartsOf(parts: readonly { type?: string; text?: string }[]): string[] {
@@ -47,7 +52,9 @@ export function orderMessagesForRender<T>(messages: readonly T[]): T[] {
   const trailingOmo: T[] = [];
   let end = messages.length;
   while (end > 0 && isOmoInternalOnlyUserMessage(messages[end - 1] as object)) {
-    trailingOmo.unshift(messages[end - 1]!);
+    const trailing = messages[end - 1];
+    if (trailing === undefined) break;
+    trailingOmo.unshift(trailing);
     end -= 1;
   }
   if (trailingOmo.length === 0) return [...messages];
@@ -55,7 +62,9 @@ export function orderMessagesForRender<T>(messages: readonly T[]): T[] {
   const head: T[] = messages.slice(0, end);
   const incomplete: T[] = [];
   while (head.length > 0 && isIncompleteAssistantEntry(head[head.length - 1])) {
-    incomplete.unshift(head.pop()!);
+    const open = head.pop();
+    if (open === undefined) break;
+    incomplete.unshift(open);
   }
 
   if (incomplete.length === 0) return [...messages];
