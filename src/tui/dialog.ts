@@ -32,6 +32,7 @@ export type TextDialogOptions = {
   readonly minHeight?: number | `${number}%`;
   /** When true (default), body lives in a ScrollBox. Short static dialogs can set false. */
   readonly scroll?: boolean;
+  readonly wrapMode?: "none" | "char" | "word";
   readonly isVisible: (state: LoopState) => boolean;
   readonly content: (state: LoopState) => DialogContent;
 };
@@ -96,7 +97,7 @@ export function createTextDialog(
     width: "100%",
     content: "",
     fg: COLOR_TEXT,
-    wrapMode: "word",
+    wrapMode: options.wrapMode ?? "word",
   });
 
   if (scroll) {

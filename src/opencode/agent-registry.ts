@@ -12,6 +12,7 @@ import {
   type SessionFacts,
 } from "../core/agent-registry.ts";
 import { bootstrapAgentRoot } from "./agent-registry-bootstrap.ts";
+import { abortSubscribeSignal } from "./util.ts";
 
 const RECONNECT_BACKOFF_MS = 1_000;
 const LAZY_BOOTSTRAP_DEBOUNCE_MS = 2_000;
@@ -292,7 +293,7 @@ export function startAgentRegistry({
     stop: (): void => {
       if (stopped) return;
       stopped = true;
-      controller.abort();
+      abortSubscribeSignal(controller);
       roots.clear();
       bootstrapPending.clear();
       lastLazyBootstrapAt.clear();

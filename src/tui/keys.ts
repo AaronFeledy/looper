@@ -25,6 +25,7 @@ import {
 } from "../lib/state.ts";
 import { tryOpenCurrentPr } from "./github-status.ts";
 import { modalFocusWinner, permissionKeyAction, questionKeyAction } from "./permission-gate.ts";
+import { bindRightClickCopy, copySelectionIfAny } from "./selection-copy.ts";
 
 export type KeyHooks = {
   onEscape: () => void;
@@ -136,13 +137,7 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         return;
       }
       if (state.escConfirm !== null) dismissEscConfirm(state);
-      const selectedText = renderer.getSelection()?.getSelectedText() ?? "";
-      if (selectedText.length > 0) {
-        renderer.copyToClipboardOSC52(selectedText);
-        renderer.clearSelection();
-      } else {
-        hooks.onInterrupt();
-      }
+      if (!copySelectionIfAny(renderer)) hooks.onInterrupt();
       consumeKey(event);
       return;
     }
@@ -295,8 +290,10 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
   };
 
   renderer.keyInput.on("keypress", handleKeyPress);
+  const unbindRightClickCopy = bindRightClickCopy(renderer);
 
   return () => {
     renderer.keyInput.off("keypress", handleKeyPress);
+    unbindRightClickCopy();
   };
 }

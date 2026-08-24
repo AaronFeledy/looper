@@ -9,7 +9,7 @@ import { createSessionEventConsumer, eventSessionID } from "../lib/event-consume
 import { classifyCurrentTurn } from "./assistant-classification.ts";
 import { EVENT_CONSUMER_CLOSE_TIMEOUT_MS } from "./continuation-records.ts";
 import { sessionStillPending } from "./session-health.ts";
-import { isAbortError, toError } from "./util.ts";
+import { abortSubscribeSignal, isAbortError, toError } from "./util.ts";
 
 export type SessionEventConsumer = ReturnType<typeof createSessionEventConsumer>;
 
@@ -96,7 +96,7 @@ export function createPromptEventStream({
     if (sinceLast < timings.resubscribeBackoffMs) await Bun.sleep(timings.resubscribeBackoffMs - sinceLast);
     if (supervisorStopped || cancellationActive()) return false;
     lastResubscribeAt = Date.now();
-    subscription.ctrl?.abort();
+    abortSubscribeSignal(subscription.ctrl);
     if (consumerPromise) {
       await Promise.race([consumerPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
     }
@@ -200,7 +200,7 @@ export function createPromptEventStream({
     },
     stop: async (): Promise<void> => {
       supervisorStopped = true;
-      subscription.ctrl?.abort();
+      abortSubscribeSignal(subscription.ctrl);
       if (supervisorPromise) {
         await Promise.race([supervisorPromise, Bun.sleep(EVENT_CONSUMER_CLOSE_TIMEOUT_MS)]).catch(() => undefined);
       }
