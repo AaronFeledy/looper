@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -113,5 +113,94 @@ describe("runOpenCodeStep native abort", () => {
 
     expect(result.status).toBe("skipped");
     expect(prompted).toEqual([]);
+  });
+
+  test("does not leak an unhandled AbortError after a successful prompt", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-abort-success-teardown-"));
+    const continuationDir = join(repoDir, ".omo", "run-continuation");
+    mkdirSync(continuationDir, { recursive: true });
+    const now = new Date().toISOString();
+    writeFileSync(
+      join(continuationDir, `${SID}.json`),
+      JSON.stringify({ sessionID: SID, updatedAt: now, sources: { "background-task": { state: "idle", updatedAt: now } } }),
+    );
+    const saved = {
+      grace: process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS,
+      poll: process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS,
+      cont: process.env.LOOPER_CONTINUATION_EXIT_GRACE_MS,
+    };
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = "0";
+    process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = "1";
+    process.env.LOOPER_CONTINUATION_EXIT_GRACE_MS = "1";
+
+    const leaks: unknown[] = [];
+    const onReject = (reason: unknown) => {
+      leaks.push(reason);
+    };
+    process.on("unhandledRejection", onReject);
+    let subscribeAborted = false;
+    let promptMessageID = "";
+
+    const client = {
+      session: {
+        create: async () => ({ data: { id: SID } }),
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          return { data: {} };
+        },
+        status: async () => ({ data: { [SID]: { type: "idle" } } }),
+        messages: async () => ({
+          data: [{
+            info: { id: "msg_done", role: "assistant", parentID: promptMessageID, time: { completed: Date.now() }, tokens: { output: 1 } },
+            parts: [{ id: "prt_done", messageID: "msg_done", type: "text", text: "done" }],
+          }],
+        }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: {
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const reader = new ReadableStream({ start() {} }).getReader();
+          options.signal.addEventListener("abort", () => {
+            subscribeAborted = true;
+            void reader.cancel();
+          });
+          const stream = (async function* (): AsyncGenerator<Event> {
+            try {
+              await reader.read();
+            } catch {
+              return;
+            }
+          })();
+          return { stream };
+        },
+      },
+    } as unknown as OpencodeClient;
+
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const step: Step = { name: "build", prompt: "/tmp/unused-prompt" };
+
+    try {
+      const result = await runOpenCodeStep({
+        ctx: loopStateRunStepContext(state, state.control),
+        stepIndex: 0,
+        prompt: "do the thing",
+        client,
+        repoDir,
+        step,
+      });
+      await Bun.sleep(0);
+      expect(result.status).toBe("done");
+      expect(subscribeAborted).toBe(true);
+      expect(leaks).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onReject);
+      if (saved.grace === undefined) delete process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS;
+      else process.env.LOOPER_EMPTY_ASSISTANT_GRACE_MS = saved.grace;
+      if (saved.poll === undefined) delete process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS;
+      else process.env.LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS = saved.poll;
+      if (saved.cont === undefined) delete process.env.LOOPER_CONTINUATION_EXIT_GRACE_MS;
+      else process.env.LOOPER_CONTINUATION_EXIT_GRACE_MS = saved.cont;
+    }
   });
 });

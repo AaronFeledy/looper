@@ -16,7 +16,7 @@ import type { RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
-import { formatRequestError, isAbortError, toError } from "./util.ts";
+import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
@@ -110,8 +110,8 @@ export async function runOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sid}: ${toError(error).message}`);
         });
     }
-    subscription.ctrl?.abort();
-    ctrl.abort();
+    abortSubscribeSignal(subscription.ctrl);
+    abortSubscribeSignal(ctrl);
   };
 
   const watcher = setInterval(() => {
@@ -263,8 +263,8 @@ export async function runOpenCodeStep({
     unsubscribeHumanGate?.();
     ctx.control.bindTimeoutExtender(undefined);
     timeoutController?.dispose();
-    subscription.ctrl?.abort();
-    ctrl.abort();
+    abortSubscribeSignal(subscription.ctrl);
+    abortSubscribeSignal(ctrl);
     try {
       await eventStream?.stop();
       eventStream?.flush();
