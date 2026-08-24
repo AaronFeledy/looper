@@ -14,7 +14,7 @@ import { createPausableTimeout } from "./pausable-timeout.ts";
 import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
 import { classifyAssistantWithReactivationGrace, classifyCurrentTurn, resolveOutcomeParentID } from "./assistant-classification.ts";
-import { formatRequestError, isAbortError, toError } from "./util.ts";
+import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
 
@@ -229,7 +229,7 @@ export async function reattachOpenCodeStep({
           pushLine(`[looper] session.abort threw for ${sessionID}: ${toError(error).message}`);
         });
     }
-    ctrl.abort();
+    abortSubscribeSignal(ctrl);
     wakeReattachStatusPoll();
   };
 
@@ -392,10 +392,11 @@ export async function reattachOpenCodeStep({
     unsubscribeHumanGate();
     ctx.control.bindTimeoutExtender(undefined);
     stepTimeout.dispose();
-    // Stop the live consumer before snapshot replace so a late SSE event cannot
-    // append on top of the healed session output.
-    ctrl.abort();
-    if (consumerPromise) {
+    // Skip/restart already aborted `ctrl` in requestCancellation. Aborting again
+    // here on the idle/success path rejects the SDK SSE `reader.cancel()` as an
+    // unhandled `The operation was aborted` (seen as a red ERROR right after resume).
+    if (cancellationAction !== null) abortSubscribeSignal(ctrl);
+    if (consumerPromise && cancellationAction !== null) {
       let consumerTimedOut = false;
       await Promise.race([
         consumerPromise,
