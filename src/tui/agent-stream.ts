@@ -586,6 +586,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     pulsePhaseMs = (pulsePhaseMs + FOLLOW_PULSE_MS) % 2400;
     applyFollowIndicator(true);
   }, FOLLOW_PULSE_MS);
+  pulseTimer.unref?.();
   rebuild();
 
   stream.on(RenderableEvents.DESTROYED, () => {

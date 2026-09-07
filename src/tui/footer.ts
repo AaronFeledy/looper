@@ -150,6 +150,7 @@ export function createFooter(renderer: CliRenderer, state: LoopState): BoxRender
 
   const unsubscribe = subscribe(paint);
   const timer = setInterval(paint, 1_000);
+  timer.unref?.();
 
   footer.on(RenderableEvents.DESTROYED, () => {
     clearInterval(timer);

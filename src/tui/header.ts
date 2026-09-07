@@ -81,6 +81,7 @@ export function createHeader(renderer: CliRenderer, state: LoopState, serverVers
   const timer = setInterval(() => {
     if (state.started) update();
   }, 1_000);
+  timer.unref?.();
 
   header.on(RenderableEvents.DESTROYED, () => {
     clearInterval(timer);

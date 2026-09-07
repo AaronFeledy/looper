@@ -361,6 +361,7 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
     frameIndex += 1;
     if (hasLiveRow(state)) updateRows();
   }, 100);
+  timer.unref?.();
 
   host.on(RenderableEvents.DESTROYED, () => {
     clearInterval(timer);
