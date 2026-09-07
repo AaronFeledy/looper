@@ -18,6 +18,16 @@ const STORY_ID_CASES: readonly StoryIdCase[] = [
     branch: "us-074-provider-lando-linux-setup",
     expected: "US-074",
   },
+  {
+    name: "derives a split-story id with an optional letter suffix",
+    branch: "us-608a-authoring-translation-contracts",
+    expected: "US-608A",
+  },
+  {
+    name: "does not derive a story id from a letter suffix followed by more digits",
+    branch: "us-609e0-convert-php-web",
+    expected: undefined,
+  },
   { name: "does not derive a story id from main", branch: "main", expected: undefined },
   { name: "does not derive a story id from an empty branch", branch: "", expected: undefined },
   { name: "does not derive a story id from a non-matching branch", branch: "feature/provider-setup", expected: undefined },
