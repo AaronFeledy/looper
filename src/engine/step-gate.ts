@@ -1,4 +1,5 @@
 import type { GateConfig } from "../lib/config.ts";
+import { DEFAULT_STORY_ID_PATTERN } from "../lib/story-id.ts";
 import { comparePhase, type StoryPhase } from "../lib/story-state-files.ts";
 import type { GateScriptResult } from "../platform/gate-script.ts";
 
@@ -11,29 +12,54 @@ export type GateInputs = {
   readonly storyId: string | undefined;
   readonly passes: boolean | undefined;
   readonly phase: StoryPhase | undefined;
+  readonly storyIdPattern?: string;
   readonly scriptResult?: GateScriptResult;
 };
 
 export type GateDecision = { readonly pass: true } | { readonly pass: false; readonly reason: string };
 
+function currentBranchLabel(branch: string | undefined): string {
+  return branch === undefined ? "no current branch" : `current '${branch}'`;
+}
+
+function expectedStoryPattern(pattern: string | undefined): string {
+  return pattern ?? DEFAULT_STORY_ID_PATTERN;
+}
+
 export function evaluateGate(inputs: GateInputs): GateDecision {
   if (inputs.gate.branch === "story" && inputs.storyId === undefined) {
-    return { pass: false, reason: "gate: branch is not a story branch" };
+    return {
+      pass: false,
+      reason: `gate: branch is not a story branch (${currentBranchLabel(inputs.branch)}; expected a name matching ${expectedStoryPattern(inputs.storyIdPattern)})`,
+    };
   }
   if (inputs.gate.branch === "main" && inputs.branch !== "main") {
-    return { pass: false, reason: "gate: branch is not main" };
+    return {
+      pass: false,
+      reason: `gate: branch is not main (${currentBranchLabel(inputs.branch)}; expected 'main')`,
+    };
   }
 
   if (inputs.gate.prdPasses === true) {
-    if (inputs.storyId === undefined) return { pass: false, reason: "gate: prdPasses requires a story id" };
-    if (inputs.passes === undefined) return { pass: false, reason: `gate: prdPasses is unavailable for ${inputs.storyId}` };
-    if (!inputs.passes) return { pass: false, reason: `gate: prdPasses is false for ${inputs.storyId}` };
+    if (inputs.storyId === undefined) {
+      return {
+        pass: false,
+        reason: `gate: prdPasses requires a story id (${currentBranchLabel(inputs.branch)}; expected a name matching ${expectedStoryPattern(inputs.storyIdPattern)})`,
+      };
+    }
+    if (inputs.passes === undefined) {
+      return { pass: false, reason: `gate: prdPasses is unavailable for ${inputs.storyId} (expected a readable passes: true in prd.json)` };
+    }
+    if (!inputs.passes) return { pass: false, reason: `gate: prdPasses is false for ${inputs.storyId} (expected passes: true)` };
   }
 
   if (inputs.gate.phase !== undefined) {
     const currentPhase = inputs.phase ?? "building";
     if (comparePhase(currentPhase, inputs.gate.phase) < 0) {
-      return { pass: false, reason: `gate: phase ${currentPhase} is before ${inputs.gate.phase}` };
+      return {
+        pass: false,
+        reason: `gate: phase ${currentPhase} is before ${inputs.gate.phase} (expected phase at or past ${inputs.gate.phase})`,
+      };
     }
   }
 

@@ -381,7 +381,7 @@ has no effect and users should remove it. Do not restore the option or panel.
 12. top-level `prd`
 13. top-level `context`
 14. top-level `storyIdPattern` &mdash; overrides the default branch-to-story-id
-    regex (`^([a-z]+-[0-9]+)-`, capture group 1 uppercased).
+    regex (`^([a-z]+-[0-9]+[a-z]?)-`, capture group 1 uppercased).
 15. top-level `prdFlipThreshold` &mdash; overrides the default oscillation flip
     count (see `LOOPER_PRD_FLIP_THRESHOLD` above for precedence).
 16. top-level `adjudicate` &mdash; same field shape as one `steps:` entry;

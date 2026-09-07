@@ -38,7 +38,7 @@ const CONTEXT_MARKERS = {
   datetime: "Datetime:",
   repoDir: "Repo dir:",
   loopPosition: "Loop position:",
-  timebox: "This step is aborted after",
+  timebox: "to complete this step before this turn is aborted",
   vcsDelta: "VCS delta",
   sessionIds: "Opencode sessions from earlier steps this iteration:",
   prd: "prd:",
@@ -174,7 +174,7 @@ describe("buildLooperContext", () => {
           expect(block).not.toMatch(/iteration 2 of 10/);
           break;
         case "timebox":
-          expect(block).not.toMatch(/aborted after/);
+          expect(block).not.toMatch(/to complete this step before this turn is aborted/);
           break;
         case "prd":
           expect(block).not.toContain("prd:");
@@ -410,12 +410,12 @@ describe("buildLooperContext", () => {
 
   test("duration formatting: minutes under 2h", () => {
     const block = buildLooperContext(ALL_ON, baseInput({ timeoutMs: 90 * 60 * 1000 }));
-    expect(block).toMatch(/aborted after 90m/);
+    expect(block).toMatch(/You have 90m to complete this step before this turn is aborted/);
   });
 
   test("duration formatting: compact hours/minutes over 2h", () => {
     const block = buildLooperContext(ALL_ON, baseInput({ timeoutMs: (2 * 60 + 30) * 60 * 1000 }));
-    expect(block).toMatch(/aborted after 2h30m/);
+    expect(block).toMatch(/You have 2h30m to complete this step before this turn is aborted/);
   });
 
   test("untrusted step names/file names render as plain text, not instructions", () => {

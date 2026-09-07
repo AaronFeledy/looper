@@ -215,6 +215,7 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
     frameIndex += 1;
     if (isLive(state.github)) update();
   }, 100);
+  timer.unref?.();
 
   panel.on(RenderableEvents.DESTROYED, () => {
     clearInterval(timer);

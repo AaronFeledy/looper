@@ -25,12 +25,12 @@ const GATE_CASES: readonly GateCase[] = [
   {
     name: "fails a story branch condition when the story id is underivable",
     inputs: { gate: { branch: "story" }, branch: "feature-work", storyId: undefined, passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: branch is not a story branch" },
+    expected: { pass: false, reason: "gate: branch is not a story branch (current 'feature-work'; expected a name matching ^([a-z]+-[0-9]+[a-z]?)-)" },
   },
   {
     name: "fails a story branch condition when git has no branch",
     inputs: { gate: { branch: "story" }, branch: undefined, storyId: undefined, passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: branch is not a story branch" },
+    expected: { pass: false, reason: "gate: branch is not a story branch (no current branch; expected a name matching ^([a-z]+-[0-9]+[a-z]?)-)" },
   },
   {
     name: "passes a main branch condition only on main",
@@ -40,12 +40,12 @@ const GATE_CASES: readonly GateCase[] = [
   {
     name: "fails a main branch condition on a story branch",
     inputs: { gate: { branch: "main" }, branch: "us-074-work", storyId: "US-074", passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: branch is not main" },
+    expected: { pass: false, reason: "gate: branch is not main (current 'us-074-work'; expected 'main')" },
   },
   {
     name: "fails a main branch condition when git has no branch",
     inputs: { gate: { branch: "main" }, branch: undefined, storyId: undefined, passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: branch is not main" },
+    expected: { pass: false, reason: "gate: branch is not main (no current branch; expected 'main')" },
   },
   {
     name: "passes prdPasses only when passes is exactly true",
@@ -55,17 +55,17 @@ const GATE_CASES: readonly GateCase[] = [
   {
     name: "fails prdPasses when the story is false",
     inputs: { gate: { prdPasses: true }, branch: "us-074-work", storyId: "US-074", passes: false, phase: undefined },
-    expected: { pass: false, reason: "gate: prdPasses is false for US-074" },
+    expected: { pass: false, reason: "gate: prdPasses is false for US-074 (expected passes: true)" },
   },
   {
     name: "fails prdPasses when the story or prd snapshot is missing",
     inputs: { gate: { prdPasses: true }, branch: "us-074-work", storyId: "US-074", passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: prdPasses is unavailable for US-074" },
+    expected: { pass: false, reason: "gate: prdPasses is unavailable for US-074 (expected a readable passes: true in prd.json)" },
   },
   {
     name: "fails prdPasses when a story id is underivable",
     inputs: { gate: { prdPasses: true }, branch: "feature-work", storyId: undefined, passes: undefined, phase: undefined },
-    expected: { pass: false, reason: "gate: prdPasses requires a story id" },
+    expected: { pass: false, reason: "gate: prdPasses requires a story id (current 'feature-work'; expected a name matching ^([a-z]+-[0-9]+[a-z]?)-)" },
   },
   {
     name: "treats a missing phase as building",
@@ -85,7 +85,7 @@ const GATE_CASES: readonly GateCase[] = [
   {
     name: "fails when the current phase is before the required phase",
     inputs: { gate: { phase: "verified" }, branch: "us-074-work", storyId: "US-074", passes: undefined, phase: "reviewed" },
-    expected: { pass: false, reason: "gate: phase reviewed is before verified" },
+    expected: { pass: false, reason: "gate: phase reviewed is before verified (expected phase at or past verified)" },
   },
   {
     name: "passes a script condition on exit zero",
@@ -110,7 +110,7 @@ const GATE_CASES: readonly GateCase[] = [
   {
     name: "AND-combines configured conditions and names the first failure",
     inputs: { gate: { branch: "story", prdPasses: true, phase: "verified", script: "true" }, branch: "main", storyId: undefined, passes: false, phase: "building", scriptResult: { ran: true, exitCode: 0 } },
-    expected: { pass: false, reason: "gate: branch is not a story branch" },
+    expected: { pass: false, reason: "gate: branch is not a story branch (current 'main'; expected a name matching ^([a-z]+-[0-9]+[a-z]?)-)" },
   },
 ];
 

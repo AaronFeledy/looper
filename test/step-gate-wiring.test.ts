@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -372,5 +372,33 @@ describe("runEngine gate resume semantics", () => {
 
     // Then the resume pointer still names the interrupted step.
     expect(readRunState()?.stepName).toBe("Review");
+  });
+
+  test("a gate skip is appended to the PRD progress log", async () => {
+    // Given a story-branch gate that will fail, and an existing progress file.
+    const { repoDir, configDir } = setupScratch([{ key: "review", gateBranch: "story" }]);
+    scratchDirs.push(repoDir);
+    const prdDir = join(repoDir, "spec", "prd");
+    mkdirSync(prdDir, { recursive: true });
+    writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [] }));
+    writeFileSync(join(prdDir, "progress.txt"), "# progress\n");
+
+    // When the gated step is skipped.
+    await runIteration({
+      state: createLoopState({ maxIterations: 1, stepNames: ["Review"] }),
+      iteration: 1,
+      client: makeClient({ repoDir, sessionIDs: [] }).client,
+      repoDir,
+      configDir,
+      prdDir,
+    });
+
+    // Then the skip is recorded in the progress log with the step name and expected pattern.
+    const progress = readFileSync(join(prdDir, "progress.txt"), "utf8");
+    expect(progress.startsWith("# progress\n")).toBe(true);
+    expect(progress).toContain(" - Review\n");
+    expect(progress).toContain("[looper] gate skipped Review:");
+    expect(progress).toContain("expected a name matching");
+    expect(progress.endsWith("---\n")).toBe(true);
   });
 });

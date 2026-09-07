@@ -100,7 +100,7 @@ useSessionIdle: false                # optional: use session idle status in reco
 validateResources: false             # optional: validate configured agents exist during startup
 prd: spec/beta-1                     # optional PRD directory; relative paths resolve from the repo dir
 context: true                        # optional; see "Prompt context" below
-storyIdPattern: "^([a-z]+-[0-9]+)-"   # optional; overrides the default branch->story-id regex (see "Story gates" below)
+storyIdPattern: "^([a-z]+-[0-9]+[a-z]?)-"   # optional; overrides the default branch->story-id regex (see "Story gates" below)
 
 steps:
   build:
@@ -262,8 +262,8 @@ the flip threshold with `prdFlipThreshold:` or the `LOOPER_PRD_FLIP_THRESHOLD` e
 
 ### Story gates
 
-A story id is derived from the current git branch (`storyIdPattern`, default `^([a-z]+-[0-9]+)-` matching
-e.g. `us-074-fix-thing` &mdash; `US-074`), read fresh before every gate check, never cached.
+A story id is derived from the current git branch (`storyIdPattern`, default `^([a-z]+-[0-9]+[a-z]?)-` matching
+e.g. `us-074-fix-thing` &mdash; `US-074`, or `us-608a-fix-thing` &mdash; `US-608A`), read fresh before every gate check, never cached.
 
 A step's `gate:` skips that step (no opencode session is created) unless every configured condition passes:
 
@@ -280,8 +280,13 @@ A step's `gate:` skips that step (no opencode session is created) unless every c
   absolute. The script also inherits the process env. It is killed (its whole process group) if it runs past
   `LOOPER_GATE_SCRIPT_TIMEOUT_MS` (default 30000).
 
-A skipped gate logs `[looper] gate skipped <step>: <reason>` and still advances the run to the next step, the
-same as a normal completion.
+A skipped gate logs `[looper] gate skipped <step>: <reason>` (the reason includes what was observed and what was
+expected) and still advances the run to the next step, the same as a normal completion. When `prd:` is configured,
+the same line is appended to `prd.progress` so later steps can see why a gate did not run.
+
+If a running step switches off the default branch onto a name that is not a story branch, looper logs that immediately
+and, after the current turn ends, sends a same-session continue-working follow-up that includes the story-id pattern
+so the agent can rename before later gated steps skip.
 
 `setsPhase: <StoryPhase>` advances that story's phase when the step finishes with a `done` result. The write is
 skipped (and the phase auto-demoted to `building` instead) if the story's `passes` flag flipped `true` to

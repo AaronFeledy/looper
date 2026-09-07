@@ -1,4 +1,4 @@
-const DEFAULT_STORY_ID_PATTERN = "^([a-z]+-[0-9]+)-";
+export const DEFAULT_STORY_ID_PATTERN = "^([a-z]+-[0-9]+[a-z]?)-";
 const GIT_BRANCH_TIMEOUT_MS = 2_000;
 
 export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PATTERN): string | undefined {
