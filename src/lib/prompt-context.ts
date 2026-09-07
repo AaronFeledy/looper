@@ -166,7 +166,7 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
   if (policy.datetime) fixedLines.push(`Datetime: ${formatLocalIso(input.now)}`);
   if (policy.repoDir) fixedLines.push(`Repo dir: ${input.repoDir}`);
   if (policy.loopPosition) fixedLines.push(buildLoopPositionLine(input));
-  if (policy.timebox) fixedLines.push(`This step is aborted after ${formatDuration(input.timeoutMs)}`);
+  if (policy.timebox) fixedLines.push(`You have ${formatDuration(input.timeoutMs)} to complete this step before this turn is aborted`);
   if (policy.prd && (input.prdPaths !== undefined || input.prd !== undefined)) {
     const prdLines = ["prd:"];
     if (input.prdPaths !== undefined) {
