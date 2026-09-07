@@ -5,12 +5,15 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { DEFAULT_STEP_TIMEOUT_MS, failureRetryJitterRatio, failureRetryMinRemainingMs, gateScriptTimeoutMs, inheritedRenameDelayMs, stopSessionConfirmTimeoutMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { derivePrdPaths, readPrd } from "../lib/prd.ts";
+import { appendGateSkipToProgress, resolveProgressFilePath } from "../lib/prd-progress.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
 import { applyFailureRetryJitter, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
 import { createStepAttemptState, decideAfterFailurePolicy, decideAfterPriorEvaluation, decideAfterPriorHealth, type PriorHealthDecision } from "../core/step-attempt.ts";
 import type { StoryStatePort, TitleService } from "./engine-ports.ts";
 import { TitleCoordinator, titleModeFor } from "./title-coordinator.ts";
+import { createStoryBranchMismatchMonitor, storyBranchMismatchLogLine, storyBranchMismatchPrompt } from "./story-branch-nudge.ts";
+import { readBranchFromHead, resolveGitHeadPath } from "../watchers/branch.ts";
 import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export type { BranchDelta, BranchDeltaChange } from "../watchers/branch-delta.ts";
@@ -31,10 +34,10 @@ import {
   type StepRunResult,
   type SessionHealthState,
 } from "../lib/runner.ts";
-import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
+import { createStepRow, failStepRow, finalizeStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
-import { currentGitBranch, storyIdFromBranch } from "../lib/story-id.ts";
+import { currentGitBranch, DEFAULT_STORY_ID_PATTERN, storyIdFromBranch } from "../lib/story-id.ts";
 import { comparePhase } from "../lib/story-state-files.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
 import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
@@ -464,7 +467,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         ...(step.gate.prdPasses !== undefined ? { prdPasses: step.gate.prdPasses } : {}),
         ...(step.gate.phase !== undefined ? { phase: step.gate.phase } : {}),
       };
-      let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase });
+      let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN });
       if (gateDecision.pass && step.gate.script !== undefined) {
         const adjudicationCompletions = adjudication?.store.readCompletions() ?? [];
         const lastAdjudication = adjudicationCompletions[adjudicationCompletions.length - 1];
@@ -481,7 +484,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             } : {}),
             timeoutMs: gateScriptTimeoutMs(),
           });
-        gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, scriptResult });
+        gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN, scriptResult });
       }
       if (!gateDecision.pass) {
         const resumedSessionID = pendingResume?.sessionID;
@@ -495,6 +498,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         recoveryNudgePending = false;
         failStepRow(state, currentStepIndex, "skipped");
         logStepLine(currentStepIndex, `[looper] gate skipped ${step.name}: ${gateDecision.reason}`);
+        if (prdPaths !== undefined) {
+          const appended = appendGateSkipToProgress({
+            progressPath: resolveProgressFilePath(prdPaths.progress, repoDir),
+            stepName: step.name,
+            reason: gateDecision.reason,
+          });
+          if (!appended.appended) logStepLine(currentStepIndex, `[looper] failed to append gate skip to progress: ${appended.error}`);
+        }
         const routing = decideRouting(adjudication);
         // Match post-step routing: when we divert to stop/adjudicate, park the
         // resume pointer at the end of the configured steps (adjudicate is not a
@@ -830,6 +841,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       attempt.resumePrompt = cleanRestartPrompt(promptText(step), "manual");
     }
 
+    const resolvedStoryIdPattern = storyIdPattern ?? DEFAULT_STORY_ID_PATTERN;
+    const stepHeadPath = await resolveGitHeadPath(repoDir);
+    const readStepBranch = (): string | undefined => {
+      if (stepHeadPath !== null) {
+        const fromHead = readBranchFromHead(stepHeadPath);
+        if (fromHead !== null) return fromHead;
+      }
+      return state.branch.length > 0 ? state.branch : undefined;
+    };
+    const mismatchMonitor = createStoryBranchMismatchMonitor({
+      initialBranch: readStepBranch(),
+      getBranch: readStepBranch,
+      pattern: resolvedStoryIdPattern,
+      onMismatch: (mismatch) => logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch)),
+    });
+
+    try {
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
@@ -1250,6 +1278,47 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
 
       break;
+    }
+
+    if (!adjudicating && result.status === "done" && result.sessionID !== undefined) {
+      const mismatch = mismatchMonitor.mismatch();
+      if (mismatch !== undefined) {
+        logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch));
+        const reminder = await runOpenCodeStep({
+          ctx,
+          stepIndex: currentStepIndex,
+          prompt: storyBranchMismatchPrompt(mismatch),
+          client,
+          repoDir,
+          step,
+          sessionID: result.sessionID,
+          timeoutMsOverride: remainingBudget(),
+          ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
+          ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+          ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
+          ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
+          requestBrokerOwner,
+          onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) => {
+            hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, promptText: sentPromptText, looperMessageIDs: [...looperMessageIDs], ...(workDescription !== undefined ? { title: workDescription } : {}) });
+          },
+          ...(titleCoordinator
+            ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
+            : usingInheritedTitle
+              ? { onFirstAssistantContent: onInheritedFirstResponse }
+              : {}),
+        });
+        if (reminder.status === "done") result = reminder;
+        else {
+          logStepLine(
+            currentStepIndex,
+            `[looper] story-branch rename reminder ${reminder.status}${reminder.errorMessage !== undefined ? `: ${reminder.errorMessage}` : ""}; keeping the finished step`,
+          );
+          finalizeStepRow(state, currentStepIndex, "done");
+        }
+      }
+    }
+    } finally {
+      mismatchMonitor.stop();
     }
 
     const prdAfter = snapshotPrd(adjudication, prdDir);
