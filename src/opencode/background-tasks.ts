@@ -4,10 +4,12 @@ import { CONTINUATION_EXIT_GRACE_MS, DEFAULT_STEP_TIMEOUT_MS } from "../config/t
 import type { RunStepContext } from "../engine/step-reporter.ts";
 import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { CONTINUATION_EXIT_GRACE_POLL_MS, CONTINUATION_MAX_WAIT_MS, CONTINUATION_START_SKEW_MS, CONTINUATION_STALE_MS, CONTINUATION_STATUS_POLL_MS, continuationPollMs, continuationTime, isSafeSessionID, readActiveProjectContinuationRecord, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
-import { probeBackgroundLiveness, sessionPendingState, sessionStillPending, type BackgroundLivenessProbe, type SessionPendingState } from "./session-health.ts";
+import { probeBackgroundLiveness, sessionPendingState, type BackgroundLivenessProbe, type SessionPendingState } from "./session-health.ts";
+import { sdkWithDeadline } from "./deadline.ts";
 import { sanitizeLogField, toError } from "./util.ts";
 
 export type ContinuationWaitResult = "idle" | "resumed" | "stopped" | "skipped" | "restart" | "stale" | "timeout" | "orphaned";
+export type ContinuationLookupResult = RunContinuationRecord | null | "pending" | "unknown";
 
 export { probeBackgroundLiveness };
 
@@ -16,16 +18,17 @@ export async function waitForActiveLoopContinuationRecord({
   repoDir,
   startedAt,
   sessionID,
+  graceMs = CONTINUATION_EXIT_GRACE_MS,
 }: {
   client: OpencodeClient;
   repoDir: string;
   startedAt: number;
   sessionID: string | undefined;
-}): Promise<RunContinuationRecord | null> {
+  graceMs?: number;
+}): Promise<ContinuationLookupResult> {
   if (sessionID !== undefined && !isSafeSessionID(sessionID)) return null;
 
-  const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
-  let nextStatusPoll = 0;
+  const deadline = Date.now() + graceMs;
   while (Date.now() <= deadline) {
     let record: RunContinuationRecord | null;
     try {
@@ -37,42 +40,30 @@ export async function waitForActiveLoopContinuationRecord({
     }
     if (record !== null && continuationTime(record) >= startedAt - CONTINUATION_START_SKEW_MS) {
       if (record.source.state === "active") return record;
-      if (record.source.state === "idle") return null;
-    }
-
-    const now = Date.now();
-    if (sessionID !== undefined && now >= nextStatusPoll) {
-      nextStatusPoll = now + CONTINUATION_STATUS_POLL_MS;
-      let pending = false;
-      try {
-        pending = await sessionStillPending(client, repoDir, sessionID);
-      } catch {
-        pending = false;
-      }
-      if (pending) {
-        await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
-        continue;
-      }
+      if (record.source.state === "idle") break;
     }
 
     await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
   }
-  return null;
+  if (sessionID === undefined) return null;
+  const state = await sdkWithDeadline((signal) => sessionPendingState(client, repoDir, sessionID, signal), { remainingMs: CONTINUATION_STATUS_POLL_MS }).catch(() => "unknown" as const);
+  return state === "idle" ? null : state;
 }
 
 export async function waitForSessionLoopContinuationRecord({
   client,
   repoDir,
   sessionID,
+  graceMs = CONTINUATION_EXIT_GRACE_MS,
 }: {
   client: OpencodeClient;
   repoDir: string;
   sessionID: string;
-}): Promise<RunContinuationRecord | null> {
+  graceMs?: number;
+}): Promise<ContinuationLookupResult> {
   if (!isSafeSessionID(sessionID)) return null;
 
-  const deadline = Date.now() + CONTINUATION_EXIT_GRACE_MS;
-  let nextStatusPoll = 0;
+  const deadline = Date.now() + graceMs;
   while (Date.now() <= deadline) {
     let record: RunContinuationRecord | null;
     try {
@@ -82,27 +73,13 @@ export async function waitForSessionLoopContinuationRecord({
     }
     if (record !== null) {
       if (record.source.state === "active") return record;
-      if (record.source.state === "idle") return null;
-    }
-
-    const now = Date.now();
-    if (now >= nextStatusPoll) {
-      nextStatusPoll = now + CONTINUATION_STATUS_POLL_MS;
-      let pending = false;
-      try {
-        pending = await sessionStillPending(client, repoDir, sessionID);
-      } catch {
-        pending = false;
-      }
-      if (pending) {
-        await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
-        continue;
-      }
+      if (record.source.state === "idle") break;
     }
 
     await Bun.sleep(CONTINUATION_EXIT_GRACE_POLL_MS);
   }
-  return null;
+  const state = await sdkWithDeadline((signal) => sessionPendingState(client, repoDir, sessionID, signal), { remainingMs: CONTINUATION_STATUS_POLL_MS }).catch(() => "unknown" as const);
+  return state === "idle" ? null : state;
 }
 
 export function logContinuationState(ctx: RunStepContext, stepIndex: number, record: RunContinuationRecord, prefix: string): void {

@@ -66,8 +66,10 @@ function stepSessionsForPlan(runState: ReturnType<RunStateStore["read"]>, iterat
 }
 
 function stepIndexFromRunState<StepLike extends RunStateStoreStep>(runState: NonNullable<ReturnType<RunStateStore["read"]>>, steps: readonly StepLike[]): number {
+  if (steps[runState.stepIndex]?.name === runState.stepName) return runState.stepIndex;
   const named = steps.findIndex((step) => step.name === runState.stepName);
-  return named !== -1 ? named : Math.max(0, Math.min(steps.length - 1, runState.stepIndex));
+  const unique = named !== -1 && steps.filter((step) => step.name === runState.stepName).length === 1;
+  return unique ? named : Math.max(0, Math.min(steps.length - 1, runState.stepIndex));
 }
 
 function defaultElapsedSeconds(startedAt: number): number {
@@ -169,6 +171,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
 
   let recoveryNudgeNext = false;
   let recoveryStateNext: { readonly state: S } | undefined;
+  let recoveryStepsNext: Step[] | undefined;
   let stepSessionsIteration: number | undefined;
   let iterationStartedAt = Date.now();
 
@@ -200,7 +203,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       stepSessionsIteration = iteration;
     }
 
-    const stepsSnapshot = input.loadSteps();
+    const stepsSnapshot = recoveryStepsNext ?? input.loadSteps();
+    recoveryStepsNext = undefined;
     const startStepIndex = iteration === startIteration ? firstIterationStartStepIndex : 0;
     const recoveryState = recoveryStateNext;
     recoveryStateNext = undefined;
@@ -259,7 +263,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         recoverySnapshots: input.recoverySnapshots ?? false,
         hooks: buildEngineStepHooks({
           store: input.store,
-          loadSteps: input.loadSteps,
+          stepsSnapshot,
           looperRunID,
           persistTitles,
           getStepSessions: () => iterationStepSessions,
@@ -281,6 +285,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
           confirmMs: input.stallConfirmMs ?? stallConfirmMs(),
           store: input.store,
           currentBranch: input.currentBranch,
+          shouldAbort: stopRequested,
         });
         if (outcome.stopped) {
           await input.hooks.onStopRequested?.({ iteration, reason: outcome.reason, phase: "after-iteration" });
@@ -303,7 +308,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       });
       firstIterationResume = recoveryResume;
       recoveryStateNext = choice === "nudge" && recoveryResume?.sessionID !== undefined ? { state } : undefined;
-      const recoverySteps = input.loadSteps();
+      const recoverySteps = stepsSnapshot;
+      recoveryStepsNext = stepsSnapshot;
       const failedStepIndex = recoveryRunState !== null ? stepIndexFromRunState(recoveryRunState, recoverySteps) : input.legacyResumeStepIndex(recoverySteps);
       startIteration = iteration;
       firstIterationStartStepIndex = failedStepIndex;
@@ -311,7 +317,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       firstIterationTitle = persistTitles ? recoveryRunState?.title : undefined;
       iterationStepSessions = iterationStepSessions.length > 0 ? iterationStepSessions : (recoveryRunState?.stepSessions ?? []);
       looperRunID = recoveryRunState?.looperRunID ?? looperRunID;
-      input.store.clearStopFiles();
+      if (stopRequested()) return { kind: "stopped", reason: input.store.stopReason() };
       await input.hooks.onRecoveryRetry?.({ state, choice });
       iteration -= 1;
       continue;

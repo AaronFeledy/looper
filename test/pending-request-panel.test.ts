@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
@@ -8,6 +8,8 @@ import { createRunnerEventController } from "../src/opencode/step-runner-types.t
 import { pendingRequestLines } from "../src/tui/pending-request-panel.ts";
 
 const SID = "ses_active";
+const disposers: Array<() => void> = [];
+afterEach(() => { for (const dispose of disposers.splice(0)) dispose(); });
 const TOOL = { messageID: "msg_active", callID: "call_active" };
 
 function makeState(): LoopState {
@@ -40,6 +42,7 @@ function makeController(state: LoopState, options: { permissionPolicy?: Record<s
     ...(options.permissionPolicy !== undefined ? { permissionPolicy: options.permissionPolicy } : {}),
     ...(options.questionPolicy !== undefined ? { questionPolicy: options.questionPolicy } : {}),
   });
+  disposers.push(controller.dispose);
   return { controller, replies };
 }
 

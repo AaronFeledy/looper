@@ -1,12 +1,13 @@
 import type { EngineFrontendHooks } from "../engine/engine-ports.ts";
 import type { RunControl } from "../engine/run-control.ts";
-import { createLoopState, subscribe, type LoopState } from "./state.ts";
+import { createLoopState, subscribeAgentLines, type LoopState } from "./state.ts";
 import type { Step } from "./runner.ts";
 import { divider, label, ui, waitWithCountdown } from "./fallback-ui.ts";
 
-export function createFallbackEngineHooks(currentBranch: () => Promise<string>, control: RunControl): EngineFrontendHooks<LoopState, Step> {
+export function createFallbackEngineHooks(currentBranch: () => Promise<string>, control: RunControl): EngineFrontendHooks<LoopState, Step> & Disposable {
   let unsubscribe: (() => void) | undefined;
   return {
+    [Symbol.dispose]: () => { unsubscribe?.(); unsubscribe = undefined; },
     createIterationState: ({ iteration, maxIterations, steps, branch }) => {
       const state = createLoopState({ maxIterations, stepNames: steps.map((step) => step.name), control });
       state.iteration = iteration;
@@ -15,16 +16,13 @@ export function createFallbackEngineHooks(currentBranch: () => Promise<string>, 
       return state;
     },
     onIterationStart: ({ state, iteration, maxIterations, steps, startStepIndex }) => {
-      let printedLineCount = 0;
-      unsubscribe = subscribe(() => {
-        for (const line of state.agentLines.slice(printedLineCount)) process.stdout.write(`${line}\n`);
-        printedLineCount = state.agentLines.length;
-      });
+      unsubscribe?.();
+      unsubscribe = subscribeAgentLines(state, (line) => { process.stdout.write(`${line}\n`); });
       process.stdout.write(`\n${divider(`Iteration ${iteration}/${maxIterations}`, ui.cyan)}`);
       process.stdout.write(`${label("Branch", state.branch)}\n`);
       process.stdout.write(`${label("Step count", `${steps.length} at iteration start`)}\n`);
       if (startStepIndex > 0) process.stdout.write(`${label("Continuing", `from step ${startStepIndex + 1}/${steps.length}`)}\n`);
-      process.stdout.write(`${ui.dim("│ list may change mid-iteration when looper.yaml changes")}\n`);
+      process.stdout.write(`${ui.dim("│ looper.yaml changes apply at the next iteration")}\n`);
     },
     onStepBegin: ({ step, index, totalSteps }) => {
       process.stdout.write(`\n${divider(`Step ${index + 1}/${totalSteps} · ${step.name}`, ui.green)}`);

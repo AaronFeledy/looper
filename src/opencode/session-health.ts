@@ -52,10 +52,11 @@ export async function sessionPendingState(
   client: OpencodeClient,
   repoDir: string,
   sessionID: string,
+  signal?: AbortSignal,
 ): Promise<SessionPendingState> {
   try {
-    const result = await client.session.status({ directory: repoDir });
-    if (result.error) return "unknown";
+    const result = await client.session.status({ directory: repoDir }, signal === undefined ? {} : { signal });
+    if (result.error || result.data === undefined) return "unknown";
     return isPendingSessionStatus(result.data?.[sessionID]) ? "pending" : "idle";
   } catch {
     return "unknown";

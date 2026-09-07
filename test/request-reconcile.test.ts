@@ -39,6 +39,19 @@ function harness(lists: { readonly permissions: () => Promise<unknown>; readonly
 }
 
 describe("reconcileOpenRequests", () => {
+  test.each([undefined, null, {}])("preserves gates when list data is not an array: %j", async (data) => {
+    // Given
+    const target = harness({ permissions: async () => ({ data }), questions: async () => ({ data }) });
+    target.broker.callbacks.onPermissionAsked?.({ ...permission("p"), requestID: "p" });
+    target.broker.callbacks.onQuestionAsked?.({ ...question("q"), requestID: "q" });
+    try {
+      // When
+      await reconcileOpenRequests({ ...target, repoDir: "/repo", pushLine: (line) => target.lines.push(line) });
+      // Then
+      expect(target.state.pendingRequests.map((request) => request.requestID)).toEqual(["p", "q"]);
+      expect(target.lines.filter((line) => line.includes("during reconcile"))).toHaveLength(2);
+    } finally { target.broker.dispose(); }
+  });
   test("merges questions from question.list", async () => {
     // Given
     const target = harness({

@@ -16,14 +16,16 @@ export async function reconcileOpenRequests(options: ReconcileOpenRequestsOption
   try {
     const result = await options.client.permission.list({ directory: options.repoDir });
     if (result.error !== undefined) options.pushLine(`[looper] permission.list failed during reconcile: ${formatRequestError(result.error)}`);
-    else permissions = result.data ?? [];
+    else if (Array.isArray(result.data)) permissions = result.data;
+    else options.pushLine("[looper] permission.list returned invalid data during reconcile");
   } catch (error) {
     options.pushLine(`[looper] permission.list failed during reconcile: ${toError(error).message}`);
   }
   try {
     const result = await options.client.question.list({ directory: options.repoDir });
     if (result.error !== undefined) options.pushLine(`[looper] question.list failed during reconcile: ${formatRequestError(result.error)}`);
-    else questions = result.data ?? [];
+    else if (Array.isArray(result.data)) questions = result.data;
+    else options.pushLine("[looper] question.list returned invalid data during reconcile");
   } catch (error) {
     options.pushLine(`[looper] question.list failed during reconcile: ${toError(error).message}`);
   }

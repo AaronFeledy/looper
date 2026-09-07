@@ -375,6 +375,24 @@ describe("createStallObserver against a real git repo", () => {
     expect(await observer.confirmStall("us-1-story")).toBe(false);
   });
 
+  test("counts a commit made during an in-flight sample as progress at the next quiet sample", async () => {
+    // Given a proven quiet baseline and a one-strike threshold.
+    const repoDir = await gitScratch();
+    let inFlight = false;
+    const observer = createStallObserver({ repoDir, limits: { iterations: 1, adjudications: 0 }, readCompletionsCount: () => 0, probeInFlight: async () => inFlight });
+    await observer.checkIteration("us-1-story");
+    writeFileSync(join(repoDir, "tracked.txt"), "background commit\n");
+    await $`git add tracked.txt`.cwd(repoDir).quiet();
+    await $`git -c user.email=t@t -c user.name=t commit -q -m progress`.cwd(repoDir).quiet();
+    inFlight = true;
+    await observer.checkIteration("us-1-story");
+    inFlight = false;
+    // When the first quiet sample after the commit is accepted.
+    const verdict = await observer.checkIteration("us-1-story");
+    // Then the busy sample did not absorb that commit.
+    expect(verdict.stalled).toBe(false);
+  });
+
   test("a same-line-count edit to an already-dirty tracked file is progress", async () => {
     const repoDir = await gitScratch();
     const observer = prdObserver(repoDir, 2);
