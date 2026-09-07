@@ -925,12 +925,14 @@ async function main(): Promise<number> {
 }
 
 try {
-  process.exitCode = Number(await main());
+  // TUI timers/stdin/SDK sockets can keep the event loop alive after teardown;
+  // without a hard exit, "Looper exited: ..." prints and the process hangs until SIGINT.
+  process.exit(Number(await main()));
 } catch (error) {
   if (error instanceof AttachedServerAgentError || error instanceof AttachedServerLocationError) {
     process.stderr.write(`${error.message}\n`);
   } else {
     process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
   }
-  process.exitCode = 1;
+  process.exit(1);
 }
