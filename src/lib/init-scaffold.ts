@@ -41,6 +41,15 @@ finish in one sitting; the loop will run again.
 `;
 }
 
+function gitignoreTemplate(): string {
+  return [
+    "# Machine-local SQLite mutex. Recreates on the next locked write; never commit it.",
+    ".looper-state-lock.sqlite",
+    ".looper-state-lock.sqlite-*",
+    "",
+  ].join("\n");
+}
+
 function checkDoneTemplate(stopFileRelPath: string): string {
   return `Decide whether the overall goal of this loop is complete.
 
@@ -63,6 +72,12 @@ export function scaffoldConfigDir({ configDir, repoDir }: { configDir: string; r
   const configPath = join(configDir, CONFIG_FILE_NAME);
   writeFileSync(configPath, configTemplate());
   files.push(configPath);
+
+  const gitignorePath = join(configDir, ".gitignore");
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, gitignoreTemplate());
+    files.push(gitignorePath);
+  }
 
   for (const [name, content] of [
     ["work.md", workTemplate()],

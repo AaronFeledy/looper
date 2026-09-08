@@ -32,3 +32,8 @@ logs
 
 # Scratch dirs used by e2e tests
 /test/.tmp
+
+# Machine-local SQLite mutex written into a consuming project's configDir.
+# Recreates on the next locked write; never commit it (or its -journal/-wal/-shm sidecars).
+.looper-state-lock.sqlite
+.looper-state-lock.sqlite-*
