@@ -7,9 +7,8 @@ import { buildLooperSessionMetadata, type LooperSessionMetadataInput } from "../
 import { stopFileExists } from "../persistence/state-file-operations.ts";
 import { createSessionEventConsumer } from "../lib/event-consumer.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
-import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord } from "./background-tasks.ts";
+import { logContinuationState, setContinuationStatus, waitForActiveLoopContinuationRecord, type ContinuationLookupResult } from "./background-tasks.ts";
 import { createPromptEventStream, type PromptEventStream } from "./event-stream.ts";
-import type { RunContinuationRecord } from "./continuation-records.ts";
 import { classifyAssistantWithReactivationGrace, classifyMessagesForCurrentTurn, resolveOutcomeParentID, sessionReactivatedMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
 import type { RequestBroker } from "./request-broker.ts";
@@ -18,6 +17,7 @@ import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
 import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
 import { resolvePromptVariant } from "./variant-resolve.ts";
+import { sdkWithDeadline } from "./deadline.ts";
 
 export type { Step, StepResult, StepRunResult } from "./step-runner-types.ts";
 export { createRunnerEventController, parseModel } from "./step-runner-types.ts";
@@ -192,6 +192,10 @@ export async function runOpenCodeStep({
       pushLine,
       pushLines,
       ownedSessionIDs: () => ownedSessions.ids(),
+      onSessionLifecycle: (event) => {
+        if (event.type === "session.deleted") ownedSessions.removeChild(event.properties.sessionID);
+        else ownedSessions.apply({ kind: "upsert", session: { ...event.properties.info, createdAt: event.properties.info.time.created } });
+      },
       onEvent: (event, at) => {
         ctx.reporter.out.event(stepIndex, event, at);
       },
@@ -215,6 +219,7 @@ export async function runOpenCodeStep({
       reconcileRequests: brokerOwner.reconcile,
     });
     await eventStream.start();
+    await brokerOwner.reconcile();
 
     const model = parseModel(step.model);
     const variant = await resolvePromptVariant({
@@ -249,6 +254,35 @@ export async function runOpenCodeStep({
     );
     if (result.error) throw new Error(`session.prompt: ${formatRequestError(result.error)}`);
     pushLine(`[looper] prompt completed`);
+    await eventStream.stop();
+    // A stream/session error already decided this step's outcome. Surface it
+    // BEFORE classifying a snapshot: otherwise a follow-up request failure
+    // (or an unreachable session.messages) masks the real provider error.
+    const streamError = eventStream.consumerError() ?? sessionEventError;
+    if (streamError !== undefined) throw streamError;
+    const msgs = await sdkWithDeadline(
+      (signal) => client.session.messages({ sessionID: boundSessionID, directory: repoDir }, { signal }),
+      { remainingMs: timeoutController.remainingMs() ?? effectiveTimeoutMs, signal: ctrl.signal },
+    );
+    if (msgs.error || !msgs.data) throw new Error("session snapshot unavailable after prompt");
+    outcomeMessageID = resolveOutcomeParentID(msgs.data, messageID) ?? messageID;
+    let classification = classifyMessagesForCurrentTurn(msgs.data, messageID);
+    if (classification.kind === "empty") {
+      classification = await classifyAssistantWithReactivationGrace({
+        client, repoDir, sessionID: boundSessionID, parentMessageID: outcomeMessageID,
+        signal: ctrl.signal,
+        initialClassification: classification,
+        shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
+        log: pushLine,
+      });
+    }
+    switch (classification.kind) {
+      case "done": break;
+      case "failed":
+      case "empty": throw new Error(classification.errorMessage);
+      case "in-progress": throw new Error(`${sessionReactivatedMessage(boundSessionID)}; reattaching instead of completing the step`);
+      case "missing": break;
+    }
   } catch (error) {
     if (cancellation.action === null) {
       const watchdogStallReason = eventStream?.watchdogStallReason();
@@ -287,40 +321,6 @@ export async function runOpenCodeStep({
   if (finalError === undefined && cancellation.action === null && sessionEventError !== undefined) {
     finalError = sessionEventError;
   }
-  if (finalError === undefined && cancellation.action === null && cancellation.activeSessionID !== undefined && sentMessageID !== undefined) {
-    const boundSessionID = cancellation.activeSessionID;
-    let reactivated = false;
-    let classification;
-    try {
-      const msgs = await client.session.messages({ sessionID: boundSessionID, directory: repoDir });
-      if (!msgs.error && msgs.data) {
-        outcomeMessageID = resolveOutcomeParentID(msgs.data, sentMessageID) ?? sentMessageID;
-        classification = classifyMessagesForCurrentTurn(msgs.data, sentMessageID);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      pushLine(`[looper] session snapshot heal failed: ${message}`);
-    }
-    if (classification?.kind === "in-progress") {
-      finalError = new Error(`session ${boundSessionID} still has an in-progress turn; reattaching instead of completing the step`);
-    } else if (classification === undefined || classification.kind === "empty") {
-      classification = await classifyAssistantWithReactivationGrace({
-        client,
-        repoDir,
-        sessionID: boundSessionID,
-        parentMessageID: outcomeMessageID ?? sentMessageID,
-        shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
-        log: pushLine,
-        onReactivated: () => {
-          reactivated = true;
-        },
-      });
-    }
-    if (finalError === undefined && (classification.kind === "failed" || classification.kind === "empty")) finalError = new Error(classification.errorMessage);
-    // A reactivated session must NOT complete the step: opencode is generating
-    // again, and the reattach path owns that session from here.
-    else if (reactivated) finalError = new Error(`${sessionReactivatedMessage(boundSessionID)}; reattaching instead of completing the step`);
-  }
 
   if (teardownError !== undefined) finalError = new Error(teardownError);
   const status: StepResult =
@@ -332,7 +332,7 @@ export async function runOpenCodeStep({
   if (finalError) pushLine(`[error] ${finalError.message}`);
 
   if (status === "done" && cancellation.activeSessionID !== undefined) {
-    let record: RunContinuationRecord | null = null;
+    let record: ContinuationLookupResult = "unknown";
     try {
       record = await waitForActiveLoopContinuationRecord({
         client,
@@ -342,6 +342,11 @@ export async function runOpenCodeStep({
       });
     } catch (error) {
       pushLine(`[looper] continuation lookup after opencode exit threw: ${toError(error).message}`);
+    }
+    if (record === "pending" || record === "unknown") {
+      const errorMessage = `session ${cancellation.activeSessionID} is ${record} after continuation grace; cannot complete step`;
+      ctx.reporter.steps.finalize(stepIndex, "failed");
+      return { status: "failed", sessionID: cancellation.activeSessionID, messageID: outcomeMessageID, errorMessage };
     }
     if (record !== null) {
       setContinuationStatus(ctx, stepIndex, record);

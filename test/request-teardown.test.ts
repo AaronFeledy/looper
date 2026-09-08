@@ -2,7 +2,7 @@ import { OpencodeClient } from "@opencode-ai/sdk/v2";
 import { describe, expect, test } from "bun:test";
 
 import { createLoopStateStepReporter } from "../src/lib/loop-state-reporter.ts";
-import { createLoopState } from "../src/lib/state.ts";
+import { createLoopState, tryClaimPendingRequestDecision } from "../src/lib/state.ts";
 import { createRequestBroker } from "../src/opencode/request-broker.ts";
 import { teardownRequests, type TeardownClock } from "../src/opencode/request-teardown.ts";
 
@@ -59,6 +59,20 @@ function harness(options: { readonly abort?: () => Promise<unknown>; readonly re
 }
 
 describe("teardownRequests", () => {
+  test("rejects a human claim not yet consumed by the poller", async () => {
+    // Given
+    let replies = 0;
+    const target = harness({ reply: async () => { replies += 1; return { data: true }; } });
+    tryClaimPendingRequestDecision(target.state, { requestID: "perm-1", generation: target.broker.generation, action: "once" });
+    try {
+      // When
+      const result = await teardownRequests({ ...target, repoDir: "/repo", sessionID: SESSION_ID, timeoutMs: 100 });
+      // Then
+      expect(result).toEqual({ safeToProceed: true });
+      expect(replies).toBe(1);
+      expect(target.state.pendingRequests).toEqual([]);
+    } finally { target.broker.dispose(); }
+  });
   test("returns unsafe when session abort hangs", async () => {
     // Given
     const target = harness({ abort: async () => await new Promise(() => undefined) });

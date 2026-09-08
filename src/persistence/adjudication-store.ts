@@ -1,4 +1,4 @@
-import type { AdjudicationStore } from "../engine/engine-ports.ts";
+import type { AdjudicationStore as AdjudicationPort } from "../engine/engine-ports.ts";
 import {
   adjudicateMarkerExists,
   appendAdjudicationCompletion,
@@ -17,10 +17,28 @@ import {
   writeAdjudicateSession,
   type AdjudicateSession,
 } from "../lib/adjudication-files.ts";
-import { initStatePaths } from "../lib/state-files.ts";
+import { initStatePaths, requireConfigDir } from "../lib/state-files.ts";
+import { acknowledgeAdjudicationRequest, readAdjudicationRequest } from "./adjudication-request.ts";
+import { withFileTransaction } from "./file-transaction.ts";
 
 export type { AdjudicateSession } from "../lib/adjudication-files.ts";
-export type { AdjudicationStore } from "../engine/engine-ports.ts";
+export type AdjudicationStore = AdjudicationPort & {
+  readonly readRequest: typeof readAdjudicationRequest;
+  readonly completeSession: (sessionID: string) => void;
+};
+
+function completeSession(sessionID: string): void {
+  withFileTransaction(requireConfigDir(), () => {
+    const session = readSessionFailClosed();
+    if (session === null || session.sessionID !== sessionID || session.request === undefined) {
+      throw new CorruptAdjudicateSessionError();
+    }
+    appendAdjudicationCompletion({ at: new Date().toISOString(), reason: session.request.reason });
+    markPrdHistoryAdjudicated();
+    acknowledgeAdjudicationRequest(session.request);
+    clearAdjudicateSession();
+  });
+}
 
 export class CorruptAdjudicateSessionError extends Error {
   constructor() {
@@ -44,6 +62,8 @@ function readSessionFailClosed(): AdjudicateSession | null {
 export function createAdjudicationStore(opts: { readonly configDir: string }): AdjudicationStore {
   initStatePaths({ configDir: opts.configDir });
   return {
+    readRequest: readAdjudicationRequest,
+    completeSession,
     markerExists: adjudicateMarkerExists,
     readMarker: readAdjudicateMarker,
     writeMarker: writeAdjudicateMarker,

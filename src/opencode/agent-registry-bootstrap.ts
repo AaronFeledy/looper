@@ -1,4 +1,4 @@
-import type { OpencodeClient, Session } from "@opencode-ai/sdk/v2";
+import type { OpencodeClient, Session, SessionStatus } from "@opencode-ai/sdk/v2";
 
 import { isTitleSession, type RegistryDelta, type SessionFacts } from "../core/agent-registry.ts";
 import { formatRequestError } from "./util.ts";
@@ -26,13 +26,16 @@ export async function bootstrapAgentRoot({
   repoDir,
   rootSessionID,
   signal,
+  includeActivity = true,
 }: {
   readonly client: OpencodeClient;
   readonly repoDir: string;
   readonly rootSessionID: string;
   readonly signal: AbortSignal;
+  readonly includeActivity?: boolean;
 }): Promise<BootstrapResult> {
-  const statusResult = await client.session.status({ directory: repoDir }, { signal });
+  const idleStatuses: Record<string, SessionStatus> = {};
+  const statusResult = includeActivity ? await client.session.status({ directory: repoDir }, { signal }) : { data: idleStatuses, error: undefined };
   if (statusResult.error) return { kind: "failure", message: `session.status failed: ${formatRequestError(statusResult.error)}` };
   if (!statusResult.data) return { kind: "failure", message: "session.status returned no data" };
 

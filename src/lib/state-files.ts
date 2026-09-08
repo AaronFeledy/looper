@@ -1,10 +1,10 @@
-import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { closeSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 // allow: SIZE_OK — this file is state-file I/O for the resume pointer and its
 // stepSessions ledger; the required parse/write/upsert/resume-plan surface
 // pushes it past the 250-pure-LOC guideline, and Todo 4's authorized file
 // scope (state-files.ts, main.ts, fallback.ts, tests only) forbids splitting
 // it into a new module. Follow-up split tracked in the plan's notepad.
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 function isMissingPath(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
@@ -32,10 +32,22 @@ export function tolerantRead(path: string): string | null {
 }
 
 export function writeFileAtomically(path: string, content: string): void {
-  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
   try {
-    writeFileSync(tempPath, content, { mode: 0o600 });
+    const fd = openSync(tempPath, "wx", 0o600);
+    try {
+      writeFileSync(fd, content);
+      fs.fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tempPath, path);
+    const directory = openSync(dirname(path), "r");
+    try {
+      fs.fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
   } catch (error) {
     rmSync(tempPath, { force: true });
     throw error;
@@ -314,14 +326,24 @@ export function stepSessionsForResume(runState: RunState | null, iteration: numb
   return runState.stepSessions;
 }
 
+export class InvalidCheckpointError extends Error {
+  constructor(readonly path: string, options?: ErrorOptions) {
+    super(`invalid or unreadable checkpoint ${path}; refusing fresh generation; reconcile the recorded session before clearing it`, options);
+    this.name = "InvalidCheckpointError";
+  }
+}
+
 export function readRunState(): RunState | null {
+  const path = runStateFilePath();
   try {
-    const content = tolerantRead(runStateFilePath());
+    const content = tolerantRead(path);
     if (content === null) return null;
-    return parseRunState(JSON.parse(content));
+    const state = parseRunState(JSON.parse(content));
+    if (state === null) throw new InvalidCheckpointError(path);
+    return state;
   } catch (error) {
-    logStateDiagnostic(`ignoring unreadable run-state file: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    if (error instanceof InvalidCheckpointError) throw error;
+    throw new InvalidCheckpointError(path, { cause: error });
   }
 }
 

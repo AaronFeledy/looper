@@ -70,14 +70,19 @@ export type StallCheckInput = {
   readonly confirmMs: number;
   readonly store: StallStopFiles;
   readonly currentBranch: () => Promise<string>;
+  readonly shouldAbort?: () => boolean;
 };
 
 export async function runStallCheck(input: StallCheckInput): Promise<StallCheckOutcome> {
   const verdict = await input.observer.checkIteration(await input.currentBranch());
   if (!verdict.stalled) return { stopped: false };
-  const stopRequested = () => input.store.stopFileExists() || input.store.stopAfterIterationFileExists();
+  const stopRequested = () => input.shouldAbort?.() === true || input.store.stopFileExists() || input.store.stopAfterIterationFileExists();
   if (!(await waitForStallSettle(input.confirmMs, stopRequested))) return { stopped: true, reason: input.store.stopReason() };
-  if (!(await input.observer.confirmStall(await input.currentBranch()))) return { stopped: false };
+  const branch = await input.currentBranch();
+  if (stopRequested()) return { stopped: true, reason: input.store.stopReason() };
+  const confirmed = await input.observer.confirmStall(branch);
+  if (stopRequested()) return { stopped: true, reason: input.store.stopReason() };
+  if (!confirmed) return { stopped: false };
   input.store.writeStop(verdict.reason);
   return { stopped: true, reason: verdict.reason };
 }

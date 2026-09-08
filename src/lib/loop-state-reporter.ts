@@ -60,7 +60,7 @@ export function createLoopStateStepReporter(state: LoopState): StepReporter {
         if (step === undefined) return;
         step.outputEvents ??= [];
         step.outputEventTimes ??= [];
-        replaceSessionEvents(
+        const removed = replaceSessionEvents(
           {
             outputEvents: step.outputEvents,
             outputEventTimes: step.outputEventTimes,
@@ -69,6 +69,8 @@ export function createLoopStateStepReporter(state: LoopState): StepReporter {
           },
           snapshot,
         );
+        const last = Math.max(0, Math.max(step.outputLines.length, step.outputEvents.length) - 1);
+        step.outputScrollTop = step.outputPinnedToBottom ? last : Math.min(last, Math.max(0, step.outputScrollTop - removed));
         notify();
       },
     },

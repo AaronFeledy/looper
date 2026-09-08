@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { withFileTransaction } from "../persistence/file-transaction.ts";
 
 import { requireConfigDir, tolerantRead, tolerantRm, writeFileAtomically } from "./state-files.ts";
 
@@ -65,16 +66,29 @@ export function readStoryPhase(storyId: string): StoryPhase | undefined {
 }
 
 export function writeStoryPhase(storyId: string, phase: StoryPhase): void {
-  const current = readStoryState();
-  const next: StoryStateFile = {
-    stories: {
-      ...current.stories,
-      [storyId]: { phase, updatedAt: new Date().toISOString() },
-    },
-  };
-  writeFileAtomically(storyStatePath(), `${JSON.stringify(next, null, 2)}\n`);
+  updateStoryPhase(storyId, phase, false);
+}
+
+export function advancePhaseMonotonic(storyId: string, phase: StoryPhase): void {
+  updateStoryPhase(storyId, phase, true);
+}
+
+function updateStoryPhase(storyId: string, phase: StoryPhase, monotonic: boolean): void {
+  if (storyId.trim().length === 0) throw new TypeError("story ID cannot be empty");
+  withFileTransaction(requireConfigDir(), () => {
+    const current = readStoryState();
+    const previous = current.stories[storyId]?.phase;
+    if (monotonic && previous !== undefined && comparePhase(previous, phase) >= 0) return;
+    const next: StoryStateFile = {
+      stories: {
+        ...current.stories,
+        [storyId]: { phase, updatedAt: new Date().toISOString() },
+      },
+    };
+    writeFileAtomically(storyStatePath(), `${JSON.stringify(next, null, 2)}\n`);
+  });
 }
 
 export function clearStoryState(): void {
-  tolerantRm(storyStatePath());
+  withFileTransaction(requireConfigDir(), () => tolerantRm(storyStatePath()));
 }

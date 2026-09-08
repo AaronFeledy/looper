@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -17,7 +16,9 @@ describe("run-state file", () => {
   let scratch: string;
 
   beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), "looper-run-state-"));
+    const root = join(import.meta.dir, ".tmp");
+    mkdirSync(root, { recursive: true });
+    scratch = mkdtempSync(join(root, "looper-run-state-"));
     initStatePaths({ configDir: scratch });
   });
 
@@ -100,13 +101,13 @@ describe("run-state file", () => {
 
   test("rejects malformed / out-of-range records", () => {
     writeFileSync(join(scratch, ".looper-run.json"), JSON.stringify({ iteration: 0, stepIndex: 0, stepName: "x", updatedAt: "t" }));
-    expect(readRunState()).toBeNull();
+    expect(() => readRunState()).toThrow(/checkpoint/);
     writeFileSync(join(scratch, ".looper-run.json"), JSON.stringify({ iteration: 1, stepIndex: -1, stepName: "x", updatedAt: "t" }));
-    expect(readRunState()).toBeNull();
+    expect(() => readRunState()).toThrow(/checkpoint/);
     writeFileSync(join(scratch, ".looper-run.json"), JSON.stringify({ iteration: 1, stepIndex: 0, stepName: "", updatedAt: "t" }));
-    expect(readRunState()).toBeNull();
+    expect(() => readRunState()).toThrow(/checkpoint/);
     writeFileSync(join(scratch, ".looper-run.json"), "not json");
-    expect(readRunState()).toBeNull();
+    expect(() => readRunState()).toThrow(/checkpoint/);
   });
 
   test("round-trips stepSessions entries", () => {
@@ -241,7 +242,9 @@ describe("stepSessionsForResume", () => {
   let scratch: string;
 
   beforeEach(() => {
-    scratch = mkdtempSync(join(tmpdir(), "looper-run-state-resume-"));
+    const root = join(import.meta.dir, ".tmp");
+    mkdirSync(root, { recursive: true });
+    scratch = mkdtempSync(join(root, "looper-run-state-resume-"));
     initStatePaths({ configDir: scratch });
   });
 

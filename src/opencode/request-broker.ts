@@ -235,7 +235,9 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     async rejectOpen(reason) {
       options.pushLine(`[looper] rejecting open requests: ${reason}`);
       for (const request of [...requests.list()]) {
-        if (request.generation === generation && request.status !== "resolving") submit(request, "reject", "teardown", true);
+        if (request.generation !== generation) continue;
+        requests.consumeDecision(identity(request.requestID));
+        submit(request, "reject", "teardown", true);
       }
       await Promise.all([...inFlight.values()]);
     },
