@@ -1,3 +1,7 @@
+import type { DiagnosticsState } from "./tui-diagnostics.ts";
+import type { SessionInspection } from "./session-inspection.ts";
+import type { InspectorTab } from "./agent-inspector-state.ts";
+import type { ActivityContext, AgentActivitySummary } from "../core/agent-activity.ts";
 import { looperLogEventFromLine, type LooperEvent } from "../core/events.ts";
 import type {
   FinalizeStepStatus,
@@ -105,7 +109,7 @@ export type GithubStatus =
 
 export type PrdStatus =
   | { kind: "loading" }
-  | { kind: "ok"; remaining: number; total: number }
+  | { kind: "ok"; remaining: number; total: number; terminal?: string }
   | { kind: "error"; message: string };
 
 /**
@@ -128,6 +132,9 @@ export type BranchDiffStatus =
  * buffer is dropped to keep memory bounded.
  */
 export type BackgroundAgent = {
+  inspection?: SessionInspection;
+  promptText?: string;
+  activitySummary?: AgentActivitySummary;
   sessionID: string;
   depth: number;
   parentSessionID?: string;
@@ -145,6 +152,9 @@ export type BackgroundAgent = {
 };
 
 export type LoopStep = {
+  /** Present only on a retained presentation row; never a resume position. */
+  trailIteration?: number;
+  inspection?: SessionInspection;
   name: string;
   status: StepStatus;
   statusMessage?: string;
@@ -217,11 +227,22 @@ export type RecoveryPrompt = {
 
 export type EscConfirmMode = "reset" | "stop";
 
+export type BootResumeSession = {
+  stepIndex: number; sessionID: string;
+  workState: "checking" | "running" | "idle" | "unknown" | "stale";
+  canReattach: boolean;
+};
+
 export type LoopState = {
+  bootResumeSession?: BootResumeSession;
+  /** Present only when LOOPER_UI=constellation. */
+  constellation?: { detailsOpen: boolean; reducedMotion: boolean; planOpen?: boolean; planScroll?: number; inspectorTab?: InspectorTab; inspectorScroll?: number; inspectorPageRows?: number };
   iteration: number;
   maxIterations: number;
   branch: string;
   iterationStartedAt: number;
+  /** Configured order, separate from retry and adjudication rows in this iteration. */
+  configuredStepNames: readonly string[];
   steps: LoopStep[];
   focusedPane: LoopPane;
   selectedStepIndex: number | null;
@@ -242,6 +263,7 @@ export type LoopState = {
   todos: TodoItem[];
   recoveryChoice: RecoveryChoice | null;
   escConfirm: EscConfirmMode | null;
+  diagnostics?: DiagnosticsState;
   helpVisible: boolean;
   promptModalVisible: boolean;
   configModalVisible: boolean;
@@ -253,9 +275,11 @@ export type LoopState = {
   stepOutputLines: string[][];
   scrollIntent: ScrollIntent | null;
   github: GithubStatus;
+  activityContext?: ActivityContext;
   prd: PrdStatus;
   prdIterationBaseline: number | null;
   branchDiff: BranchDiffStatus;
+  retainedSteps: LoopStep[];
   history: IterationHistoryEntry[];
   historyView: HistoryView | null;
 };
@@ -319,8 +343,11 @@ export function createStepRow(
 }
 
 export function backgroundAgentLabel(agent: BackgroundAgent): string {
-  if (agent.title && agent.title.length > 0) return agent.title;
-  if (agent.agent && agent.agent.length > 0) return agent.agent;
+  const title = agent.title?.trim();
+  // OpenCode's timestamp placeholders do not identify the delegated work.
+  const defaultTitle = /^(?:New|Child) session - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(title ?? "");
+  if (title && !defaultTitle) return title;
+  if (agent.agent?.trim()) return agent.agent.trim();
   return agent.sessionID.slice(-6);
 }
 
@@ -384,9 +411,10 @@ function trimPairedEvents(events: LooperEvent[], times: number[]): number {
 }
 
 function getSelectedStep(state: LoopState): LoopStep | null {
-  const selectedStepIndex = clampStepIndex(getStepCount(state), state.selectedStepIndex);
+  const selectedStepIndex = state.selectedStepIndex !== null && state.selectedStepIndex < 0
+    ? state.selectedStepIndex : clampStepIndex(getStepCount(state), state.selectedStepIndex);
   if (selectedStepIndex === null) return null;
-  return state.steps[selectedStepIndex] ?? null;
+  return displayStepAt(state, selectedStepIndex) ?? null;
 }
 
 function notifyStateChange(): void {
@@ -407,6 +435,7 @@ export function createLoopState({
     maxIterations,
     branch: "",
     iterationStartedAt: Date.now(),
+    configuredStepNames: [...stepNames],
     steps: stepNames.map((name) => createStepRow(name)),
     focusedPane: "steps",
     selectedStepIndex: null,
@@ -471,6 +500,7 @@ export function createLoopState({
     prd: { kind: "loading" },
     prdIterationBaseline: null,
     branchDiff: { kind: "hidden" },
+    retainedSteps: [],
     history: [],
     historyView: null,
   };
@@ -644,7 +674,8 @@ export function toggleFocusedPane(state: LoopState): LoopPane {
 }
 
 export function setSelectedStepIndex(state: LoopState, stepIndex: number | null): void {
-  const nextStepIndex = clampStepIndex(getStepCount(state), stepIndex);
+  const nextStepIndex = stepIndex !== null && stepIndex < 0 && displayStepAt(state, stepIndex)
+    ? stepIndex : clampStepIndex(getStepCount(state), stepIndex);
   const rejoiningLive =
     nextStepIndex !== null &&
     state.activeStepIndex !== null &&
@@ -710,9 +741,22 @@ export function shouldCollapseIdleGroup(
   return directChildAgents(agents, only.sessionID, stepSessionID).length > 0;
 }
 
+export function displayStepAt(state: LoopState, index: number): LoopStep | undefined {
+  return index < 0 ? state.retainedSteps[-index - 1] : state.steps[index];
+}
+
+export function displaySteps(state: LoopState): [number, LoopStep][] {
+  const currentIDs = new Set(state.steps.flatMap(step => step.sessionID ? [step.sessionID] : []));
+  return [
+    ...state.retainedSteps.flatMap((step, index): [number, LoopStep][] =>
+      step.sessionID && currentIDs.has(step.sessionID) ? [] : [[-index - 1, step]]),
+    ...state.steps.entries(),
+  ];
+}
+
 export function flattenRows(state: LoopState): FlatRow[] {
   const rows: FlatRow[] = [];
-  state.steps.forEach((step, stepIndex) => {
+  displaySteps(state).forEach(([stepIndex, step]) => {
     rows.push({ kind: "step", stepIndex });
     const agents = step.backgroundAgents;
 
@@ -763,7 +807,7 @@ function insertPauseMarker(state: LoopState, rows: FlatRow[]): FlatRow[] {
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     if (row === undefined || row.kind === "pause") continue;
-    const step = state.steps[row.stepIndex];
+    const step = displayStepAt(state, row.stepIndex);
     if (step !== undefined && step.status !== "pending") insertAt = i + 1;
   }
   const next = rows.slice();
@@ -797,7 +841,7 @@ export function setCompleteGroupExpanded(
   expanded: boolean,
   parentSessionID: string | null = null,
 ): void {
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return;
   const idleChildren = directChildAgents(step.backgroundAgents, parentSessionID, step.sessionID).filter(isIdleAgent);
   const key = completeGroupKey(stepIndex, parentSessionID);
@@ -844,7 +888,7 @@ export function canToggleCompleteGroup(state: LoopState): boolean {
   if (state.focusedPane !== "steps" || state.historyView !== null) return false;
   const stepIndex = state.selectedStepIndex;
   if (stepIndex === null) return false;
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return false;
   const selectedID = state.selectedBackgroundSessionID;
   if (selectedID === null) return false;
@@ -865,7 +909,7 @@ export function toggleSelectedCompleteGroup(state: LoopState): boolean {
   if (!canToggleCompleteGroup(state)) return false;
   const stepIndex = state.selectedStepIndex;
   if (stepIndex === null) return false;
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return false;
 
   const selectedID = state.selectedBackgroundSessionID;
@@ -891,7 +935,7 @@ export function expandSelectedCompleteGroup(state: LoopState): boolean {
   const parentSessionID = selectedCompleteGroupParent(state);
   if (parentSessionID === undefined) return false;
   if (isCompleteGroupExpanded(state, stepIndex, parentSessionID)) return false;
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return false;
   if (!directChildAgents(step.backgroundAgents, parentSessionID, step.sessionID).some(isIdleAgent)) return false;
   setCompleteGroupExpanded(state, stepIndex, true, parentSessionID);
@@ -902,7 +946,7 @@ export function collapseSelectedCompleteGroup(state: LoopState): boolean {
   if (state.focusedPane !== "steps" || state.historyView !== null) return false;
   const stepIndex = state.selectedStepIndex;
   if (stepIndex === null) return false;
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return false;
   const selectedID = state.selectedBackgroundSessionID;
   if (selectedID === null) return false;
@@ -951,7 +995,7 @@ function currentRowIndex(state: LoopState, rows: FlatRow[]): number | null {
 
 /** Pin step output to bottom; returns true when the pin flag actually changed. */
 function pinStepOutputToBottom(state: LoopState, stepIndex: number): boolean {
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step || step.outputPinnedToBottom) return false;
   step.outputPinnedToBottom = true;
   return true;
@@ -1310,7 +1354,7 @@ function trimStepOutputEventBuffer(step: LoopStep): void {
 
 function getSelectedBackgroundAgent(state: LoopState): BackgroundAgent | null {
   if (state.selectedBackgroundSessionID === null || state.selectedStepIndex === null) return null;
-  const step = state.steps[state.selectedStepIndex];
+  const step = displayStepAt(state, state.selectedStepIndex);
   if (!step) return null;
   return step.backgroundAgents.find((agent) => agent.sessionID === state.selectedBackgroundSessionID) ?? null;
 }
@@ -1436,10 +1480,23 @@ export function applyResumableBootUi(
   state.selectedBackgroundSessionID = null;
 }
 
+/** Publish the startup observation without claiming the engine owns the live session yet. */
+export function setBootResumeSession(state: LoopState, saved: BootResumeSession): void {
+  const step = state.steps[saved.stepIndex];
+  if (state.started || !step || step.sessionID !== saved.sessionID) return;
+  state.bootResumeSession = saved;
+  step.status = saved.workState === "running" ? "running" : saved.workState === "idle" ? "pending" : "waiting";
+  step.statusMessage = saved.workState === "running" ? saved.canReattach ? undefined : "recovery"
+    : saved.workState === "checking" ? "checking" : saved.workState === "unknown" ? "unverified"
+    : saved.workState === "stale" ? "check busy" : undefined;
+  step.finishedAt = undefined;
+  notifyStateChange();
+}
+
 export function selectedOrActiveStep(state: LoopState): LoopStep | null {
   const index = state.selectedStepIndex ?? state.activeStepIndex;
   if (index === null) return null;
-  return state.steps[index] ?? null;
+  return displayStepAt(state, index) ?? null;
 }
 
 export function showPromptModal(state: LoopState): void {
@@ -1481,6 +1538,8 @@ export function toggleConfigModal(state: LoopState): void {
 }
 
 export function resetIterationNavigationState(state: LoopState): void {
+  state.bootResumeSession = undefined;
+  if (state.constellation) state.constellation.detailsOpen = false;
   state.focusedPane = "steps";
   state.selectedStepIndex = clampStepIndex(getStepCount(state), state.activeStepIndex);
   state.selectedBackgroundSessionID = null;
@@ -1536,6 +1595,16 @@ export function syncStepBackgroundAgents(
     }
   }
 
+  // Retain retired satellites so the completed step trail can snapshot them.
+  if (state.constellation && next.length === 0) {
+    for (const agent of step.backgroundAgents) {
+      agent.activity = "idle";
+      agent.finishedAt ??= Date.now();
+      merged.push(agent);
+      nextIDs.add(agent.sessionID);
+    }
+  }
+
   if (!changed) {
     for (let i = 0; i < merged.length; i += 1) {
       if (merged[i] !== step.backgroundAgents[i]) {
@@ -1568,7 +1637,7 @@ export function pushBackgroundAgentLines(
   times?: readonly number[],
 ): void {
   if (lines.length === 0) return;
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return;
   const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
   if (!agent) return;
@@ -1594,7 +1663,7 @@ export function replaceBackgroundAgentEvents(
   events: readonly LooperEvent[],
   times?: readonly number[],
 ): void {
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return;
   const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
   if (!agent) return;
@@ -1610,7 +1679,7 @@ export function replaceBackgroundAgentEvents(
 }
 
 export function clearBackgroundAgentBuffer(state: LoopState, stepIndex: number, sessionID: string): void {
-  const step = state.steps[stepIndex];
+  const step = displayStepAt(state, stepIndex);
   if (!step) return;
   const agent = step.backgroundAgents.find((candidate) => candidate.sessionID === sessionID);
   if (!agent || agent.outputLines.length === 0) return;
@@ -1662,7 +1731,7 @@ export function snapshotIterationToHistory(state: LoopState): void {
 export function trimLoopStateMemory(state: LoopState): void {
   trimPairedLines(state.agentLines, state.agentLineTimes);
   trimPairedEvents(state.agentEvents, state.agentEventTimes);
-  for (const step of state.steps) {
+  for (const step of [...state.steps, ...state.retainedSteps]) {
     trimStepOutputBuffer(step);
     trimStepOutputEventBuffer(step);
     for (const agent of step.backgroundAgents) {

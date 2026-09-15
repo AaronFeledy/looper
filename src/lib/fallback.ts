@@ -1,3 +1,5 @@
+import { startAgentTrailPersistence } from "./agent-trail.ts";
+import { createAgentTrailStore } from "../persistence/agent-trail-store.ts";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
@@ -22,6 +24,10 @@ import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
 import { clearPermissionAudit } from "../opencode/permission-audit.ts";
 import { createRunControl } from "../engine/run-control.ts";
+import { clearSignalLog } from "./signal-log.ts";
+import { prdIndexPath } from "./prd.ts";
+import { createStoryPhaseResolver } from "../engine/story-phases.ts";
+import type { StoryPhase } from "./story-state-files.ts";
 
 export type FallbackOptions = {
   options: Options;
@@ -38,6 +44,8 @@ export type FallbackOptions = {
   prdDir?: string;
   prdFlipThreshold?: number;
   storyIdPattern?: string;
+  mainBranch?: string;
+  terminalPhase?: StoryPhase;
   stall?: StallConfig;
   contextPolicy?: Partial<ContextPolicy>;
   currentBranch: () => Promise<string>;
@@ -66,6 +74,8 @@ export async function runNonTty({
   prdDir,
   prdFlipThreshold: configuredPrdFlipThreshold,
   storyIdPattern,
+  mainBranch,
+  terminalPhase,
   stall,
   contextPolicy,
   currentBranch,
@@ -75,11 +85,13 @@ export async function runNonTty({
   const storyStateStore = createStoryStateStore({ configDir });
   runStateStore.clearStopFiles();
   if (options.fresh) {
+    createAgentTrailStore(configDir).clear();
     runStateStore.clearRunArtifacts();
     adjudicationStore.clearHistory();
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
-    storyStateStore.clear();
+    if (options.resetStories) storyStateStore.clear();
+    clearSignalLog(configDir);
     clearPermissionAudit(configDir);
   }
 
@@ -118,6 +130,8 @@ export async function runNonTty({
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+    ...(mainBranch !== undefined ? { mainBranch } : {}),
+    ...(terminalPhase !== undefined ? { terminalPhase } : {}),
     ...(stall !== undefined ? { stall } : {}),
     adjudicationStore,
     storyStateStore,
@@ -182,6 +196,8 @@ export async function runNonTtyIterations({
   prdDir,
   configuredPrdFlipThreshold,
   storyIdPattern,
+  mainBranch,
+  terminalPhase,
   stall,
   adjudicationStore,
   storyStateStore,
@@ -200,6 +216,8 @@ export async function runNonTtyIterations({
   prdDir?: string;
   configuredPrdFlipThreshold?: number;
   storyIdPattern?: string;
+  mainBranch?: string;
+  terminalPhase?: StoryPhase;
   stall?: StallConfig;
   adjudicationStore?: AdjudicationStore;
   storyStateStore?: StoryStateStore;
@@ -214,8 +232,22 @@ export async function runNonTtyIterations({
   });
   const control = createRunControl();
   let currentState: LoopState | null = null;
+  if (options.fresh) createAgentTrailStore(configDir).clear();
+  const agentTrail = startAgentTrailPersistence(configDir, () => currentState);
   const detachMemoryPressure = installMemoryPressureTrimmer(() => currentState);
   const hooks = createFallbackEngineHooks(currentBranch, control);
+  const resolvedStoryStateStore = storyStateStore ?? createStoryStateStore({ configDir });
+  const storyResolver = prdDir === undefined
+    ? undefined
+    : createStoryPhaseResolver({
+        repoDir,
+        prdIndex: prdIndexPath(prdDir),
+        storyState: resolvedStoryStateStore,
+        ...(mainBranch !== undefined ? { mainBranch } : {}),
+        ...(terminalPhase !== undefined ? { terminalPhase } : {}),
+        ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+        log: (line) => process.stdout.write(`${line}\n`),
+      });
   try {
     const result = await runEngine<LoopState, typeof client>({
     fresh: options.fresh,
@@ -232,7 +264,8 @@ export async function runNonTtyIterations({
     createLooperRunID,
     legacyResumeStepIndex: (steps) => resumeStepIndex([...steps]),
     runIteration,
-    ...(storyStateStore !== undefined ? { storyState: storyStateStore } : {}),
+    storyState: resolvedStoryStateStore,
+    ...(storyResolver !== undefined ? { storyResolver } : {}),
     persistTitles: false,
     ...(titleGenConfig !== undefined ? { titleGenConfig } : {}),
     recoverySnapshots,
@@ -245,17 +278,23 @@ export async function runNonTtyIterations({
     adjudication,
     stall: { iterations: stallIterationLimit(stall?.iterations), adjudications: stallAdjudicationLimit(stall?.adjudications) },
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
+    log: (line) => process.stdout.write(`${line}\n`),
     hooks: {
       ...hooks,
+      onStepFinish: (info) => { agentTrail.capture(); hooks.onStepFinish?.(info); },
       createIterationState: (input) => {
+        agentTrail.capture();
         const created = hooks.createIterationState(input);
         currentState = created;
+        agentTrail.capture();
+        void agentTrail.recoverTimes(client, repoDir);
         return created;
       },
     },
   });
   if (result.kind === "max-iterations") process.exitCode = 1;
   } finally {
+    agentTrail.stop();
     detachMemoryPressure();
     currentState = null;
   }
