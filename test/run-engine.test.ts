@@ -101,6 +101,19 @@ describe("computeRunResumePlan", () => {
     expect(store.read()).toBeNull();
   });
 
+  test("keeps the stale session when a removed step also exceeds max iterations", () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+    const plan = computeRunResumePlan({
+      fresh: false,
+      maxIterations: 2,
+      steps: [{ name: "Build" }, { name: "Verify" }],
+      store,
+      legacyResumeStepIndex: () => 0,
+    });
+    expect(plan.resetToFreshRun).toBe(true);
+    expect(plan.staleSessionID).toBe("ses_stale");
+  });
+
   test("a stale resume step falls forward to the next iteration", () => {
     const logs: string[] = [];
     const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });

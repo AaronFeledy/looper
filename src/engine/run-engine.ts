@@ -139,6 +139,7 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
       firstIterationStepSessions: undefined,
       resetToFreshRun: true,
       looperRunID: undefined,
+      ...(staleSessionID !== undefined ? { staleSessionID } : {}),
     };
   }
 
