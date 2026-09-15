@@ -12,7 +12,7 @@ import { createPromptEventStream, type PromptEventStream } from "./event-stream.
 import type { RunContinuationRecord } from "./continuation-records.ts";
 import { classifyAssistantWithReactivationGrace, classifyMessagesForCurrentTurn, resolveOutcomeParentID, sessionReactivatedMessage } from "./assistant-classification.ts";
 import { createOpencodeID } from "./opencode-id.ts";
-import type { RequestBroker } from "./request-broker.ts";
+import type { GateTimeoutInfo, RequestBroker } from "./request-broker.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { parseModel, type Step, type StepResult, type StepRunResult } from "./step-runner-types.ts";
@@ -39,6 +39,7 @@ export type RunOpenCodeStepOptions = {
   questionPolicy?: QuestionPolicy;
   useSessionIdle?: boolean;
   requestBrokerOwner?: RequestBrokerOwner;
+  onGateTimeout?: (info: GateTimeoutInfo) => void;
 };
 
 export async function runOpenCodeStep({
@@ -56,6 +57,7 @@ export async function runOpenCodeStep({
   permissionPolicy,
   questionPolicy,
   requestBrokerOwner,
+  onGateTimeout,
 }: RunOpenCodeStepOptions): Promise<StepRunResult> {
   if (ctx.reporter.steps.get(stepIndex) === undefined) throw new Error(`missing state step at index ${stepIndex}`);
   const startedAt = Date.now();
@@ -179,6 +181,7 @@ export async function runOpenCodeStep({
       friction: { counts: new Map(), requestIDs: new Set() },
       ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
       ...(questionPolicy !== undefined ? { questionPolicy } : {}),
+      ...(onGateTimeout !== undefined ? { onGateTimeout } : {}),
     });
     if (requestBrokerOwner === undefined) localBrokerOwner = brokerOwner;
     unsubscribeHumanGate = brokerOwner.subscribeHumanGate(timeoutController.setGateOpen);

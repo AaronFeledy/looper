@@ -13,6 +13,13 @@ export type RequestFrictionState = {
   readonly requestIDs: Set<string>;
 };
 
+export type GateTimeoutInfo = {
+  readonly requestID: string;
+  readonly sessionID: string;
+  readonly kind: "permission" | "question";
+  readonly permission?: string;
+};
+
 export interface RequestBrokerScheduler {
   setTimeout(callback: () => void, milliseconds: number): object;
   clearTimeout(handle: object): void;
@@ -40,6 +47,7 @@ export type RequestBrokerOptions = {
   readonly now?: () => number;
   readonly onHumanGateChange?: (open: boolean) => void;
   readonly auditDecision?: (decision: PermissionAuditDecision) => void;
+  readonly onGateTimeout?: (info: GateTimeoutInfo) => void;
 };
 
 export type RequestListResults = {

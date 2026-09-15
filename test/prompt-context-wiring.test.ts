@@ -440,7 +440,8 @@ describe("runIteration <looper-context> prompt injection", () => {
     scratchDirs.push(repoDir);
     const prdDir = join(repoDir, "spec", "beta-1");
     mkdirSync(prdDir, { recursive: true });
-    writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ passes: true }, { passes: false }, {}] }));
+    // Phase A has no phase resolver yet: every story counts as remaining (building).
+    writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "A" }, { id: "B" }, { id: "C" }] }));
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
     const stub = makeClient({ repoDir, sessionIDs: ["ses_build"] });
 
@@ -452,9 +453,11 @@ describe("runIteration <looper-context> prompt injection", () => {
       "  dir: spec/beta-1",
       "  index: spec/beta-1/prd.json",
       "  progress: spec/beta-1/progress.txt",
-      "  passing: 1",
+      "  complete: 0",
       "  total: 3",
-      "  remaining: 2",
+      "  remaining: 3",
+      "  terminal: merged",
+      "  phases: A=building, B=building, C=building",
     ].join("\n"));
   });
 

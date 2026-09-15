@@ -11,6 +11,7 @@ import type { StoryPhase } from "../lib/story-state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { AdjudicationRuntime } from "./adjudication-routing.ts";
 import type { RunControl } from "./run-control.ts";
+import type { StoryPhaseResolver } from "./story-phases.ts";
 
 export type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 export type { PendingRequestPort, RunStepContext, StepLifecyclePort, StepOutputSink, StepReporter } from "./step-reporter.ts";
@@ -157,6 +158,7 @@ export type EngineRunIterationInput<S, Step, Client> = {
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
   readonly storyState?: StoryStatePort;
+  readonly storyResolver?: StoryPhaseResolver;
   readonly adjudication?: AdjudicationRuntime;
   readonly maxIterations?: number;
   readonly contextPolicy?: Partial<ContextPolicy>;

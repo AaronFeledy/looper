@@ -67,7 +67,7 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
     },
     onStepFinish: (info) => {
       const stepSessions = input.getStepSessions();
-      if (info.completionKind === "done" || info.completionKind === "gate-skip") {
+      if (info.completionKind === "done" || info.completionKind === "gate-skip" || info.completionKind === "blocked") {
         const latestSteps = input.loadSteps();
         input.store.saveNextResumeStep(latestSteps, info.nextIndex);
         input.store.saveAdvance({

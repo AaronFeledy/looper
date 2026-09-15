@@ -4,7 +4,7 @@ import type { StepRestartReason } from "../core/step-view.ts";
 import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy, VariantConfig } from "../lib/config.ts";
 import type { EventConsumerCallbacks } from "../lib/event-consumer.ts";
-import { createRequestBroker } from "./request-broker.ts";
+import { createRequestBroker, type GateTimeoutInfo } from "./request-broker.ts";
 
 export type Step = {
   name: string;
@@ -43,6 +43,7 @@ export type RunnerEventControllerOptions = {
   questionPolicy?: QuestionPolicy;
   ownedSessionIDs?: () => ReadonlySet<string>;
   unattended?: boolean;
+  onGateTimeout?: (info: GateTimeoutInfo) => void;
 };
 
 export function createRunnerEventController(options: RunnerEventControllerOptions): Pick<
