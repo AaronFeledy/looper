@@ -24,6 +24,7 @@ const HELP_BINDINGS: readonly HelpBinding[] = [
   { keys: "home end", action: "jump in output" },
   { keys: "v", action: "hidden looper prompt" },
   { keys: "c", action: "looper config" },
+  { keys: "l", action: "runtime diagnostics" },
   { keys: "?", action: "this help" },
 ];
 
@@ -43,12 +44,14 @@ export function createHelpOverlay(renderer: CliRenderer, state: LoopState): BoxR
     width: 38,
     maxWidth: 38,
     maxHeight: 22,
-    scroll: false,
+    scroll: Boolean(state.constellation),
     wrapMode: "none",
     isVisible: (s) => s.helpVisible,
     content: () => ({
       title: "keys",
-      body: helpLines().join("\n"),
+      body: state.constellation
+        ? ["↑↓ / tab     select agent", "double-click open agent inspector", "o, enter     open inspector", "esc          close inspector", "1–4 / tab    inspector section", "b            context / open PR", "m            toggle motion", "i            work plan drawer", "", ...helpLines().map((line) => line.replaceAll("step", "agent").replace("g, enter", "g       "))].join("\n")
+        : helpLines().join("\n"),
     }),
   });
 }

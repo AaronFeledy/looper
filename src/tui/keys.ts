@@ -1,7 +1,11 @@
+import { displayStepAt } from "../lib/state.ts";
+import { setDiagnosticsVisible } from "../lib/tui-diagnostics.ts";
+import type { ScrollBoxRenderable } from "@opentui/core";
 import type { CliRenderer, KeyEvent } from "@opentui/core";
 
 import type { LoopState, RecoveryChoice, ScrollDirection } from "../lib/state.ts";
 import {
+  notify,
   dismissEscConfirm,
   enterHistoryView,
   exitHistoryView,
@@ -23,6 +27,8 @@ import {
   togglePromptModal,
   tryClaimPendingRequestDecision,
 } from "../lib/state.ts";
+import { closeAgentInspector, cycleInspectorTab, INSPECTOR_TABS, openAgentInspector, selectInspectorTab } from "../lib/agent-inspector-state.ts";
+import { moveConstellationSelection, toggleConstellationChildren } from "../presentation/tui/constellation.ts";
 import { tryOpenCurrentPr } from "./github-status.ts";
 import { modalFocusWinner, permissionKeyAction, questionKeyAction } from "./permission-gate.ts";
 import { bindRightClickCopy, copySelectionIfAny } from "./selection-copy.ts";
@@ -49,6 +55,7 @@ function consumeKey(event: KeyEvent): void {
 }
 
 function dismissOverlay(state: LoopState, overlay: ReturnType<typeof modalFocusWinner>): boolean {
+  if (overlay === "diagnostics") { setDiagnosticsVisible(state, false); return true; }
   if (overlay === "help") {
     hideHelp(state);
     return true;
@@ -93,7 +100,7 @@ function scrollSelectedStepOutput(state: LoopState, direction: ScrollDirection):
 
   const stepIndex = selectedStepIndex(state);
   if (stepIndex === null) return;
-  if (!state.steps[stepIndex]) return;
+  if (!displayStepAt(state, stepIndex)) return;
 
   setFocusedPane(state, "output");
   requestScrollIntent(state, direction, stepIndex);
@@ -136,6 +143,11 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         consumeKey(event);
         return;
       }
+      if (modalFocusWinner(state) === "inspector") {
+        if (!copySelectionIfAny(renderer)) closeAgentInspector(state);
+        consumeKey(event);
+        return;
+      }
       if (state.escConfirm !== null) dismissEscConfirm(state);
       if (!copySelectionIfAny(renderer)) hooks.onInterrupt();
       consumeKey(event);
@@ -149,7 +161,8 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         consumeKey(event);
         return;
       }
-      hooks.onEscape();
+      if (modalFocusWinner(state) === "inspector") closeAgentInspector(state);
+      else hooks.onEscape();
       consumeKey(event);
       return;
     }
@@ -172,6 +185,26 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       }
     }
 
+    if (winner === "diagnostics") {
+      if (keyName === "l") setDiagnosticsVisible(state, false);
+      else if (keyName === "q") hooks.onQuit();
+      else {
+        const pane = renderer.root.findDescendantById("loop-diagnostics-scroll") as ScrollBoxRenderable | undefined;
+        if (pane) {
+          if (keyName === "home") pane.scrollTop = 0;
+          else if (keyName === "end") pane.scrollTop = pane.scrollHeight;
+          else if (keyName === "up") pane.scrollBy(-1);
+          else if (keyName === "down") pane.scrollBy(1);
+          else if (keyName === "pageup") pane.scrollBy(-1, "viewport");
+          else if (keyName === "pagedown") pane.scrollBy(1, "viewport");
+        }
+      }
+      consumeKey(event); return;
+    }
+    if (keyName === "l" && !event.ctrl && (winner === "none" || winner === "inspector")) {
+      setDiagnosticsVisible(state, true); consumeKey(event); return;
+    }
+
     // Help / prompt / config overlays are modal: while they own focus, the next keypress only closes them.
     if (dismissOverlay(state, winner)) {
       if (typeof event.preventDefault === "function") event.preventDefault();
@@ -185,7 +218,8 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     }
 
     if (keyName === "v") {
-      togglePromptModal(state);
+      if (winner === "inspector") selectInspectorTab(state, "prompt");
+      else togglePromptModal(state);
       if (typeof event.preventDefault === "function") event.preventDefault();
       return;
     }
@@ -212,6 +246,31 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       return;
     }
 
+    if (winner === "inspector" && state.constellation) {
+      const view = state.constellation;
+      const tab = view.inspectorTab ?? "output";
+      const direction = HISTORY_SCROLL_KEYS[keyName];
+      if (keyName === "o") closeAgentInspector(state);
+      else if (keyName === "q") hooks.onQuit();
+      else if (keyName === "h") { closeAgentInspector(state); enterHistoryView(state); }
+      else if (keyName === "b" && tab === "context") tryOpenCurrentPr(state);
+      else if (keyName === "tab" || keyName === "left" || keyName === "right")
+        cycleInspectorTab(state, keyName === "left" || (keyName === "tab" && event.shift) ? -1 : 1);
+      else if (/^[1-4]$/.test(keyName)) selectInspectorTab(state, INSPECTOR_TABS[Number(keyName) - 1]!);
+      else if (direction) {
+        if (tab === "output") scrollSelectedStepOutput(state, direction);
+        else {
+          const page = view.inspectorPageRows ?? 10;
+          const delta = direction === "up" ? -1 : direction === "down" ? 1 : direction === "pageup" ? -page : page;
+          view.inspectorScroll = direction === "home" ? 0 : direction === "end" ? Number.MAX_SAFE_INTEGER :
+            Math.max(0, (view.inspectorScroll ?? 0) + delta);
+          notify();
+        }
+      }
+      consumeKey(event);
+      return;
+    }
+
     if (keyName === "h") {
       if (state.historyView !== null) exitHistoryView(state);
       else enterHistoryView(state);
@@ -226,6 +285,31 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         if (typeof event.preventDefault === "function") event.preventDefault();
         return;
       }
+    }
+
+    if (state.constellation && state.historyView === null) {
+      const view = state.constellation;
+      let handled = true;
+      if (keyName === "o" || keyName === "enter" || keyName === "return") {
+        openAgentInspector(state);
+      } else if (keyName === "b") {
+        openAgentInspector(state, "context");
+      } else if (keyName === "m") {
+        view.reducedMotion = !view.reducedMotion;
+      } else if (keyName === "i") {
+        view.planOpen = !view.planOpen;
+        if (view.planOpen) { view.detailsOpen = false; state.focusedPane = "steps"; }
+      } else if (view.planOpen && state.focusedPane === "steps" && ["up", "down", "pageup", "pagedown", "home", "end"].includes(keyName)) {
+        const delta = keyName === "up" ? -1 : keyName === "down" ? 1 : keyName === "pageup" ? -5 : 5;
+        view.planScroll = keyName === "home" ? 0 : keyName === "end" ? state.todos.length :
+          Math.max(0, Math.min(state.todos.length, (view.planScroll ?? 0) + delta));
+      } else if (keyName === "tab") {
+        if (view.detailsOpen) state.focusedPane = state.focusedPane === "output" ? "steps" : "output";
+        else if (!toggleConstellationChildren(state)) moveConstellationSelection(state, event.shift ? -1 : 1);
+      } else if (state.focusedPane === "steps" && ["up", "down", "left", "right"].includes(keyName)) {
+        moveConstellationSelection(state, keyName === "up" || keyName === "left" ? -1 : 1);
+      } else handled = false;
+      if (handled) { notify(); consumeKey(event); return; }
     }
 
     const action =

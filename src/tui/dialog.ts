@@ -1,8 +1,8 @@
 import {
   BoxRenderable,
   RenderableEvents,
-  RGBA,
   ScrollBoxRenderable,
+  RGBA,
   TextRenderable,
   type CliRenderer,
 } from "@opentui/core";
@@ -37,18 +37,13 @@ export type TextDialogOptions = {
   readonly content: (state: LoopState) => DialogContent;
 };
 
-/**
- * Floating dialog: absolute full-viewport host + translucent scrim + centered panel.
- * OpenTUI has no Modal primitive; this is the shared pattern for help / prompt / config.
- */
-export function createTextDialog(
-  renderer: CliRenderer,
-  state: LoopState,
-  options: TextDialogOptions,
-): BoxRenderable {
-  const zIndex = options.zIndex ?? DEFAULT_Z_INDEX;
-  const scroll = options.scroll !== false;
+export type DialogFrameOptions = Omit<TextDialogOptions, "scroll" | "wrapMode" | "isVisible" | "content">;
 
+/** Shared modal geometry; rich inspectors can supply renderables instead of plain text. */
+export function createDialogFrame(renderer: CliRenderer, options: DialogFrameOptions): {
+  host: BoxRenderable; scrim: BoxRenderable; dialog: BoxRenderable;
+} {
+  const zIndex = options.zIndex ?? DEFAULT_Z_INDEX;
   const host = new BoxRenderable(renderer, {
     id: `${options.id}-host`,
     position: "absolute",
@@ -92,6 +87,24 @@ export function createTextDialog(
     paddingX: 1,
   });
 
+  host.add(scrim);
+  host.add(dialog);
+  return { host, scrim, dialog };
+}
+
+/**
+ * Floating dialog: absolute full-viewport host + translucent scrim + centered panel.
+ * OpenTUI has no Modal primitive; this is the shared pattern for help / prompt / config.
+ */
+export function createTextDialog(
+  renderer: CliRenderer,
+  state: LoopState,
+  options: TextDialogOptions,
+): BoxRenderable {
+  const scroll = options.scroll !== false;
+
+  const { host, dialog } = createDialogFrame(renderer, options);
+
   const text = new TextRenderable(renderer, {
     id: `${options.id}-text`,
     width: "100%",
@@ -121,9 +134,6 @@ export function createTextDialog(
   } else {
     dialog.add(text);
   }
-
-  host.add(scrim);
-  host.add(dialog);
 
   let lastVisible = false;
   let lastTitle = "";

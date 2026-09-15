@@ -312,10 +312,10 @@ function handlePartUpdate(
       } else if (status === "completed") {
         printCall();
         const retainedPath = retainedOutputPath(state, part as { metadata?: Record<string, unknown> });
-        emit({ kind: "tool.done", tool: part.tool, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
+        emit({ kind: "tool.done", tool: part.tool, input: state.input ?? {}, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
       } else if (status === "error") {
         printCall();
-        emit({ kind: "tool.failed", tool: part.tool, error: state.error ?? "" });
+        emit({ kind: "tool.failed", tool: part.tool, input: state.input ?? {}, error: state.error ?? "" });
       }
       parts.set(part.id, {
         kind: "tool",

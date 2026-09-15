@@ -273,4 +273,67 @@ describe("collectBranchDiff", () => {
     });
     await expect(collectBranchDiff(client, "/repo", "feature")).rejects.toThrow(/connection refused/);
   });
+  test("SDK totals exclude only configured PRD bookkeeping, including absolute paths", async () => {
+    for (const file of ["docs/prd/progress.txt", "./docs/prd/progress.txt", "/repo/docs/prd/progress.txt"]) {
+      const client = makeVcsClient({
+        get: { data: { branch: "feature", default_branch: "main" } },
+        diff: { data: [
+          { file, additions: 100, deletions: 25 },
+          { file: file.replace("progress.txt", "prd.json"), additions: 2, deletions: 1 },
+          { file: "other/prd.json", additions: 2, deletions: 1 },
+          { file: "progress.txt", additions: 3, deletions: 0 },
+          { file: "other/progress.txt", additions: 4, deletions: 1 },
+        ] },
+      });
+      expect(await collectBranchDiff(client, "/repo", "feature", undefined, "/repo/docs/prd"))
+        .toEqual({ kind: "ok", totals: { files: 3, additions: 9, deletions: 2 } });
+      expect(await collectBranchDiff(client, "/repo", "feature"))
+        .toEqual({ kind: "ok", totals: { files: 5, additions: 111, deletions: 28 } });
+      expect(await collectBranchDiff(client, "/repo", "feature", undefined, "/outside/prd"))
+        .toEqual({ kind: "ok", totals: { files: 5, additions: 111, deletions: 28 } });
+    }
+    const client = makeVcsClient({
+      get: { data: { branch: "feature", default_branch: "main" } },
+      diff: { data: [
+        { file: "docs/prd/progress.txt", additions: 5, deletions: 0 },
+        { file: "docs/prd/prd.json", additions: 3, deletions: 1 },
+      ] },
+    });
+    expect(await collectBranchDiff(client, "/repo", "feature", undefined, "/repo/docs/prd"))
+      .toEqual({ kind: "ok", totals: { files: 0, additions: 0, deletions: 0 } });
+  });
+
+  for (const mode of ["untracked", "modified", "staged", "committed", "deleted"]) {
+    test("Git totals exclude " + mode + " PRD bookkeeping from a launch subdirectory", async () => {
+      const launchDir = join(repoDir, "inside");
+      const prdDir = join(launchDir, "prd [daily]");
+      mkdirSync(prdDir, { recursive: true });
+      const progress = join(prdDir, "progress.txt");
+      const index = join(prdDir, "prd.json");
+      if (mode !== "untracked") {
+        writeFileSync(progress, "old progress\n");
+        writeFileSync(index, "{}\n");
+        await $`git add .`.cwd(repoDir).quiet();
+        await $`git -c user.email=t@t -c user.name=t commit -q -m progress-base`.cwd(repoDir).quiet();
+      }
+      await $`git switch -q -c feature`.cwd(repoDir).quiet();
+      if (mode === "deleted") { rmSync(progress); rmSync(index); }
+      else {
+        writeFileSync(progress, "new progress\nanother entry\n");
+        writeFileSync(index, '{ "stories": [] }\n');
+      }
+      if (mode === "staged" || mode === "committed") await $`git add .`.cwd(repoDir).quiet();
+      if (mode === "committed") await $`git -c user.email=t@t -c user.name=t commit -q -m progress-update`.cwd(repoDir).quiet();
+      const client = makeVcsClient({ get: { data: { branch: "main", default_branch: "main" } } });
+      expect(await collectBranchDiff(client, launchDir, "feature", undefined, prdDir))
+        .toEqual({ kind: "ok", totals: { files: 0, additions: 0, deletions: 0 } });
+      writeFileSync(join(prdDir, "notes.txt"), "keep other PRD files\n");
+      writeFileSync(join(launchDir, "prd.json"), "{}\n");
+      writeFileSync(join(launchDir, "progress.txt"), "other progress\n");
+      writeFileSync(join(launchDir, "code.ts"), "export {};\n");
+      expect(await collectBranchDiff(client, launchDir, "feature", undefined, prdDir))
+        .toEqual({ kind: "ok", totals: { files: 4, additions: 4, deletions: 0 } });
+    });
+  }
+
 });

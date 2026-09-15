@@ -1,3 +1,5 @@
+import { ciBorderColor, ciCounts, ciIsRunning } from "./ci-progress.ts";
+import { constellationReducedMotion } from "../config/tunables.ts";
 import { BoxRenderable, RenderableEvents, TextAttributes, TextRenderable, bold, fg, t, type CliRenderer, type StyledText } from "@opentui/core";
 
 import { openUrl } from "../lib/open-url.ts";
@@ -39,13 +41,13 @@ export function prStateColor(status: Extract<GithubStatus, { kind: "pr" }>): str
 
 function ciLine(status: Extract<GithubStatus, { kind: "pr" }>, frame: string): Line {
   const { ciOverall, ciPassing, ciFailing, ciNeutral, ciTotal } = status.pr;
+  if (ciIsRunning(status)) {
+    const done = ciPassing + ciFailing + ciNeutral;
+    return { content: formatRow(`${frame} running`, `${done}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
+  }
   if (ciOverall === "none") return { content: "no checks", fg: COLOR_MUTED, attrs: TextAttributes.NONE };
   if (ciOverall === "failing") {
     return { content: formatRow("✗ failing", `${ciFailing}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_FAIL, attrs: TextAttributes.NONE };
-  }
-  if (ciOverall === "pending") {
-    const done = ciPassing + ciFailing + ciNeutral;
-    return { content: formatRow(`${frame} running`, `${done}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_PENDING, attrs: TextAttributes.NONE };
   }
   if (ciOverall === "neutral") {
     return { content: formatRow("~ neutral", `${ciNeutral}/${ciTotal}`, GITHUB_PANEL_TEXT_WIDTH), fg: COLOR_NEUTRAL, attrs: TextAttributes.NONE };
@@ -125,7 +127,8 @@ export function buildGithubPrPanelLines(status: Extract<GithubStatus, { kind: "p
     styledContent: buildStyledPrTitleLine(status, content, index),
   }));
   lines.push(ciLine(status, frame));
-  const neutral = neutralLine(status);
+  if (ciIsRunning(status)) lines.push({content: ciCounts(status.pr), fg: COLOR_PENDING, attrs: TextAttributes.NONE});
+  const neutral = ciIsRunning(status) ? null : neutralLine(status);
   if (neutral !== null) lines.push(neutral);
   const merge = mergeLine(status);
   if (merge !== null) lines.push(merge);
@@ -135,7 +138,7 @@ export function buildGithubPrPanelLines(status: Extract<GithubStatus, { kind: "p
 }
 
 function isLive(status: GithubStatus): boolean {
-  return status.kind === "pr" && (status.pr.ciOverall === "pending" || status.pr.bugbot?.state === "pending");
+  return status.kind === "pr" && (ciIsRunning(status) || status.pr.bugbot?.state === "pending");
 }
 
 export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState): BoxRenderable {
@@ -197,7 +200,10 @@ export function createGithubStatusPanel(renderer: CliRenderer, state: LoopState)
     const frame = SPINNER[frameIndex % SPINNER.length]!;
     panel.title = `PR #${status.pr.number}`;
     const isFocused = state.focusedPane === "github";
-    panel.borderColor = isFocused ? "#89b4fa" : "#45475a";
+    const reducedMotion = state.constellation?.reducedMotion ?? constellationReducedMotion();
+    const border = ciIsRunning(status) ? ciBorderColor(Date.now(), reducedMotion) : isFocused ? "#89b4fa" : "#45475a";
+    panel.borderColor = border;
+    panel.focusedBorderColor = ciIsRunning(status) ? border : "#89b4fa";
     const lines = buildGithubPrPanelLines(status, frame);
     ensureRowCount(lines.length);
     lines.forEach((line, index) => {

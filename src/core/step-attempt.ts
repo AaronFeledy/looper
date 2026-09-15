@@ -21,6 +21,7 @@ export type StepAttemptState = {
   lastPromptMessageID: string | undefined;
   permissionFrictionCounts: Map<string, number>;
   permissionFrictionRequestIDs: Set<string>;
+  engineBlockReason: string | undefined;
 };
 
 export type PriorEvaluationDecision =
@@ -55,6 +56,7 @@ export function createStepAttemptState(): StepAttemptState {
     lastPromptMessageID: undefined,
     permissionFrictionCounts: new Map(),
     permissionFrictionRequestIDs: new Set(),
+    engineBlockReason: undefined,
   };
 }
 

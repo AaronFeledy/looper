@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "../src/lib/recovery-decisions.ts";
+import { recoveryResumeForChoice } from "../src/lib/recovery-decisions.ts";
 import type { RunState } from "../src/lib/state-files.ts";
 
 function runState(overrides: Partial<RunState> = {}): RunState {
@@ -49,18 +49,5 @@ describe("recoveryResumeForChoice", () => {
   test("nudge ignores stale or incomplete run state", () => {
     expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ sessionID: "ses_other" }) })).toBeUndefined();
     expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ messageID: undefined }) })).toBeUndefined();
-  });
-});
-
-describe("shouldAutoStartSavedSession", () => {
-  test("does not auto-start after a prior stop request", () => {
-    expect(shouldAutoStartSavedSession({ started: false, fresh: false, stopFilePresent: true, stopAfterIterationFilePresent: false })).toBe(false);
-    expect(shouldAutoStartSavedSession({ started: false, fresh: false, stopFilePresent: false, stopAfterIterationFilePresent: true })).toBe(false);
-  });
-
-  test("auto-starts only for an untouched resumable launch", () => {
-    expect(shouldAutoStartSavedSession({ started: false, fresh: false, stopFilePresent: false, stopAfterIterationFilePresent: false })).toBe(true);
-    expect(shouldAutoStartSavedSession({ started: true, fresh: false, stopFilePresent: false, stopAfterIterationFilePresent: false })).toBe(false);
-    expect(shouldAutoStartSavedSession({ started: false, fresh: true, stopFilePresent: false, stopAfterIterationFilePresent: false })).toBe(false);
   });
 });

@@ -82,7 +82,6 @@ function makeIdleResumeClient(repoDir: string): IdleResumeStub {
   const pluginPrompt = "plugin/server continuation prompt";
   const continuationOutput = "nudge complete";
   let sentMessageID = "";
-  let statusCalls = 0;
   let subscriptions = 0;
   let releasePrompt: (() => void) | undefined;
   const backfilled = new Promise<void>((resolve) => {
@@ -102,10 +101,9 @@ function makeIdleResumeClient(repoDir: string): IdleResumeStub {
         writeIdleContinuationRecord(repoDir, params.sessionID);
         return { data: {} };
       },
-      status: async () => {
-        statusCalls += 1;
-        return { data: { ses_old: { type: statusCalls === 1 ? "idle" : "busy" } } };
-      },
+      // Read-only health/child checks cannot make an idle session busy;
+      // only sending the recovery prompt starts work in this fixture.
+      status: async () => ({ data: { ses_old: { type: prompted.length === 0 ? "idle" : "busy" } } }),
       messages: async () => {
         releasePrompt?.();
         return {
