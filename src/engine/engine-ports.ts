@@ -11,6 +11,7 @@ import type { StoryPhase } from "../lib/story-state-files.ts";
 import type { RunStateAdvanceInput, RunStatePositionInput, RunStateStoreStep } from "../persistence/run-state-store.ts";
 import type { AdjudicationRuntime } from "./adjudication-routing.ts";
 import type { RunControl } from "./run-control.ts";
+import type { AdjudicationRequest } from "../persistence/adjudication-request.ts";
 
 export type { RunState, StepSessionEntry } from "../lib/state-files.ts";
 export type { PendingRequestPort, RunStepContext, StepLifecyclePort, StepOutputSink, StepReporter } from "./step-reporter.ts";
@@ -34,12 +35,31 @@ export type RunStateStore = {
 export type StoryStatePort = {
   readonly readPhase: (storyId: string) => StoryPhase | undefined;
   readonly writePhase: (storyId: string, phase: StoryPhase) => void;
+  /**
+   * Compare-and-advance inside one interprocess transaction. The monotonic
+   * check MUST happen in the critical section: a caller-side read/compare/write
+   * races `looper signal story-phase` (a separate cold process) and can regress
+   * a phase the signal advanced in between.
+   */
+  readonly advancePhaseMonotonic: (storyId: string, phase: StoryPhase) => void;
   readonly clear: () => void;
 };
 
 export type AdjudicationStore = {
   readonly markerExists: () => boolean;
   readonly readMarker: () => string | null;
+  /**
+   * The pending request with its identity. Capture this ONCE per logical
+   * adjudication: re-reading the marker later can observe a NEWER request
+   * written mid-run, which would then be acknowledged without being processed.
+   */
+  readonly readRequest: () => AdjudicationRequest | null;
+  /**
+   * Log the completion, advance the history watermark, compare-and-remove only
+   * the request this session actually consumed, and clear the session — all in
+   * one transaction. Fails closed if the session record is missing/mismatched.
+   */
+  readonly completeSession: (sessionID: string) => void;
   readonly writeMarker: (reason: string) => void;
   readonly clearMarker: () => void;
   readonly appendHistory: (records: readonly StoryTransitionRecord[]) => void;

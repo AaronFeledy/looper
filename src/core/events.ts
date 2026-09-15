@@ -18,9 +18,12 @@ export type LooperEvent =
   | { readonly kind: "user.text"; readonly text: string }
   | { readonly kind: "reasoning.started" }
   | { readonly kind: "reasoning.text"; readonly text: string }
-  | { readonly kind: "tool.started"; readonly tool: string; readonly input: Record<string, unknown> }
-  | { readonly kind: "tool.done"; readonly tool: string; readonly output: string; readonly retainedOutputPath?: string }
-  | { readonly kind: "tool.failed"; readonly tool: string; readonly error: string }
+  // `callID` is the SDK's stable per-invocation id. It disambiguates parallel
+  // calls to the SAME tool, which name/order matching renders incorrectly
+  // (lost inputs, output attached to the wrong card).
+  | { readonly kind: "tool.started"; readonly tool: string; readonly callID?: string; readonly input: Record<string, unknown> }
+  | { readonly kind: "tool.done"; readonly tool: string; readonly callID?: string; readonly output: string; readonly retainedOutputPath?: string }
+  | { readonly kind: "tool.failed"; readonly tool: string; readonly callID?: string; readonly error: string }
   | { readonly kind: "session.error"; readonly message: string }
   | { readonly kind: "retry"; readonly attempt: number; readonly message: string }
   | { readonly kind: "debug.event"; readonly eventType: string; readonly sessionID?: string }

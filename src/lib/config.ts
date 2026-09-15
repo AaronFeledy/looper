@@ -374,8 +374,10 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     throw new Error(`${input.label} must be a mapping`);
   }
   const rawStep = input.rawStep as RawStep;
+  const name = stringValue(rawStep.name, `${input.label}.name`, input.defaultName);
+  if (name.trim().length === 0) throw new Error(`${input.label}.name cannot be blank`);
   return {
-    name: stringValue(rawStep.name, `${input.label}.name`, input.defaultName),
+    name,
     agent: optionalNonEmptyStringValue(rawStep.agent, `${input.label}.agent`),
     model: optionalModelValue(rawStep.model, `${input.label}.model`),
     variant: optionalVariantValue(rawStep.variant, `${input.label}.variant`),

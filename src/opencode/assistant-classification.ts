@@ -1,8 +1,9 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { emptyAssistantGraceMs, emptyAssistantGracePollMs } from "../config/tunables.ts";
+import { emptyAssistantGraceMs, emptyAssistantGracePollMs, serverRecoveryProbeTimeoutMs } from "../config/tunables.ts";
 import type { AssistantClassification } from "../core/session-types.ts";
-import { sessionPendingState } from "./session-health.ts";
+import { isPendingSessionStatus } from "./session-health.ts";
+import { sdkWithDeadline } from "./deadline.ts";
 import { isRecord, stringValue } from "./util.ts";
 
 export type { AssistantClassification } from "../core/session-types.ts";
@@ -210,6 +211,8 @@ export type ReactivationGraceOptions = {
   readonly log?: (line: string) => void;
   /** Fired exactly once when the session was observed pending again during the wait. */
   readonly onReactivated?: () => void;
+  readonly signal?: AbortSignal;
+  readonly initialClassification?: AssistantClassification;
 };
 
 export function sessionReactivatedMessage(sessionID: string): string {
@@ -240,11 +243,23 @@ export async function classifyAssistantWithReactivationGrace({
   shouldStop,
   log,
   onReactivated,
+  signal,
+  initialClassification,
 }: ReactivationGraceOptions): Promise<AssistantClassification> {
-  const initial = await classifyAssistantForMessage(client, repoDir, sessionID, parentMessageID);
+  const windowMs = graceMs ?? emptyAssistantGraceMs();
+  const bounds = { ...(signal === undefined ? {} : { signal }), ...(shouldStop === undefined ? {} : { shouldStop }) };
+  let initial: AssistantClassification;
+  try {
+    if (initialClassification !== undefined) initial = initialClassification;
+    else {
+      const result = await sdkWithDeadline((signal) => client.session.messages({ sessionID, directory: repoDir }, { signal }), { ...bounds, remainingMs: windowMs > 0 ? windowMs : serverRecoveryProbeTimeoutMs() });
+      initial = result.error || !result.data ? { kind: "missing" } : classifyMessagesForParent(result.data, parentMessageID);
+    }
+  } catch (error) {
+    return { kind: "failed", errorMessage: error instanceof Error ? error.message : String(error) };
+  }
   if (initial.kind !== "empty") return initial;
 
-  const windowMs = graceMs ?? emptyAssistantGraceMs();
   if (windowMs <= 0 || shouldStop?.() === true) return initial;
 
   const intervalMs = pollMs ?? emptyAssistantGracePollMs();
@@ -259,9 +274,17 @@ export async function classifyAssistantWithReactivationGrace({
     await sleep(Math.min(intervalMs, Math.max(1, deadline - Date.now())));
     if (shouldStop?.() === true) return initial;
 
-    if ((await sessionPendingState(client, repoDir, sessionID)) === "pending") return reactivation();
-
-    const reclassified = await classifyAssistantForMessage(client, repoDir, sessionID, parentMessageID);
+    let reclassified: AssistantClassification;
+    try {
+      const status = await sdkWithDeadline((signal) => client.session.status({ directory: repoDir }, { signal }), { ...bounds, remainingMs: deadline - Date.now() });
+      if (!status.error && status.data !== undefined && isPendingSessionStatus(status.data[sessionID])) return reactivation();
+      const result = await sdkWithDeadline((signal) => client.session.messages({ sessionID, directory: repoDir }, { signal }), { ...bounds, remainingMs: deadline - Date.now() });
+      reclassified = result.error || !result.data ? { kind: "missing" } : classifyMessagesForParent(result.data, parentMessageID);
+    } catch (error) {
+      if (signal?.aborted || shouldStop?.() || Date.now() >= deadline) return initial;
+      if (!(error instanceof Error)) throw error;
+      continue;
+    }
     // A turn that had already completed empty and is generating again IS the
     // revival, even when the status probe has not caught up to it yet. Signal
     // it exactly like a pending status, or the caller completes the step while

@@ -167,7 +167,8 @@ export type LoopStep = {
 };
 
 /** Cap retained output lines; rendering very large scrollback can starve TUI input. */
-export const AGENT_MAX_LINES = 5_000;
+export { AGENT_MAX_LINES } from "./session-output.ts";
+import { AGENT_MAX_LINES } from "./session-output.ts";
 /** Cap retained iteration-history entries (current-run, in-RAM); oldest dropped first. */
 export const HISTORY_MAX_ENTRIES = 500;
 const NOTIFY_FRAME_MS = 33;
@@ -1624,9 +1625,38 @@ export function clearBackgroundAgentBuffer(state: LoopState, stepIndex: number, 
 }
 
 export function pushAgentLine(state: LoopState, line: string, at: number = Date.now()): void {
+  for (const deliver of agentLineSubscribers.get(state) ?? []) deliver(line);
   state.agentLines.push(line);
   state.agentLineTimes.push(at);
   trimPairedLines(state.agentLines, state.agentLineTimes);
+}
+
+const agentLineSubscribers = new WeakMap<LoopState, Set<(line: string) => void>>();
+
+export function subscribeAgentLines(state: LoopState, write: (line: string) => void): () => void {
+  let pending: string[] = [];
+  const enqueue = (line: string): void => { pending.push(line); };
+  const subscribers = agentLineSubscribers.get(state) ?? new Set();
+  subscribers.add(enqueue);
+  agentLineSubscribers.set(state, subscribers);
+  const drain = (): void => {
+    const lines = pending;
+    pending = [];
+    for (const line of lines) write(line);
+  };
+  const unsubscribe = subscribe(drain);
+  return () => {
+    subscribers.delete(enqueue);
+    unsubscribe();
+    drain();
+  };
+}
+
+export function clearAgentOutput(state: LoopState): void {
+  state.agentLines = [];
+  state.agentLineTimes = [];
+  state.agentEvents = [];
+  state.agentEventTimes = [];
 }
 
 export function pushAgentEvent(state: LoopState, event: LooperEvent, at: number = Date.now()): void {
@@ -1752,11 +1782,13 @@ export function setHistoryViewOutput(state: LoopState, sessionKey: string, lines
   const expected = historyStepSessionKey(view.entryIndex, view.stepIndex, selectedHistoryStep(state)?.step.sessionID);
   if (expected !== sessionKey) return;
   view.sessionKey = sessionKey;
-  view.lines = lines;
-  view.lineTimes = times;
+  const removed = Math.max(0, lines.length - AGENT_MAX_LINES);
+  view.lines = lines.slice(removed);
+  view.lineTimes = view.lines.map((_, index) => times[removed + index] ?? Date.now());
+  view.outputScrollTop = Math.max(0, view.outputScrollTop - removed);
   view.status = lines.length > 0 ? "ready" : "empty";
   delete view.error;
-  if (view.outputPinnedToBottom) view.outputScrollTop = Math.max(0, lines.length - 1);
+  if (view.outputPinnedToBottom) view.outputScrollTop = Math.max(0, view.lines.length - 1);
   notifyStateChange();
 }
 
@@ -1772,11 +1804,13 @@ export function setHistoryViewEvents(
   if (expected !== sessionKey) return;
   const now = Date.now();
   view.sessionKey = sessionKey;
-  view.events = [...events];
+  const removed = Math.max(0, events.length - AGENT_MAX_LINES);
+  view.events = events.slice(removed);
+  view.outputScrollTop = Math.max(0, view.outputScrollTop - removed);
   view.eventTimes =
     times !== undefined && times.length === events.length
-      ? [...times]
-      : events.map(() => now);
+      ? times.slice(removed)
+      : view.events.map(() => now);
   view.status = events.length > 0 ? "ready" : "empty";
   delete view.error;
   if (view.outputPinnedToBottom) view.outputScrollTop = Math.max(0, Math.max(view.lines.length, view.events.length) - 1);

@@ -1,6 +1,8 @@
 import type { LooperEvent } from "../core/events.ts";
 import { formatLooperEvent } from "../presentation/legacy-line-format.ts";
 
+export const AGENT_MAX_LINES = 5_000;
+
 export type SessionEventBuffer = {
   outputEvents: LooperEvent[];
   outputEventTimes: number[];
@@ -16,7 +18,7 @@ export function isLooperOverlayEvent(event: LooperEvent): boolean {
 export function replaceSessionEvents(
   buffer: SessionEventBuffer,
   session: { readonly events: readonly LooperEvent[]; readonly eventTimes: readonly number[] },
-): void {
+): number {
   const overlay: LooperEvent[] = [];
   const overlayTimes: number[] = [];
   for (let index = 0; index < buffer.outputEvents.length; index += 1) {
@@ -25,14 +27,20 @@ export function replaceSessionEvents(
     overlay.push(event);
     overlayTimes.push(buffer.outputEventTimes[index] ?? Date.now());
   }
-  const nextEvents = [...session.events, ...overlay];
-  const nextTimes = [...session.eventTimes, ...overlayTimes];
+  const overlayStart = Math.max(0, overlay.length - AGENT_MAX_LINES);
+  const sessionStart = Math.max(0, session.events.length - (AGENT_MAX_LINES - (overlay.length - overlayStart)));
+  const nextEvents = [...session.events.slice(sessionStart), ...overlay.slice(overlayStart)];
+  const nextTimes = [
+    ...session.events.slice(sessionStart).map((_, index) => session.eventTimes[sessionStart + index] ?? Date.now()),
+    ...overlayTimes.slice(overlayStart),
+  ];
   buffer.outputEvents.splice(0, buffer.outputEvents.length, ...nextEvents);
   buffer.outputEventTimes.splice(0, buffer.outputEventTimes.length, ...nextTimes);
 
   const lines = buffer.outputLines;
   const lineTimes = buffer.outputLineTimes;
-  if (lines === undefined || lineTimes === undefined) return;
+  const removedEvents = sessionStart + overlayStart;
+  if (lines === undefined || lineTimes === undefined) return removedEvents;
   const nextLines: string[] = [];
   const nextLineTimes: number[] = [];
   for (let index = 0; index < nextEvents.length; index += 1) {
@@ -44,6 +52,7 @@ export function replaceSessionEvents(
       nextLineTimes.push(at);
     }
   }
-  lines.splice(0, lines.length, ...nextLines);
-  lineTimes.splice(0, lineTimes.length, ...nextLineTimes);
+  lines.splice(0, lines.length, ...nextLines.slice(-AGENT_MAX_LINES));
+  lineTimes.splice(0, lineTimes.length, ...nextLineTimes.slice(-AGENT_MAX_LINES));
+  return Math.max(removedEvents, nextLines.length - AGENT_MAX_LINES);
 }

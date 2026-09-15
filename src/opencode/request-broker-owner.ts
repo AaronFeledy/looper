@@ -9,6 +9,8 @@ import { reconcileOpenRequests } from "./request-reconcile.ts";
 import { teardownRequests, type TeardownClock, type TeardownResult } from "./request-teardown.ts";
 import type { Step } from "./step-runner-types.ts";
 import { appendPermissionAudit } from "./permission-audit.ts";
+import { bootstrapAgentRoot } from "./agent-registry-bootstrap.ts";
+import { sdkWithDeadline } from "./deadline.ts";
 
 type RequestBrokerOwnerOptions = {
   readonly requests: PendingRequestPort;
@@ -54,6 +56,8 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
   let activeSessionID: string | undefined;
   let bound: BoundRequestBroker | undefined;
   let replacementBlockedReason: string | undefined;
+  let bootstrapInFlight: Promise<void> | undefined;
+  let ownershipController = new AbortController();
   const humanGateListeners = new Set<(open: boolean) => void>();
   if (options.onHumanGateChange !== undefined) humanGateListeners.add(options.onHumanGateChange);
   const gateMaxMs = options.gateMaxMs ?? permissionGateMaxMs();
@@ -67,6 +71,9 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
       if (bound !== undefined && activeSessionID === sessionID) return bound;
       bound?.broker.clearUI();
       bound?.broker.dispose();
+      ownershipController.abort();
+      ownershipController = new AbortController();
+      bootstrapInFlight = undefined;
       const ownedSessions = new OwnedSessionSet(sessionID);
       const broker = createRequestBroker({
         requests: options.requests,
@@ -99,7 +106,25 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
     },
     async reconcile() {
       if (bound === undefined) return;
-      await reconcileOpenRequests({ client: options.client, repoDir: options.repoDir, broker: bound.broker, pushLine: options.pushLine });
+      const current = bound;
+      if (bootstrapInFlight === undefined) {
+        const finish = current.ownedSessions.beginBootstrap();
+        bootstrapInFlight = sdkWithDeadline(
+          (signal) => bootstrapAgentRoot({ client: options.client, repoDir: options.repoDir, rootSessionID: activeSessionID ?? "", signal, includeActivity: false }),
+          { remainingMs: 5_000, signal: ownershipController.signal },
+        ).then((result) => {
+          finish(result.kind === "success" ? result.deltas : undefined);
+          if (result.kind === "failure") options.pushLine(`[looper] request ownership bootstrap failed: ${result.message}`);
+        }).catch((error) => {
+          finish();
+          options.pushLine(`[looper] request ownership bootstrap failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+      const pending = bootstrapInFlight;
+      await pending;
+      if (bootstrapInFlight === pending) bootstrapInFlight = undefined;
+      if (bound !== current) return;
+      await reconcileOpenRequests({ client: options.client, repoDir: options.repoDir, broker: current.broker, pushLine: options.pushLine });
     },
     async teardown(sessionID, timeoutMs) {
       if (bound === undefined || activeSessionID !== sessionID) return { safeToProceed: false, reason: `permission teardown has no broker for session ${sessionID}` };
@@ -116,6 +141,7 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
       return result;
     },
     dispose() {
+      ownershipController.abort();
       bound?.broker.clearUI();
       bound?.broker.dispose();
       bound = undefined;

@@ -38,7 +38,7 @@ export async function handleSignal(input: SignalInput): Promise<string> {
         }
         storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
       }
-      if (storyId === undefined) {
+      if (storyId === undefined || storyId.trim().length === 0) {
         throw new UsageError("could not derive a story ID from the current branch; provide --story <ID>");
       }
       createStoryStateStore({ configDir: input.configDir }).writePhase(storyId, input.command.phase);

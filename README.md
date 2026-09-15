@@ -77,7 +77,8 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-adjudicate-session.json  # in-flight adjudicator session, reconciled on resume
     ├── .looper-prd-history.json   # per-story PRD passes transition log (+ adjudicated watermark); cleared only on --fresh
     ├── .looper-permission-log.jsonl # private decision audit (0600); cleared only on --fresh
-    └── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh
+    ├── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh
+    └── .looper-state-lock.sqlite   # machine-local mutex; gitignored, recreates on next write
 ```
 
 `looper.yml` / `looper.yaml` shape:

@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 
 import type { ContextPolicy } from "../src/lib/config.ts";
 import { runIteration, StepFailureError, type ResumeSession } from "../src/lib/orchestrator.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createLoopState, type LoopState } from "../src/lib/state.ts";
+import * as budgets from "../src/engine/run-control.ts";
+import { recoveryResumeForChoice } from "../src/lib/recovery-decisions.ts";
 
 // allow: SIZE_OK — the characterization matrix and its shared SDK harness form one refactor guard.
 
@@ -259,6 +261,40 @@ describe("runIteration fail-path characterization", () => {
     expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual([]);
     expectExactLog(input.state, `[looper] ${reason}`);
     expectExactLog(input.state, `[looper] Build failed: ${reason} — not retrying: retry suppressed (${reason})`);
+  });
+
+  test("manual restart refuses a new generation when the failed session cannot be stopped", async () => {
+    // Given a terminal failure whose server-side generation is still busy.
+    const input = setupScratch();
+    const harness = makeHarness({ status: async () => ({ ses_old: { type: "busy" } }) });
+    const resume = recoveryResumeForChoice({ choice: "restart", failedSessionID: "ses_old", failedStepName: "Build", runState: null });
+    // When restart goes through the same reconciliation path as crash resume.
+    await captureFailure(execute(input, harness, resume));
+    // Then no fresh generation is created without a confirmed stop.
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual([]);
+    expect(harness.calls).toContain("abort:ses_old");
+  });
+
+  test("exhausts the retry budget when the backoff sleep consumes the minimum runtime", async () => {
+    // Given enough budget before backoff but only the minimum after it.
+    const input = setupScratch();
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "5000";
+    const budget = spyOn(budgets, "remainingStepBudgetMs").mockReturnValue(10_000);
+    const sleep = Bun.sleep;
+    const sleepSpy = spyOn(Bun, "sleep").mockImplementation((duration) => {
+      if (duration === 20) budget.mockReturnValue(5_000);
+      return sleep(duration);
+    });
+    const harness = makeHarness({ prompt: async () => { throw new Error("retry failure"); } });
+    try {
+      // When the backoff completes.
+      await captureFailure(execute(input, harness));
+      // Then no second prompt is dispatched and the row is terminally failed.
+      expect(harness.calls.filter((call) => call.startsWith("prompt:"))).toEqual(["prompt:ses_1"]);
+      expect(input.state.steps.map((row) => row.status)).toEqual(["failed"]);
+      expectExactLog(input.state, "[looper] Build failed: retry failure — not retrying: retry budget exhausted");
+      expect(input.state.agentLines.some((line) => line.includes("retrying now"))).toBe(false);
+    } finally { sleepSpy.mockRestore(); budget.mockRestore(); }
   });
 
   test("(b) unrecovered server leaves the terminal session running", async () => {

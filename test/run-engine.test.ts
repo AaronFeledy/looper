@@ -44,6 +44,14 @@ function memoryStore(initial: RunState | null = null): RunStateStore {
 }
 
 describe("computeRunResumePlan", () => {
+  test.each([2, 1, 20])("keeps the saved index %i when a step name is ambiguous", (stepIndex) => {
+    // Given duplicate logical steps and a persisted index.
+    const store = memoryStore({ iteration: 1, stepIndex, stepName: "Build", sessionID: "ses_third", updatedAt: "now" });
+    // When the resume plan resolves the checkpoint.
+    const plan = computeRunResumePlan({ fresh: false, maxIterations: 2, steps: [{ name: "Build" }, { name: "Test" }, { name: "Build" }], store, legacyResumeStepIndex: () => 0 });
+    // Then names cannot alias the saved position to the first Build.
+    expect(plan.firstIterationStartStepIndex).toBe(Math.min(stepIndex, 2));
+  });
   test("fresh ignores persisted run-state", () => {
     const store = memoryStore({ iteration: 3, stepIndex: 1, stepName: "review", sessionID: "ses", messageID: "msg", updatedAt: "now" });
     const plan = computeRunResumePlan({ fresh: true, maxIterations: 5, steps: [{ name: "build" }, { name: "review" }], store, legacyResumeStepIndex: () => 0 });
@@ -95,6 +103,39 @@ describe("computeRunResumePlan", () => {
 });
 
 describe("runEngine", () => {
+  test("persists the iteration snapshot when config changes during a step", async () => {
+    // Given a two-step iteration whose config is edited during Build.
+    const build = { name: "Build", prompt: "build.md" };
+    const review = { name: "Review", prompt: "review.md" };
+    let steps = [build, review];
+    const store = memoryStore();
+    let nextStep: string | undefined;
+    // When Build finishes after a new first step is inserted.
+    await runEngine({ maxIterations: 1, fresh: true, waitProvided: false, waitDuration: 0, repoDir: "/repo", configDir: "/cfg", client: {}, store,
+      hooks: { createIterationState: () => ({}) }, loadSteps: () => steps, currentBranch: async () => "main", createLooperRunID: () => "run", legacyResumeStepIndex: () => 0,
+      runIteration: async (input) => {
+        steps = [{ name: "Inserted", prompt: "x.md" }, build, review];
+        input.hooks?.onStepFinish?.({ step: build, index: 0, nextIndex: 1, totalSteps: 2, iteration: 1, status: "done", completionKind: "done" });
+        nextStep = store.read()?.stepName;
+        return "complete";
+      } });
+    // Then the checkpoint names the next step in the captured iteration.
+    expect(nextStep).toBe("Review");
+  });
+
+  test("preserves a stop arriving during recovery calculation", async () => {
+    // Given a terminal failure and a stop arriving just after the recovery choice.
+    let stopped = false;
+    let retries = 0;
+    const store = { ...memoryStore(), stopFileExists: () => stopped, clearStopFiles: () => { stopped = false; } };
+    // When recovery calculates its resume metadata.
+    const result = await runEngine({ maxIterations: 1, fresh: true, waitProvided: false, waitDuration: 0, repoDir: "/repo", configDir: "/cfg", client: {}, store,
+      hooks: { createIterationState: () => ({}), onStepFailure: async () => "restart", recoveryResumeForChoice: () => { stopped = true; return undefined; }, onRecoveryRetry: () => { retries += 1; } },
+      loadSteps: () => [{ name: "Build", prompt: "build.md" }], currentBranch: async () => "main", createLooperRunID: () => "run", legacyResumeStepIndex: () => 0,
+      runIteration: async () => { if (retries === 0) throw new StepFailureError("failed"); return "complete"; } });
+    // Then recovery neither clears the signal nor invokes a retry.
+    expect([result.kind, stopped, retries]).toEqual(["stopped", true, 0]);
+  });
   test("forwards unattended mode and the run-state stop writer to an iteration", async () => {
     // Given an unattended engine run with a store-backed stop writer.
     const stopReasons: string[] = [];

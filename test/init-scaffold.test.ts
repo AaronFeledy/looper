@@ -39,6 +39,17 @@ describe("scaffoldConfigDir", () => {
     });
   });
 
+  test("ignores the machine-local lock file", () => {
+    withScratchDir((repoDir) => {
+      const configDir = join(repoDir, ".looper");
+      const result = scaffoldConfigDir({ configDir, repoDir });
+      expect(result.kind).toBe("created");
+      const gitignore = readFileSync(join(configDir, ".gitignore"), "utf8");
+      expect(gitignore).toContain(".looper-state-lock.sqlite");
+      expect(gitignore).toContain(".looper-state-lock.sqlite-*");
+    });
+  });
+
   test("refuses to overwrite an existing config", () => {
     withScratchDir((repoDir) => {
       const configDir = join(repoDir, ".looper");

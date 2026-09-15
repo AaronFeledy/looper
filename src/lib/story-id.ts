@@ -9,7 +9,8 @@ export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PAT
     if (error instanceof SyntaxError) return undefined;
     throw error;
   }
-  return expression.exec(branch)?.[1]?.toUpperCase();
+  const capture = expression.exec(branch)?.[1];
+  return capture === undefined || capture.length === 0 ? undefined : capture.toUpperCase();
 }
 
 export async function currentGitBranch(repoDir: string): Promise<string | undefined> {

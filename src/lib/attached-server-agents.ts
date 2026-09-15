@@ -209,11 +209,11 @@ async function readAttachedDirectory(client: OpencodeClient): Promise<string | u
   };
   const v2Location = maybeClient.v2?.location;
   const v2Get = v2Location?.get;
-  const v2Directory = await readDirectoryFromEndpoint(v2Get === undefined ? undefined : () => v2Get());
+  const v2Directory = await readDirectoryFromEndpoint(v2Get === undefined ? undefined : () => v2Get.call(v2Location));
   if (v2Directory !== undefined) return v2Directory;
   const path = maybeClient.path;
   const pathGet = path?.get;
-  return await readDirectoryFromEndpoint(pathGet === undefined ? undefined : () => pathGet());
+  return await readDirectoryFromEndpoint(pathGet === undefined ? undefined : () => pathGet.call(path));
 }
 
 async function canonicalDirectory(directory: string): Promise<string> {

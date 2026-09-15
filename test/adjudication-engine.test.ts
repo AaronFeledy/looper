@@ -269,7 +269,7 @@ describe("PRD adjudication routing", () => {
     const store = createInMemoryAdjudicationStore();
     const stub = clientFor(scratch.repoDir, (prompt, ordinal) => {
       if (ordinal === 1) store.writeMarker("route once");
-      if (prompt.includes("resolve the PRD conflict")) store.writeMarker("do not recurse");
+      if (prompt.includes("resolve the PRD conflict")) store.writeAgentMarker("do not recurse");
     });
     const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2"] });
 
@@ -277,6 +277,28 @@ describe("PRD adjudication routing", () => {
 
     expect(stub.prompts.filter((prompt) => prompt.includes("resolve the PRD conflict"))).toHaveLength(1);
     expect(store.readMarker()).toBeNull();
+  });
+
+  test("an external adjudication signal arriving mid-adjudication survives and is not logged as completed", async () => {
+    // Given an adjudication running for reason A.
+    const scratch = setup(2);
+    const store = createInMemoryAdjudicationStore();
+    const stub = clientFor(scratch.repoDir, (prompt, ordinal) => {
+      if (ordinal === 1) store.writeMarker("reason A");
+      // When `looper signal adjudicate --reason B` lands while the adjudicator runs.
+      if (prompt.includes("resolve the PRD conflict")) store.writeMarker("reason B");
+    });
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2"] });
+
+    await runIteration({ state, iteration: 1, client: stub.client, ...scratch, adjudication: { store, step: { name: "adjudicate", prompt: join(scratch.configDir, "adjudicate.md") }, threshold: 2, writeStop: () => {} } });
+
+    // Then B is still pending for the next iteration to route...
+    expect(store.readMarker()).toBe("reason B");
+    // ...the adjudicator was prompted with A, not B...
+    expect(stub.prompts.filter((prompt) => prompt.includes("reason A"))).toHaveLength(1);
+    expect(stub.prompts.filter((prompt) => prompt.includes("reason B"))).toHaveLength(0);
+    // ...and only A was recorded as actually adjudicated.
+    expect(store.readCompletions().map((record) => record.reason)).toEqual(["reason A"]);
   });
 
   test("a stale marker routes before step zero and never persists adjudicate as the resume step", async () => {

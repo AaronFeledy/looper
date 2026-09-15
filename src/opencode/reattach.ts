@@ -7,14 +7,15 @@ import type { RunStepContext } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { createSessionEventConsumer, renderSession } from "../lib/event-consumer.ts";
 import { stopFileExists } from "../persistence/state-file-operations.ts";
-import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord } from "./background-tasks.ts";
+import { logContinuationState, setContinuationStatus, waitForSessionLoopContinuationRecord, type ContinuationLookupResult } from "./background-tasks.ts";
 import { CONTINUATION_STALE_MS, EVENT_CONSUMER_CLOSE_TIMEOUT_MS, REATTACH_MAX_WAIT_MS, REATTACH_STATUS_POLL_MS, readProjectContinuationRecord, type RunContinuationRecord } from "./continuation-records.ts";
 import { createRequestBrokerOwner, type RequestBrokerOwner } from "./request-broker-owner.ts";
 import { createPausableTimeout } from "./pausable-timeout.ts";
 import { type Step, type StepRunResult } from "./step-runner-types.ts";
 import { DEADLINE_EXCEEDED, boundedBackgroundLivenessProbe, boundedSessionPendingState, isPendingSessionStatus, withAbortSignal, withDeadline, type SessionPendingState } from "./session-health.ts";
-import { classifyAssistantWithReactivationGrace, classifyCurrentTurn, resolveOutcomeParentID } from "./assistant-classification.ts";
+import { classifyAssistantWithReactivationGrace, classifyCurrentTurn, classifyMessagesForCurrentTurn, resolveOutcomeParentID, type AssistantClassification } from "./assistant-classification.ts";
 import { abortSubscribeSignal, formatRequestError, isAbortError, toError } from "./util.ts";
+import { sdkWithDeadline } from "./deadline.ts";
 
 export type ResumeSessionWorkState = "running" | "idle" | "unknown" | "stale";
 
@@ -196,6 +197,7 @@ export async function reattachOpenCodeStep({
   // the whole REATTACH_MAX_WAIT_MS window, then fails without aborting the
   // session — which recovery then reattaches to again.
   const effectiveTimeoutMs = Math.min(timeoutMsOverride ?? step.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS, REATTACH_MAX_WAIT_MS);
+  let classificationDeadline = Date.now() + effectiveTimeoutMs;
 
   ctx.reporter.steps.begin(stepIndex, { statusMessage: "reattaching" });
   ctx.reporter.steps.setSessionID(stepIndex, sessionID);
@@ -288,7 +290,7 @@ export async function reattachOpenCodeStep({
     ...(questionPolicy !== undefined ? { questionPolicy } : {}),
   });
   const localBrokerOwner = requestBrokerOwner === undefined ? brokerOwner : undefined;
-  const requestBroker = brokerOwner.bind(sessionID).broker;
+  const { broker: requestBroker, ownedSessions } = brokerOwner.bind(sessionID);
   const stepTimeout = createPausableTimeout({ durationMs: effectiveTimeoutMs, onElapsed: onStepTimeout });
   ctx.control.bindTimeoutExtender(
     () => {
@@ -306,6 +308,11 @@ export async function reattachOpenCodeStep({
   const unsubscribeHumanGate = brokerOwner.subscribeHumanGate(stepTimeout.setGateOpen);
   let acceptSessionEvents = true;
   const consumer = createSessionEventConsumer(sessionID, {
+    ownedSessionIDs: () => ownedSessions.ids(),
+    onSessionLifecycle: (event) => {
+      if (event.type === "session.deleted") ownedSessions.removeChild(event.properties.sessionID);
+      else ownedSessions.apply({ kind: "upsert", session: { ...event.properties.info, createdAt: event.properties.info.time.created } });
+    },
     pushLine,
     pushLines,
     onEvent: (event, at) => {
@@ -354,7 +361,10 @@ export async function reattachOpenCodeStep({
       let stillPending = false;
       let statusErrorMessage: string | undefined;
       try {
-        const statusResult = await client.session.status({ directory: repoDir });
+        const statusResult = await sdkWithDeadline(
+          (signal) => client.session.status({ directory: repoDir }, { signal }),
+          { remainingMs: stepTimeout.remainingMs() ?? effectiveTimeoutMs, signal: ctrl.signal },
+        );
         if (!statusResult.error) {
           statusOk = true;
           stillPending = isPendingSessionStatus(statusResult.data?.[sessionID]);
@@ -391,12 +401,12 @@ export async function reattachOpenCodeStep({
     clearInterval(watcher);
     unsubscribeHumanGate();
     ctx.control.bindTimeoutExtender(undefined);
+    classificationDeadline = Date.now() + (stepTimeout.remainingMs() ?? effectiveTimeoutMs);
     stepTimeout.dispose();
-    // Skip/restart already aborted `ctrl` in requestCancellation. Aborting again
-    // here on the idle/success path rejects the SDK SSE `reader.cancel()` as an
-    // unhandled `The operation was aborted` (seen as a red ERROR right after resume).
-    if (cancellationAction !== null) abortSubscribeSignal(ctrl);
-    if (consumerPromise && cancellationAction !== null) {
+    // The abort helper handles SDK reader.cancel rejection; consumerPromise also
+    // catches AbortError from iteration. Release the global stream on success too.
+    abortSubscribeSignal(ctrl);
+    if (consumerPromise) {
       let consumerTimedOut = false;
       await Promise.race([
         consumerPromise,
@@ -458,25 +468,38 @@ export async function reattachOpenCodeStep({
   }
 
   const parentMessageID = resolvedParentID;
-  let classification = await classifyCurrentTurn(client, repoDir, sessionID, parentMessageID);
+  let classification: AssistantClassification;
+  try {
+    const msgs = await sdkWithDeadline((signal) => client.session.messages({ sessionID, directory: repoDir }, { signal }), {
+      remainingMs: classificationDeadline - Date.now(),
+      shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
+    });
+    classification = msgs.error || !msgs.data ? { kind: "missing" as const } : classifyMessagesForCurrentTurn(msgs.data, parentMessageID);
+  } catch (error) {
+    return finalize("failed", { errorMessage: toError(error).message });
+  }
   if (classification.kind === "empty") {
-    classification = await classifyAssistantWithReactivationGrace({
+    const initialClassification = classification;
+    classification = await sdkWithDeadline((signal) => classifyAssistantWithReactivationGrace({
       client,
       repoDir,
       sessionID,
       parentMessageID,
       shouldStop: () => ctx.control.quitting || ctx.control.skipRequested || ctx.control.restartRequested || stopFileExists(),
       log: pushLine,
-    });
+      signal,
+      initialClassification,
+    }), { remainingMs: classificationDeadline - Date.now() }).catch((error) => ({ kind: "failed" as const, errorMessage: toError(error).message }));
   }
   if (classification.kind === "done") {
     pushLine(`[looper] reattach: current turn for parent ${parentMessageID} completed cleanly`);
-    let record: RunContinuationRecord | null = null;
+    let record: ContinuationLookupResult = "unknown";
     try {
       record = await waitForSessionLoopContinuationRecord({ client, repoDir, sessionID });
     } catch (error) {
       pushLine(`[looper] continuation lookup after reattach threw: ${toError(error).message}`);
     }
+    if (record === "pending" || record === "unknown") return finalize("failed", { errorMessage: `session ${sessionID} is ${record} after continuation grace; cannot complete step` });
     if (record !== null) {
       setContinuationStatus(ctx, stepIndex, record);
       logContinuationState(ctx, stepIndex, record, "background tasks active after reattach");

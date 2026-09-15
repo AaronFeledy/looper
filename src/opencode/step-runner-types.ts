@@ -48,14 +48,15 @@ export type RunnerEventControllerOptions = {
 export function createRunnerEventController(options: RunnerEventControllerOptions): Pick<
   EventConsumerCallbacks,
   "onPermissionAsked" | "onPermissionReplied" | "onQuestionAsked" | "onQuestionReplied" | "onQuestionRejected" | "onTodoUpdated"
-> {
+> & { readonly dispose: () => void } {
   const { ctx, ...brokerOptions } = options;
-  return createRequestBroker({
+  const broker = createRequestBroker({
     ...brokerOptions,
     requests: ctx.reporter.requests,
     unattended: options.unattended ?? false,
     friction: { counts: new Map(), requestIDs: new Set() },
-  }).callbacks;
+  });
+  return { ...broker.callbacks, dispose: broker.dispose };
 }
 
 export class MalformedModelError extends Error {

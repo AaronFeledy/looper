@@ -6,7 +6,7 @@ type StepLike = { readonly name: string };
 
 type BuildStepHooksInput = {
   readonly store: RunStateStore;
-  readonly loadSteps: () => readonly StepLike[];
+  readonly stepsSnapshot: readonly StepLike[];
   readonly looperRunID: string;
   readonly persistTitles: boolean;
   readonly getStepSessions: () => readonly StepSessionEntry[];
@@ -24,7 +24,7 @@ function upsertStepSession(entries: readonly StepSessionEntry[], entry: StepSess
 export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHooks {
   return {
     onStepBegin: (info) => {
-      const latestSteps = input.loadSteps();
+      const latestSteps = input.stepsSnapshot;
       const stepSessions = input.getStepSessions();
       input.store.saveResumeStep(latestSteps, info.index);
       input.store.savePosition({
@@ -42,7 +42,7 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
       input.setStepSessions(stepSessions);
       input.store.savePosition({
         iteration: info.iteration,
-        steps: input.loadSteps(),
+        steps: input.stepsSnapshot,
         stepIndex: info.index,
         stepName: info.stepName,
         sessionID: info.sessionID,
@@ -56,7 +56,7 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
       input.frontendHooks.onStepSession?.(info);
     },
     onAdjudicationRoute: ({ iteration }) => {
-      const latestSteps = input.loadSteps();
+      const latestSteps = input.stepsSnapshot;
       input.store.saveNextResumeStep(latestSteps, latestSteps.length);
       input.store.saveAdvance({
         iteration,
@@ -68,7 +68,7 @@ export function buildEngineStepHooks(input: BuildStepHooksInput): RunIterationHo
     onStepFinish: (info) => {
       const stepSessions = input.getStepSessions();
       if (info.completionKind === "done" || info.completionKind === "gate-skip") {
-        const latestSteps = input.loadSteps();
+        const latestSteps = input.stepsSnapshot;
         input.store.saveNextResumeStep(latestSteps, info.nextIndex);
         input.store.saveAdvance({
           iteration: info.iteration,

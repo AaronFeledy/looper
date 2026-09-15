@@ -233,7 +233,7 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
         ? hooks.onQuit
         : (keyName === "return" || keyName === "enter") && state.focusedPane === "github"
           ? () => tryOpenCurrentPr(state)
-          : keyName === "g" || keyName === "return" || keyName === "enter"
+          : !state.started && !state.control.quitting && (keyName === "g" || keyName === "return" || keyName === "enter")
             ? hooks.onStart
             : keyName === "e"
             ? hooks.onStopAfterIteration

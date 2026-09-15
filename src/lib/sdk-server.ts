@@ -3,12 +3,19 @@ import { spawn, type Subprocess } from "bun";
 export type ServerHandle = {
   url: string;
   close: () => Promise<void>;
+  /**
+   * Immediate SIGKILL + bounded reap, for the double-Ctrl-C force-quit path.
+   * `close()` grants a SIGTERM grace window first, which is the wrong trade
+   * when the operator is force-quitting a wedged server.
+   */
+  kill: () => Promise<void>;
   [Symbol.asyncDispose]: () => Promise<void>;
 };
 
 const LISTENING_RE = /opencode server listening on\s+(https?:\/\/\S+)/i;
 const SPAWN_TIMEOUT_MS = 15_000;
 const SHUTDOWN_GRACE_MS = 3_000;
+const FORCE_REAP_TIMEOUT_MS = 1_000;
 
 function logServerDiagnostic(message: string): void {
   if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] opencode server: ${message}`);
@@ -37,6 +44,31 @@ async function terminateProcess(proc: Subprocess, label: string): Promise<void> 
     logServerDiagnostic(`${label}: exit wait failed: ${formatError(error)}`);
   } finally {
     clearTimeout(forceTimer);
+  }
+}
+
+// Force-quit: skip the SIGTERM grace entirely and never block exit for long.
+// The reap is bounded because a process wedged in uninterruptible sleep will
+// not be reaped by SIGKILL either, and the operator asked to leave NOW.
+async function forceKillProcess(proc: Subprocess, label: string): Promise<void> {
+  if (proc.exitCode !== null) return;
+  try {
+    proc.kill("SIGKILL");
+  } catch (error) {
+    logServerDiagnostic(`${label}: SIGKILL failed: ${formatError(error)}`);
+  }
+  let reapTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      proc.exited,
+      new Promise<void>((resolve) => {
+        reapTimer = setTimeout(resolve, FORCE_REAP_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    logServerDiagnostic(`${label}: exit wait failed: ${formatError(error)}`);
+  } finally {
+    if (reapTimer !== undefined) clearTimeout(reapTimer);
   }
 }
 
@@ -158,6 +190,8 @@ export async function startOrAttachServer(options: {
     const handle: ServerHandle = {
       url: options.attachUrl,
       async close() {},
+      // Attached servers are not ours to kill.
+      async kill() {},
       async [Symbol.asyncDispose]() {
         await this.close();
       },
@@ -171,6 +205,9 @@ export async function startOrAttachServer(options: {
     url,
     async close() {
       await terminateProcess(proc, "shutdown");
+    },
+    async kill() {
+      await forceKillProcess(proc, "force-quit");
     },
     async [Symbol.asyncDispose]() {
       await this.close();

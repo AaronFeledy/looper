@@ -48,7 +48,7 @@
  * }, options?)
  */
 import { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import type { PermissionAction, PermissionPolicy } from "../src/lib/config.ts";
 import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
@@ -57,6 +57,8 @@ import { createRunnerEventController } from "../src/opencode/step-runner-types.t
 
 const ACTIVE_SESSION_ID = "ses_permission_active";
 const REPO_DIR = "/repo";
+const disposers: Array<() => void> = [];
+afterEach(() => { for (const dispose of disposers.splice(0)) dispose(); });
 
 type PermissionReplyCall = {
   readonly requestID: string;
@@ -124,6 +126,7 @@ function createHarness(options: {
     ...(options.permissionPolicy === undefined ? {} : { permissionPolicy: options.permissionPolicy }),
     ...(options.questionPolicy === undefined ? {} : { questionPolicy: options.questionPolicy }),
   });
+  disposers.push(controller.dispose);
   return { state, fake, lines, controller };
 }
 
@@ -146,6 +149,16 @@ async function drainReplies(): Promise<void> {
 const AUTO_REPLY_ACTIONS = ["always", "once", "reject"] as const satisfies readonly Exclude<PermissionAction, "ask">[];
 
 describe("createRunnerEventController permission characterization", () => {
+  test("exposes disposal so callbacks cannot submit after controller teardown", async () => {
+    // Given
+    const harness = createHarness({ permissionPolicy: { edit: "once" } });
+    harness.controller.dispose();
+    // When
+    askPermission(harness);
+    await drainReplies();
+    // Then
+    expect(harness.fake.permissionReplies).toEqual([]);
+  });
   for (const action of AUTO_REPLY_ACTIONS) {
     test(`replies ${action} once when policy selects ${action}`, async () => {
       // Given

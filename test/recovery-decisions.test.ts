@@ -16,8 +16,9 @@ function runState(overrides: Partial<RunState> = {}): RunState {
 }
 
 describe("recoveryResumeForChoice", () => {
-  test("only nudge reuses the failed session", () => {
-    expect(recoveryResumeForChoice({ choice: "restart", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState() })).toBeUndefined();
+  test("restart carries the failed session for reconciliation while quit discards it", () => {
+    // Given a failed session, when restart is chosen, then reconcile it before starting fresh.
+    expect(recoveryResumeForChoice({ choice: "restart", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState() })).toMatchObject({ sessionID: "ses_failed", stepName: "Build" });
     expect(recoveryResumeForChoice({ choice: "quit", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState() })).toBeUndefined();
 
     expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState() })).toEqual({
@@ -25,6 +26,11 @@ describe("recoveryResumeForChoice", () => {
       messageID: "msg_failed",
       stepName: "Build",
     });
+  });
+
+  test("restart retains a failed session even when its checkpoint is unavailable", () => {
+    // Given no checkpoint, when restart is chosen, then the session still requires confirm-stop.
+    expect(recoveryResumeForChoice({ choice: "restart", failedSessionID: "ses_failed", failedStepName: "Build", runState: null })).toEqual({ sessionID: "ses_failed", stepName: "Build" });
   });
 
   test("nudge copies the persisted prompt and Looper-owned message IDs", () => {
@@ -46,9 +52,9 @@ describe("recoveryResumeForChoice", () => {
     });
   });
 
-  test("nudge ignores stale or incomplete run state", () => {
-    expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ sessionID: "ses_other" }) })).toBeUndefined();
-    expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ messageID: undefined }) })).toBeUndefined();
+  test("nudge discards stale checkpoint metadata but retains the session requiring reconciliation", () => {
+    expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ sessionID: "ses_other" }) })).toEqual({ sessionID: "ses_failed", stepName: "Build" });
+    expect(recoveryResumeForChoice({ choice: "nudge", failedSessionID: "ses_failed", failedStepName: "Build", runState: runState({ messageID: undefined }) })).toEqual({ sessionID: "ses_failed", stepName: "Build" });
   });
 });
 

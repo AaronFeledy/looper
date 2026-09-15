@@ -5,15 +5,15 @@ export const DEFAULT_PERMISSION_TEARDOWN_MS = 5_000;
 export function positiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function requiredPositiveIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${name} must be an integer greater than or equal to 1`);
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be an integer greater than or equal to 1`);
   return parsed;
 }
 
@@ -66,8 +66,8 @@ export function prdFlipThreshold(configValue?: number): number {
 export function nonNegativeIntegerEnv(name: string, fallback: number): number {
   const value = process.env[name];
   if (value === undefined) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 const STALL_ITERATION_LIMIT_DEFAULT = 3;
@@ -122,8 +122,7 @@ export function serverRecoveryProbeTimeoutMs(): number {
 }
 
 export function promptVcsTimeoutMs(): number {
-  const raw = Number(process.env["LOOPER_PROMPT_VCS_TIMEOUT_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+  return positiveIntegerEnv("LOOPER_PROMPT_VCS_TIMEOUT_MS", 5000);
 }
 
 export function branchDiffCollectionTimeoutMs(): number {
@@ -135,13 +134,11 @@ export function gateScriptTimeoutMs(): number {
 }
 
 export function inheritedRenameDelayMs(): number {
-  const raw = Number(process.env["LOOPER_INHERITED_TITLE_DELAY_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+  return positiveIntegerEnv("LOOPER_INHERITED_TITLE_DELAY_MS", 5000);
 }
 
 export function titleGenTimeoutMs(): number {
-  const raw = Number(process.env["LOOPER_TITLE_GEN_TIMEOUT_MS"]);
-  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : TITLE_GEN_TIMEOUT_MS_DEFAULT;
+  return positiveIntegerEnv("LOOPER_TITLE_GEN_TIMEOUT_MS", TITLE_GEN_TIMEOUT_MS_DEFAULT);
 }
 
 const FAILURE_RETRY_BASE_MS_DEFAULT = 15_000;
@@ -171,8 +168,5 @@ export function failureRetryJitterRatio(): number {
 
 export function configuredAttachValidationTimeoutMs(timeoutMs: number | undefined): number {
   if (timeoutMs !== undefined) return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
-  const raw = process.env["LOOPER_ATTACH_VALIDATION_TIMEOUT_MS"];
-  if (raw === undefined || raw.trim() === "") return DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS;
+  return positiveIntegerEnv("LOOPER_ATTACH_VALIDATION_TIMEOUT_MS", DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS);
 }

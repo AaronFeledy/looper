@@ -214,7 +214,6 @@ export function createStallObserver(input: CreateStallObserverInput): StallObser
           }
         }
       }
-      if (head !== undefined) prevHead = head;
       const worktreeFingerprint = await probeWorktreeFingerprint(input.repoDir, prdRel);
 
       const storyId = storyIdFromBranch(branch, input.storyIdPattern);
@@ -236,6 +235,7 @@ export function createStallObserver(input: CreateStallObserverInput): StallObser
         phase: storyId === undefined ? undefined : input.readPhase?.(storyId),
         adjudicationCompletions: input.readCompletionsCount(),
       };
+      if (!lastObservation.inFlight && head !== undefined) prevHead = head;
       return detector.observe(lastObservation);
     },
 

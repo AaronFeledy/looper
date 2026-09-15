@@ -1,4 +1,3 @@
-import { $ } from "bun";
 
 import type { GithubBugbot, GithubMergeable, GithubStatus } from "./state.ts";
 
@@ -230,10 +229,34 @@ function bugbotEntryTime(entry: StatusCheckRollupEntry): number {
   return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
 }
 
+/**
+ * Startup probes run before the TUI can service signals, so an unbounded call
+ * here (a stalled binary, a hung filesystem) strands boot with no way to
+ * interrupt it. Both detection probes are bounded and fail closed to "no
+ * GitHub", which only hides the optional PR panel.
+ */
+const DETECT_TIMEOUT_MS = 5_000;
+
+async function boundedProbe(cmd: readonly string[], cwd?: string): Promise<string | null> {
+  try {
+    const child = Bun.spawn([...cmd], {
+      ...(cwd !== undefined ? { cwd } : {}),
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: DETECT_TIMEOUT_MS,
+    });
+    const [exitCode, stdout] = await Promise.all([child.exited, child.stdout.text()]);
+    return exitCode === 0 ? stdout : null;
+  } catch (error) {
+    debugGithub(`${cmd[0]} probe threw: ${formatError(error)}`);
+    return null;
+  }
+}
+
 async function gitOriginUrl(repoDir: string): Promise<string | null> {
-  const result = await $`git remote get-url origin`.cwd(repoDir).quiet().nothrow();
-  if (result.exitCode !== 0) return null;
-  const url = result.stdout.toString().trim();
+  const stdout = await boundedProbe(["git", "remote", "get-url", "origin"], repoDir);
+  if (stdout === null) return null;
+  const url = stdout.trim();
   return url.length > 0 ? url : null;
 }
 
@@ -242,20 +265,13 @@ let ghAvailableCache: Promise<boolean> | undefined;
 /** Whether the `gh` CLI is installed and runnable. Cached for the session to avoid repeated subprocess probes. */
 export function ghAvailable(): Promise<boolean> {
   if (ghAvailableCache === undefined) {
-    ghAvailableCache = $`gh --version`
-      .quiet()
-      .nothrow()
-      .then((result) => {
-        if (result.exitCode !== 0) {
-          debugGithub(`gh --version exited ${result.exitCode}: ${firstLine(result.stderr.toString()) || "no stderr"}`);
-          return false;
-        }
-        return true;
-      })
-      .catch((error) => {
-        debugGithub(`gh --version threw: ${formatError(error)}`);
+    ghAvailableCache = boundedProbe(["gh", "--version"]).then((stdout) => {
+      if (stdout === null) {
+        debugGithub("gh --version did not complete successfully");
         return false;
-      });
+      }
+      return true;
+    });
   }
   return ghAvailableCache;
 }
