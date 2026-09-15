@@ -83,26 +83,17 @@ describe("attached server agent validation", () => {
     ).toContain(`required looper agent: ${TITLE_AGENT_NAME}`);
   });
 
-  test("rejects attached server location mismatches when location data is available", async () => {
+  test("allows an attached server whose directory differs from the Looper repo", async () => {
     const client = {
       v2: {
         location: new LocationEndpoint(),
       },
     } as unknown as OpencodeClient;
 
-    let message = "";
-    try {
-      await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-
-    expect(message).toContain("attached opencode server is using a different directory");
-    expect(message).toContain("/other");
-    expect(message).toContain("/repo");
+    await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
   });
 
-  test("falls back to legacy path location when v2 location throws", async () => {
+  test("allows attach when only the legacy path location is available", async () => {
     const client = {
       v2: {
         location: {
@@ -114,15 +105,7 @@ describe("attached server agent validation", () => {
       path: new LocationEndpoint(),
     } as unknown as OpencodeClient;
 
-    let message = "";
-    try {
-      await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
-    }
-
-    expect(message).toContain("attached opencode server is using a different directory");
-    expect(message).toContain("/other");
+    await assertAttachedServerLocation({ client, repoDir: "/repo", serverUrl: "http://127.0.0.1:4096" });
   });
 
   test("accepts matching attached server locations through symlinks", async () => {
