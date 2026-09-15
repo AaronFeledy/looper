@@ -45,6 +45,7 @@ export type EventConsumerCallbacks = {
   onSessionIdle?: (payload: SessionIdlePayload) => void;
   onTodoUpdated?: (payload: TodoUpdatedPayload) => void;
   ownedSessionIDs?: () => ReadonlySet<string>;
+  onSessionLifecycle?: (event: Extract<Event, { type: "session.created" | "session.updated" | "session.deleted" }>) => void;
   /**
    * User message IDs that should not be printed (e.g. looper's own step prompt).
    * Mutable: callers may add IDs after the consumer is constructed (prompt is
@@ -302,7 +303,7 @@ function handlePartUpdate(
       let callPrinted = prev && prev.kind === "tool" ? prev.callPrinted : false;
       const printCall = (): void => {
         if (callPrinted) return;
-        emit({ kind: "tool.started", tool: part.tool, input: state.input ?? {} });
+        emit({ kind: "tool.started", tool: part.tool, callID: part.callID, input: state.input ?? {} });
         callPrinted = true;
       };
       if (status === "pending") {
@@ -312,10 +313,10 @@ function handlePartUpdate(
       } else if (status === "completed") {
         printCall();
         const retainedPath = retainedOutputPath(state, part as { metadata?: Record<string, unknown> });
-        emit({ kind: "tool.done", tool: part.tool, input: state.input ?? {}, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
+        emit({ kind: "tool.done", tool: part.tool, callID: part.callID, input: state.input ?? {}, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
       } else if (status === "error") {
         printCall();
-        emit({ kind: "tool.failed", tool: part.tool, input: state.input ?? {}, error: state.error ?? "" });
+        emit({ kind: "tool.failed", tool: part.tool, callID: part.callID, input: state.input ?? {}, error: state.error ?? "" });
       }
       parts.set(part.id, {
         kind: "tool",
@@ -396,7 +397,7 @@ export function createSessionEventConsumer(
     emit(event, delivery);
   };
 
-  const printAssistantMessageError = (info: Message): void => {
+  const printAssistantMessageError = (info: Message, opts?: { readonly fatal?: boolean }): void => {
     if (info.role !== "assistant" || printedMessageErrors.has(info.id)) return;
     const error = (info as { error?: unknown }).error;
     const message = formatMessageError(error);
@@ -408,7 +409,7 @@ export function createSessionEventConsumer(
       return;
     }
     emitAt(at, { kind: "assistant.error", message });
-    callbacks.onSessionError?.(message);
+    if (opts?.fatal !== false) callbacks.onSessionError?.(message);
   };
 
   const dropPendingParts = (messageID: string): void => {
@@ -430,15 +431,18 @@ export function createSessionEventConsumer(
     pendingPartUpdates.delete(messageID);
 
     const deltas = pendingPartDeltas.get(messageID) ?? [];
+    const unresolved: PendingPartDelta[] = [];
     for (const delta of deltas) {
       const state = parts.get(delta.partID);
+      if (state === undefined) { unresolved.push(delta); continue; }
       stamp =
         (state && (state.kind === "text" || state.kind === "reasoning" || state.kind === "user") ? state.startedAt : undefined) ??
         messageCreated;
       handlePartDelta(parts, delta, emit);
       if (role === "assistant" && delta.field === "text") fireFirstContent();
     }
-    pendingPartDeltas.delete(messageID);
+    if (unresolved.length > 0) pendingPartDeltas.set(messageID, unresolved);
+    else pendingPartDeltas.delete(messageID);
   };
 
   const rememberMessage = (info: Message): void => {
@@ -447,6 +451,10 @@ export function createSessionEventConsumer(
   };
 
   const handleEvent = (event: Event): void => {
+    if (event.type === "session.created" || event.type === "session.updated" || event.type === "session.deleted") {
+      callbacks.onSessionLifecycle?.(event);
+      return;
+    }
     const evSid = eventSessionID(event);
     if (debug) emitAt(Date.now(), { kind: "debug.event", eventType: event.type, ...(evSid !== undefined ? { sessionID: evSid } : {}) });
     if (
@@ -478,6 +486,7 @@ export function createSessionEventConsumer(
         if (role !== "assistant" && role !== "user") break;
         const messageCreated = createdForMessage(part.messageID);
         handlePartUpdate(parts, part, emitForPart(part, messageCreated), messageCreated, role);
+        replayPendingParts(part.messageID, role);
         if (role === "assistant" && part.type === "text") fireFirstContent();
         break;
       }
@@ -486,10 +495,11 @@ export function createSessionEventConsumer(
         partMessages.set(event.properties.partID, messageID);
         const role = roleForPart(messageID);
         if (role === "user" && isHiddenUserMessage(messageID)) break;
-        if (role === undefined) {
+        if (role === undefined || !parts.has(event.properties.partID)) {
           const pending = pendingPartDeltas.get(messageID) ?? [];
           pending.push({ partID: event.properties.partID, field: event.properties.field, delta: event.properties.delta });
           pendingPartDeltas.set(messageID, pending);
+          if (role === "assistant" && event.properties.field === "text") fireFirstContent();
           break;
         }
         if (role !== "assistant" && role !== "user") break;
@@ -572,7 +582,7 @@ export function createSessionEventConsumer(
       for (const entry of orderMessagesForRender(messages)) {
         const info = entry.info;
         rememberMessage(info);
-        printAssistantMessageError(info);
+        printAssistantMessageError(info, { fatal: false });
         if (info.role === "user" && isHiddenUserMessage(info.id)) {
           dropPendingParts(info.id);
           continue;

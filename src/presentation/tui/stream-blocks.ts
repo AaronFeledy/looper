@@ -8,7 +8,7 @@ export type OutputBlock =
   | { kind: "looper"; lines: string[]; firstSeenAt: number }
   | { kind: "step-start"; firstSeenAt: number }
   | { kind: "step-finish"; summary: string; firstSeenAt: number }
-  | { kind: "tool"; tool: string; callLine: string; status: "waiting" | "done" | "error"; outputLines: string[]; firstSeenAt: number };
+  | { kind: "tool"; tool: string; callID?: string; callLine: string; status: "waiting" | "done" | "error"; outputLines: string[]; firstSeenAt: number };
 
 type GroupBlock = Extract<OutputBlock, { kind: "group" }>;
 type ReasoningBlock = Extract<OutputBlock, { kind: "reasoning" }>;
@@ -38,13 +38,13 @@ function toolOutputLines(event: Extract<LooperEvent, { kind: "tool.done" }>): st
 export function eventsToOutputBlocks(events: readonly LooperEvent[], times: readonly number[]): OutputBlock[] {
   const blocks: OutputBlock[] = [];
   const pendingTools = new Map<string, ToolBlock[]>();
-  const pendingToolOrder: ToolBlock[] = [];
   let pendingLines: string[] = [];
   let currentGroup: GroupBlock | undefined;
   let currentReasoning: ReasoningBlock | undefined;
   let currentLooper: LooperBlock | undefined;
   let currentTool: ToolBlock | undefined;
   let currentToolAlreadyRendered = false;
+  const toolKey = (tool: string, callID?: string): string => callID === undefined ? `name:${tool}` : `id:${callID}`;
 
   const timeAt = (index: number): number => times[index] ?? Date.now();
   const flushLines = (): void => {
@@ -71,37 +71,24 @@ export function eventsToOutputBlocks(events: readonly LooperEvent[], times: read
     if (currentTool === undefined) return;
     if (!currentToolAlreadyRendered) blocks.push(currentTool);
     if (!currentToolAlreadyRendered && currentTool.status === "waiting") {
-      const tools = pendingTools.get(currentTool.tool) ?? [];
+      const key = toolKey(currentTool.tool, currentTool.callID);
+      const tools = pendingTools.get(key) ?? [];
       tools.push(currentTool);
-      pendingTools.set(currentTool.tool, tools);
-      pendingToolOrder.push(currentTool);
+      pendingTools.set(key, tools);
     }
     currentTool = undefined;
     currentToolAlreadyRendered = false;
   };
-  const removePendingTool = (tool: ToolBlock): void => {
-    const orderedIndex = pendingToolOrder.lastIndexOf(tool);
-    if (orderedIndex !== -1) pendingToolOrder.splice(orderedIndex, 1);
-    const tools = pendingTools.get(tool.tool);
-    if (tools === undefined) return;
-    const namedIndex = tools.lastIndexOf(tool);
-    if (namedIndex !== -1) tools.splice(namedIndex, 1);
-    if (tools.length === 0) pendingTools.delete(tool.tool);
-  };
-  const takePendingTool = (tool: string): { block: ToolBlock; alreadyRendered: boolean } | undefined => {
-    if (currentTool !== undefined && currentTool.tool === tool) return { block: currentTool, alreadyRendered: currentToolAlreadyRendered };
-    const tools = pendingTools.get(tool);
+  const takePendingTool = (tool: string, callID?: string): { block: ToolBlock; alreadyRendered: boolean } | undefined => {
+    const key = toolKey(tool, callID);
+    if (currentTool !== undefined && currentTool.status === "waiting" && toolKey(currentTool.tool, currentTool.callID) === key) return { block: currentTool, alreadyRendered: currentToolAlreadyRendered };
+    const tools = pendingTools.get(key);
     const pendingTool = tools?.pop();
-    if (tools !== undefined && tools.length === 0) pendingTools.delete(tool);
+    if (tools !== undefined && tools.length === 0) pendingTools.delete(key);
     if (pendingTool !== undefined) {
-      const orderedIndex = pendingToolOrder.lastIndexOf(pendingTool);
-      if (orderedIndex !== -1) pendingToolOrder.splice(orderedIndex, 1);
       return { block: pendingTool, alreadyRendered: true };
     }
-    const fallbackTool = pendingToolOrder.pop();
-    if (fallbackTool === undefined) return undefined;
-    removePendingTool(fallbackTool);
-    return { block: fallbackTool, alreadyRendered: true };
+    return undefined;
   };
   const closeStructured = (): void => {
     flushTool();
@@ -175,12 +162,13 @@ export function eventsToOutputBlocks(events: readonly LooperEvent[], times: read
         flushGroup();
         flushTool();
         flushLines();
-        currentTool = { kind: "tool", tool: event.tool, callLine: firstFormattedLine(event), status: "waiting", outputLines: [], firstSeenAt };
+        currentTool = { kind: "tool", tool: event.tool, ...(event.callID !== undefined ? { callID: event.callID } : {}), callLine: firstFormattedLine(event), status: "waiting", outputLines: [], firstSeenAt };
         currentToolAlreadyRendered = false;
         return;
       case "tool.done": {
-        const pendingTool = takePendingTool(event.tool);
+        const pendingTool = takePendingTool(event.tool, event.callID);
         if (pendingTool !== undefined) {
+          if (currentTool !== pendingTool.block) flushTool();
           pendingTool.block.status = "done";
           pendingTool.block.outputLines.push(...toolOutputLines(event));
           currentTool = pendingTool.block;
@@ -203,8 +191,9 @@ export function eventsToOutputBlocks(events: readonly LooperEvent[], times: read
         return;
       }
       case "tool.failed": {
-        const pendingTool = takePendingTool(event.tool);
+        const pendingTool = takePendingTool(event.tool, event.callID);
         if (pendingTool !== undefined) {
+          if (currentTool !== pendingTool.block) flushTool();
           pendingTool.block.status = "error";
           pendingTool.block.outputLines.push(firstFormattedLine(event));
           currentTool = pendingTool.block;

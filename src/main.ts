@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-import { $ } from "bun";
 import { existsSync, mkdirSync } from "node:fs";
 import { BoxRenderable, createCliRenderer, type CliRenderer } from "@opentui/core";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
@@ -39,6 +38,7 @@ import { installMemoryPressureTrimmer } from "./lib/memory-pressure.ts";
 import {
   applyResumableBootUi,
   cancelPendingNotify,
+  clearAgentOutput,
   createLoopState,
   createStepRow,
   dismissEscConfirm,
@@ -87,6 +87,7 @@ import { handleSignal } from "./lib/signal.ts";
 import { clearSignalLog } from "./lib/signal-log.ts";
 import { prdIndexPath } from "./lib/prd.ts";
 import { createStoryPhaseResolver } from "./engine/story-phases.ts";
+import { closeBeforeExit, installProcessSignals, runStartupProbe, scheduleProcessExit } from "./tui/process-lifecycle.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
 const opencodeAttachUrl = process.env.OPENCODE_ATTACH_URL ?? "http://127.0.0.1:4096";
@@ -134,10 +135,9 @@ function ensureConfigValid(): void {
   }
 }
 
-async function currentBranch(): Promise<string> {
-  const result = await $`git branch --show-current`.cwd(repoDir).quiet().nothrow();
-  if (result.exitCode !== 0) return "unknown";
-  return result.stdout.toString().trim() || "detached";
+async function currentBranch(signal?: AbortSignal): Promise<string> {
+  const result = await runStartupProbe(["git", "branch", "--show-current"], { cwd: repoDir, ...(signal ? { signal } : {}) });
+  return result === undefined ? "unknown" : result || "detached";
 }
 
 function elapsedSeconds(startedAt: number): number {
@@ -157,9 +157,7 @@ function resetIterationState(
   state.activeStepIndex = null;
   state.started = true;
   state.control.clearStepRequests();
-  state.agentLines = [];
-  state.agentEvents = [];
-  state.agentEventTimes = [];
+  clearAgentOutput(state);
   state.stepOutputLines = steps.map(() => []);
   state.configuredStepNames = steps.map(step => step.name);
   state.steps = steps.map((step) => createStepRow(step.name));
@@ -204,7 +202,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const storyStateStore = createStoryStateStore({ configDir });
   const steps = loadSteps(configDir);
   if (options.start) runStateStore.clearStopFiles();
-  if (options.fresh) {
+  if (options.start && options.fresh) {
     createAgentTrailStore(configDir).clear();
     runStateStore.clearRunArtifacts();
     adjudicationStore.clearHistory();
@@ -214,7 +212,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     clearSignalLog(configDir);
     clearPermissionAudit(configDir);
   }
-  let looperRunID = runStateStore.read()?.looperRunID ?? createLooperRunID();
+  let looperRunID = options.fresh ? createLooperRunID() : runStateStore.read()?.looperRunID ?? createLooperRunID();
 
   const control = createRunControl();
   const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name), control });
@@ -358,7 +356,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   // the shell is left usable, then exit with the SIGINT convention code.
   let forceKilling = false;
   const ignoreForceKillCleanupError = (_error: unknown): void => {};
-  const forceKill = (): never => {
+  const forceKill = (): void => {
     if (!forceKilling) {
       forceKilling = true;
       try {
@@ -373,9 +371,8 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       } catch (error) { // no-excuse-ok: catch -- force-kill cleanup must not block the hard exit
         ignoreForceKillCleanupError(error);
       }
-      void server?.close();
+      void closeBeforeExit(server?.kill, () => process.exit(130));
     }
-    process.exit(130);
   };
 
   const FORCE_KILL_WINDOW_MS = 1_500;
@@ -415,11 +412,15 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
   };
 
-  process.on("SIGINT", handleSigint);
-  process.on("SIGTERM", handleSigterm);
+  using signals = installProcessSignals((signal) => {
+    if (signal === "SIGINT") handleSigint();
+    else handleSigterm();
+  });
 
   const detachMemoryPressure = installMemoryPressureTrimmer(() => state);
   try {
+    state.branch = await currentBranch(bootAbort.signal);
+    throwIfBootAborted();
     renderer = await createCliRenderer({
       exitOnCtrlC: false,
       exitSignals: [],
@@ -662,6 +663,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     };
 
     const beginRun = () => {
+      if (state.started || control.quitting || forceKilling) return;
       disarmEscConfirm();
       state.resumable = false;
       runStateStore.clearStopFiles();
@@ -860,8 +862,6 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     prdWatcher?.stop();
     branchDiffWatcher?.stop();
     branchWatcher?.stop();
-    process.off("SIGINT", handleSigint);
-    process.off("SIGTERM", handleSigterm);
     cancelPendingNotify();
     bootScreen?.destroy();
     renderer?.destroy();
@@ -955,18 +955,21 @@ async function main(): Promise<number> {
     return Number(process.exitCode ?? 0);
   }
 
+  tuiMode = true;
   return runTui(options);
 }
 
+let tuiMode = false;
 try {
-  // TUI timers/stdin/SDK sockets can keep the event loop alive after teardown;
-  // without a hard exit, "Looper exited: ..." prints and the process hangs until SIGINT.
-  process.exit(Number(await main()));
+  const code = Number(await main());
+  process.exitCode = code;
+  scheduleProcessExit({ tui: tuiMode, code, exit: (value) => process.exit(value) });
 } catch (error) {
   if (error instanceof AttachedServerAgentError || error instanceof AttachedServerLocationError) {
     process.stderr.write(`${error.message}\n`);
   } else {
     process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
   }
-  process.exit(1);
+  process.exitCode ??= 1;
+  scheduleProcessExit({ tui: tuiMode, code: Number(process.exitCode), exit: (value) => process.exit(value) });
 }

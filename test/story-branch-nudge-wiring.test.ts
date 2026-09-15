@@ -3,13 +3,17 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 
 import { runIteration, StepFailureError } from "../src/lib/orchestrator.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths, readRunState, writeRunState } from "../src/lib/state-files.ts";
 import { createStoryStateStore } from "../src/persistence/story-state-store.ts";
 import { DEFAULT_STORY_ID_PATTERN } from "../src/lib/story-id.ts";
+import * as budgets from "../src/engine/run-control.ts";
+import * as runners from "../src/lib/runner.ts";
+import { TitleCoordinator } from "../src/engine/title-coordinator.ts";
+import * as brokerOwners from "../src/opencode/request-broker-owner.ts";
 
 const scratchDirs: string[] = [];
 const graceKeys = ["LOOPER_EMPTY_ASSISTANT_GRACE_MS", "LOOPER_EMPTY_ASSISTANT_GRACE_POLL_MS", "LOOPER_CONTINUATION_EXIT_GRACE_MS"] as const;
@@ -63,20 +67,23 @@ function setupGitRepo(): { readonly repoDir: string; readonly configDir: string 
 
 function makeClient(input: {
   readonly repoDir: string;
-  readonly onPrompt?: () => void | Promise<void>;
+  readonly onPrompt?: (signal?: AbortSignal) => void | Promise<void>;
+  readonly onTitle?: (title: string) => void;
   readonly failPromptAfter?: number;
 }): { readonly client: OpencodeClient; readonly promptTexts: string[] } {
   const promptTexts: string[] = [];
   let created = 0;
+  let parentID = "";
   const client = {
     session: {
       create: async () => {
         created += 1;
         return { data: { id: created === 1 ? "ses_build" : `ses_${created}` } };
       },
-      prompt: async (params: { sessionID: string; parts: { type: string; text: string }[] }) => {
+      prompt: async (params: { sessionID: string; messageID: string; parts: { type: string; text: string }[] }, options?: { signal: AbortSignal }) => {
+        parentID = params.messageID;
         promptTexts.push(params.parts.map((part) => part.text).join("\n"));
-        await input.onPrompt?.();
+        await input.onPrompt?.(options?.signal);
         if (input.failPromptAfter !== undefined && promptTexts.length > input.failPromptAfter) {
           return { error: { message: "rename reminder failed" } };
         }
@@ -84,9 +91,10 @@ function makeClient(input: {
         return { data: {} };
       },
       status: async () => ({ data: { ses_build: { type: "idle" }, ses_2: { type: "idle" } } }),
-      messages: async () => ({ data: [] }),
+      messages: async () => ({ data: [{ info: { id: "asst_done", role: "assistant", parentID, time: { created: 1, completed: 2 }, tokens: { output: 1 } }, parts: [{ id: "part_done", messageID: "asst_done", sessionID: "ses_build", type: "text", text: "done" }] }] }),
       children: async () => ({ data: [] }),
       abort: async () => ({ data: {} }),
+      update: async ({ title }: { title: string }) => { input.onTitle?.(title); return { data: {} }; },
     },
     event: {
       subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
@@ -103,6 +111,98 @@ function makeClient(input: {
 }
 
 describe("runIteration story-branch mismatch follow-up", () => {
+  test("disposes title coordination and the broker when prompt reading throws", async () => {
+    // Given a branch-title step whose prompt disappears after config loading.
+    const { repoDir, configDir } = setupGitRepo();
+    writeFileSync(join(configDir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n    title: branch\n");
+    const cancel = spyOn(TitleCoordinator.prototype, "cancel");
+    const createOwner = brokerOwners.createRequestBrokerOwner;
+    let disposed = false;
+    const ownerSpy = spyOn(brokerOwners, "createRequestBrokerOwner").mockImplementation((input) => {
+      const owner = createOwner(input);
+      return { ...owner, dispose: () => { disposed = true; owner.dispose(); } };
+    });
+    try {
+      // When the per-step lifecycle unwinds before prompt dispatch.
+      await expect(runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: makeClient({ repoDir }).client, repoDir, configDir,
+        hooks: { onStepBegin: () => rmSync(join(configDir, "build.md")) } })).rejects.toThrow("missing prompt file");
+      // Then both resource owners are released on the exceptional path.
+      expect(cancel).toHaveBeenCalled();
+      expect(disposed).toBe(true);
+    } finally { cancel.mockRestore(); ownerSpy.mockRestore(); }
+  });
+
+  test("does not inherit the provisional title of a skipped step", async () => {
+    // Given an eager branch title and an existing inherited description.
+    const { repoDir, configDir } = setupGitRepo();
+    writeFileSync(join(configDir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n    title: branch\n  review:\n    prompt: build.md\n");
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] });
+    state.branch = "main";
+    let titled: () => void = () => {};
+    const titleApplied = new Promise<void>((resolve) => { titled = resolve; });
+    let prompts = 0;
+    const stub = makeClient({ repoDir, onTitle: () => titled(), onPrompt: async (signal) => {
+      if (++prompts === 1) {
+        state.branch = "us-075-provisional";
+        await titleApplied;
+        state.control.setSkipRequested(true);
+        await new Promise<void>((resolve) => {
+          if (signal === undefined || signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+    } });
+    // When the titled step is skipped and the next step completes.
+    await runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir, initialWorkDescription: "original" });
+    // Then both rows discard the skipped candidate and Review inherits the original.
+    expect(state.steps.map((row) => row.title)).toEqual([undefined, "original"]);
+  });
+
+  test("keeps the concrete iteration step list stable across a config edit", async () => {
+    // Given two configured steps.
+    const { repoDir, configDir } = setupGitRepo();
+    writeFileSync(join(configDir, "looper.yaml"), "steps:\n  build:\n    prompt: build.md\n  review:\n    prompt: build.md\n");
+    const names: string[] = [];
+    // When the first step inserts a new preceding step into the config.
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build", "Review"] }), iteration: 1, client: makeClient({ repoDir }).client, repoDir, configDir,
+      hooks: { onStepFinish: ({ step }) => {
+        names.push(step.name);
+        if (names.length === 1) writeFileSync(join(configDir, "looper.yaml"), "steps:\n  inserted:\n    prompt: build.md\n  build:\n    prompt: build.md\n  review:\n    prompt: build.md\n");
+      } } });
+    // Then this iteration still runs each original logical step once.
+    expect(names).toEqual(["Build", "Review"]);
+  });
+  test("fails the step when a branch repair has no remaining budget", async () => {
+    const { repoDir, configDir } = setupGitRepo();
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    const budget = spyOn(budgets, "remainingStepBudgetMs").mockReturnValue(3_600_000);
+    let prompts = 0;
+    const stub = makeClient({ repoDir, onPrompt: () => {
+      prompts += 1;
+      if (prompts === 1) {
+        runGit(repoDir, ["checkout", "-q", "-b", "feat/rename"]);
+        budget.mockReturnValue(0);
+      }
+    } });
+    try {
+      await expect(runIteration({ state, iteration: 1, client: stub.client, repoDir, configDir })).rejects.toThrow();
+      expect(state.steps[0]?.status).toBe("failed");
+    } finally { budget.mockRestore(); }
+  });
+
+  test("keeps the same session across an in-loop branch repair", async () => {
+    const { repoDir, configDir } = setupGitRepo();
+    let prompts = 0;
+    const sessions: string[] = [];
+    const stub = makeClient({ repoDir, onPrompt: () => {
+      if (++prompts === 1) runGit(repoDir, ["checkout", "-q", "-b", "feat/rename"]);
+      if (prompts === 2) runGit(repoDir, ["branch", "-m", "us-608a-authoring-translation-contracts"]);
+    } });
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, repoDir, configDir,
+      hooks: { onStepSession: (info) => { sessions.push(info.sessionID); } } });
+    expect(prompts).toBe(2);
+    expect(new Set(sessions)).toEqual(new Set(["ses_build"]));
+  });
   test("sends a continue-working follow-up when a step switches onto a non-story branch", async () => {
     // Given a git repo on a default branch and a build step that creates a non-story feature branch.
     const { repoDir, configDir } = setupGitRepo();

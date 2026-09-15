@@ -8,6 +8,7 @@ import type { Event, OpencodeClient } from "@opencode-ai/sdk/v2";
 import { loopStateRunStepContext } from "../src/lib/loop-state-reporter.ts";
 import { reattachOpenCodeStep, type Step } from "../src/lib/runner.ts";
 import { createLoopState } from "../src/lib/state.ts";
+import { initStatePaths } from "../src/lib/state-files.ts";
 
 const SID = "ses_reattach_abort";
 const MID = "msg_reattach_abort";
@@ -76,8 +77,9 @@ describe("reattachOpenCodeStep native abort", () => {
     savedEnv.clear();
   });
 
-  test("does not abort event.subscribe on idle teardown", async () => {
+  test("aborts event.subscribe on idle teardown without an unhandled rejection", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-reattach-abort-teardown-"));
+    initStatePaths({ configDir: repoDir });
     writeIdleContinuationRecord(repoDir, SID);
     const leaks = collectUnhandledRejections();
     let subscribeAborted = false;
@@ -91,16 +93,15 @@ describe("reattachOpenCodeStep native abort", () => {
       },
       event: {
         subscribe: async (_params: unknown, options: { signal: AbortSignal }) => {
+          const reader = new ReadableStream({
+            cancel: () => Promise.reject(new DOMException("The operation was aborted.", "AbortError")),
+          }).getReader();
           options.signal.addEventListener("abort", () => {
             subscribeAborted = true;
-            void Promise.reject(
-              options.signal.reason instanceof Error
-                ? options.signal.reason
-                : new DOMException("The operation was aborted.", "AbortError"),
-            );
+            void reader.cancel();
           });
           const stream = (async function* (): AsyncGenerator<Event> {
-            await rejectOnAbort(options.signal).catch(() => undefined);
+            await rejectOnAbort(options.signal);
           })();
           return { stream };
         },
@@ -122,8 +123,9 @@ describe("reattachOpenCodeStep native abort", () => {
     await Bun.sleep(0);
     leaks.stop();
 
+    expect(result.errorMessage).toBeUndefined();
     expect(result.status).toBe("done");
-    expect(subscribeAborted).toBe(false);
+    expect(subscribeAborted).toBe(true);
     expect(leaks.reasons).toEqual([]);
     expect(state.steps[0]?.outputLines.some((line) => line.includes("reattach failed to subscribe"))).toBe(false);
   });

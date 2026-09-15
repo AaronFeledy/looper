@@ -1,9 +1,13 @@
 import type { StoryTransitionRecord } from "../../src/lib/adjudication-detection.ts";
 import type { AdjudicationCompletionRecord } from "../../src/lib/adjudication-files.ts";
 import type { AdjudicateSession, AdjudicationStore } from "../../src/persistence/adjudication-store.ts";
+import { CorruptAdjudicateSessionError } from "../../src/persistence/adjudication-store.ts";
+import type { AdjudicationRequest } from "../../src/persistence/adjudication-request.ts";
 
-export function createInMemoryAdjudicationStore(): AdjudicationStore {
-  let marker: string | null = null;
+export type InMemoryAdjudicationStore = AdjudicationStore & { readonly writeAgentMarker: (reason: string) => void };
+
+export function createInMemoryAdjudicationStore(): InMemoryAdjudicationStore {
+  let marker: AdjudicationRequest | null = null;
   let history: StoryTransitionRecord[] = [];
   let adjudicatedThrough = 0;
   let session: AdjudicateSession | null = null;
@@ -11,9 +15,26 @@ export function createInMemoryAdjudicationStore(): AdjudicationStore {
 
   return {
     markerExists: () => marker !== null,
-    readMarker: () => marker,
+    readMarker: () => marker?.reason ?? null,
+    readRequest: () => marker,
+    completeSession: (sessionID) => {
+      if (session === null || session.sessionID !== sessionID || session.request === undefined) {
+        throw new CorruptAdjudicateSessionError();
+      }
+      completions = [...completions, { at: new Date().toISOString(), reason: session.request.reason }];
+      adjudicatedThrough = history.length;
+      // Mirrors acknowledgeAdjudicationRequest: drop the consumed request, and
+      // also drop an agent-written (plaintext) marker left behind by the
+      // adjudicator itself, which would otherwise re-route forever.
+      if (marker !== null && (marker.id === session.request.id || marker.id.startsWith("legacy-"))) marker = null;
+      session = null;
+    },
     writeMarker: (reason) => {
-      marker = reason;
+      marker = { id: crypto.randomUUID(), reason };
+    },
+    /** Simulate an agent writing the plaintext marker file directly. */
+    writeAgentMarker: (reason: string) => {
+      marker = { id: `legacy-${crypto.randomUUID()}`, reason };
     },
     clearMarker: () => {
       marker = null;

@@ -15,8 +15,9 @@ export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PAT
     if (error instanceof SyntaxError) return undefined;
     throw error;
   }
-  const captured = expression.exec(branch)?.[1]?.toUpperCase();
-  if (captured === undefined) return undefined;
+  const capture = expression.exec(branch)?.[1];
+  if (capture === undefined || capture.length === 0) return undefined;
+  const captured = capture.toUpperCase();
   // With a PRD id list, only those ids count — a regex-only capture must not
   // impersonate a story (outcome/setsPhase would otherwise hit story.next).
   if (storyIds === undefined) return captured;

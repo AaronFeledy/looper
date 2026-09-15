@@ -12,6 +12,11 @@ import {
 } from "../src/lib/attached-server-agents.ts";
 import { TITLE_AGENT_NAME } from "../src/lib/title-agent.ts";
 
+class LocationEndpoint {
+  readonly directory = "/other";
+  async get() { return { data: { directory: this.directory } }; }
+}
+
 function clientWithAgents(agents: Array<{ name: string }>): OpencodeClient {
   return {
     app: {
@@ -81,9 +86,7 @@ describe("attached server agent validation", () => {
   test("rejects attached server location mismatches when location data is available", async () => {
     const client = {
       v2: {
-        location: {
-          get: async () => ({ data: { directory: "/other", project: { id: "project", directory: "/other" } } }),
-        },
+        location: new LocationEndpoint(),
       },
     } as unknown as OpencodeClient;
 
@@ -108,9 +111,7 @@ describe("attached server agent validation", () => {
           },
         },
       },
-      path: {
-        get: async () => ({ data: { directory: "/other" } }),
-      },
+      path: new LocationEndpoint(),
     } as unknown as OpencodeClient;
 
     let message = "";

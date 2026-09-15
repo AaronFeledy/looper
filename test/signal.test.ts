@@ -98,7 +98,6 @@ describe("looper signal", () => {
   });
 
   test.each([
-    ["adjudicate", ".looper-adjudicate", "requirements conflict", "requirements conflict"],
     ["stop", ".looper-stop", "operator request", "operator request\n"],
     ["stop-after-iteration", ".looper-stop-after-iteration", "maintenance", "maintenance\n"],
   ] as const)("writes the %s marker from a cold shell", async (kind, fileName, reason, expectedContent) => {
@@ -112,6 +111,18 @@ describe("looper signal", () => {
     const log = readSignalLog(fixture.configDir);
     expect(log).toHaveLength(1);
     expect(log[0]).toMatchObject({ kind, reason });
+  });
+
+  test("writes an identified adjudication request from a cold shell", async () => {
+    // Given an empty state directory with no running Looper process.
+    const fixture = createScratch();
+    scratch = fixture.repoDir;
+    // When a cold shell requests adjudication.
+    const result = await runCli(fixture.repoDir, ["signal", "adjudicate", "--reason", "requirements conflict", "--config-dir", fixture.configDir]);
+    // Then the durable payload carries its reason and a unique request ID.
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+    const request: unknown = JSON.parse(readFileSync(join(fixture.configDir, ".looper-adjudicate"), "utf8"));
+    expect(request).toMatchObject({ reason: "requirements conflict", id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
   });
 
   test("writes an explicit story phase as parsed JSON", async () => {

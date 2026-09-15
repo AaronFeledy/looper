@@ -82,6 +82,8 @@ function makeIdleResumeClient(repoDir: string): IdleResumeStub {
   const pluginPrompt = "plugin/server continuation prompt";
   const continuationOutput = "nudge complete";
   let sentMessageID = "";
+  let promptCompleted = false;
+  let statusCalls = 0;
   let subscriptions = 0;
   let releasePrompt: (() => void) | undefined;
   const backfilled = new Promise<void>((resolve) => {
@@ -99,11 +101,13 @@ function makeIdleResumeClient(repoDir: string): IdleResumeStub {
         promptTexts.push(params.parts.map((part) => part.text).join("\n"));
         await backfilled;
         writeIdleContinuationRecord(repoDir, params.sessionID);
+        promptCompleted = true;
         return { data: {} };
       },
-      // Read-only health/child checks cannot make an idle session busy;
-      // only sending the recovery prompt starts work in this fixture.
-      status: async () => ({ data: { ses_old: { type: prompted.length === 0 ? "idle" : "busy" } } }),
+      status: async () => {
+        statusCalls += 1;
+        return { data: { ses_old: { type: prompted.length === 0 || promptCompleted ? "idle" : "busy" } } };
+      },
       messages: async () => {
         releasePrompt?.();
         return {
@@ -355,6 +359,17 @@ function recordingHooks(): { hooks: KeyHooks; calls: string[] } {
 }
 
 describe("keys recovery interception", () => {
+  test("Go and Enter cannot restart an already active run", () => {
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+    state.started = true;
+    const fake = fakeRenderer();
+    const { hooks, calls } = recordingHooks();
+    bindKeys(fake.renderer as never, state, hooks);
+    fake.press({ name: "g" });
+    fake.press({ name: "enter" });
+    fake.press({ name: "return" });
+    expect(calls).toEqual([]);
+  });
   test("while recovery is active, r/n/q map to recovery choices (not normal actions)", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
     state.activeStepIndex = 0;

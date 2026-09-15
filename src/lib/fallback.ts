@@ -23,7 +23,8 @@ import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
 import { clearPermissionAudit } from "../opencode/permission-audit.ts";
-import { createRunControl } from "../engine/run-control.ts";
+import { createRunControl, type RunControl } from "../engine/run-control.ts";
+import { installProcessSignals } from "../tui/process-lifecycle.ts";
 import { clearSignalLog } from "./signal-log.ts";
 import { prdIndexPath } from "./prd.ts";
 import { createStoryPhaseResolver } from "../engine/story-phases.ts";
@@ -48,7 +49,7 @@ export type FallbackOptions = {
   terminalPhase?: StoryPhase;
   stall?: StallConfig;
   contextPolicy?: Partial<ContextPolicy>;
-  currentBranch: () => Promise<string>;
+  currentBranch: (signal?: AbortSignal) => Promise<string>;
 };
 
 function configuredStepAgents(steps: readonly Step[]): string[] {
@@ -80,6 +81,17 @@ export async function runNonTty({
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
+  const abort = new AbortController();
+  const control = createRunControl();
+  let closeServer: (() => Promise<void>) | undefined;
+  let closing: Promise<void> | undefined;
+  using signals = installProcessSignals((signal) => {
+    process.exitCode = signal === "SIGINT" ? 130 : 143;
+    control.setQuitting(true);
+    abort.abort(new Error(`looper interrupted by ${signal}`));
+    closing ??= closeServer?.();
+  });
+  await using shutdown = { [Symbol.asyncDispose]: async () => { await closing; } };
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
   const storyStateStore = createStoryStateStore({ configDir });
@@ -97,12 +109,15 @@ export async function runNonTty({
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
   process.stdout.write(`${label("Mode", "non-TTY fallback")}\n`);
-  process.stdout.write(`${label("Branch", await currentBranch())}\n`);
+  process.stdout.write(`${label("Branch", await currentBranch(abort.signal))}\n`);
   process.stdout.write(`${label("Config", configDir)}\n`);
   process.stdout.write(`${label("Steps", "reload from looper.yaml before each step")}\n`);
   process.stdout.write(`${ui.dim("│ edit looper.yaml while running to add, remove, or reorder steps")}\n`);
 
-  await using server = await startOrAttachServer({ opencodeBin, attachUrl });
+  if (abort.signal.aborted) return;
+  await using server = await startOrAttachServer({ opencodeBin, attachUrl, signal: abort.signal });
+  closeServer = () => server.close();
+  if (abort.signal.aborted) return;
   const client = createOpencodeClient({ baseUrl: server.url });
 
   if (attachUrl !== undefined) {
@@ -112,12 +127,14 @@ export async function runNonTty({
       repoDir,
       serverUrl: server.url,
       requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
+      signal: abort.signal,
     });
   }
   if (validateResources) {
-    await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)) });
+    await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)), signal: abort.signal });
   }
   await runNonTtyIterations({
+    control,
     options,
     repoDir,
     configDir,
@@ -184,6 +201,7 @@ export function computeNonTtyResumePlan(configDir: string, options: Pick<Options
 }
 
 export async function runNonTtyIterations({
+  control = createRunControl(),
   options,
   repoDir,
   configDir,
@@ -204,6 +222,7 @@ export async function runNonTtyIterations({
   contextPolicy,
   currentBranch,
 }: {
+  control?: RunControl;
   options: Options;
   repoDir: string;
   configDir: string;
@@ -230,12 +249,11 @@ export async function runNonTtyIterations({
     ...(adjudicationStore !== undefined ? { store: adjudicationStore } : {}),
     ...(configuredPrdFlipThreshold !== undefined ? { configuredThreshold: configuredPrdFlipThreshold } : {}),
   });
-  const control = createRunControl();
   let currentState: LoopState | null = null;
   if (options.fresh) createAgentTrailStore(configDir).clear();
   const agentTrail = startAgentTrailPersistence(configDir, () => currentState);
   const detachMemoryPressure = installMemoryPressureTrimmer(() => currentState);
-  const hooks = createFallbackEngineHooks(currentBranch, control);
+  using hooks = createFallbackEngineHooks(currentBranch, control);
   const resolvedStoryStateStore = storyStateStore ?? createStoryStateStore({ configDir });
   const storyResolver = prdDir === undefined
     ? undefined

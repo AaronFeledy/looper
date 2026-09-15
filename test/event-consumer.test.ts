@@ -12,10 +12,20 @@ import type {
   SessionIdlePayload,
   TodoUpdatedPayload,
 } from "../src/lib/event-consumer.ts";
+import type { LooperEvent } from "../src/core/events.ts";
 
 const SID = "ses_test";
 const MID = "msg_a";
 const PID = "p_1";
+
+test("retains a delta when the message role arrives before its part", async () => {
+  // Given
+  const lines: string[] = [];
+  // When
+  await consumeSessionEvents(makeStream([assistantMessageUpdated(), partDelta("text", "early\n"), textPartUpdated("")]), SID, { pushLine: (line) => lines.push(line) });
+  // Then
+  expect(lines).toContain("early");
+});
 
 async function* makeStream(events: Event[]): AsyncIterable<Event> {
   for (const event of events) yield event;
@@ -622,12 +632,36 @@ describe("user message visibility", () => {
   });
 });
 
-function toolPartUpdated(status: string, state: Record<string, unknown>): Event {
+function toolPartUpdated(status: string, state: Record<string, unknown>, ids?: { readonly partID?: string; readonly callID?: string }): Event {
   return {
     type: "message.part.updated",
-    properties: { part: { id: "tool_1", sessionID: SID, messageID: MID, type: "tool", tool: "bash", state: { status, ...state } } },
+    properties: { part: { id: ids?.partID ?? "tool_1", sessionID: SID, messageID: MID, type: "tool", callID: ids?.callID ?? "call_tool_1", tool: "bash", state: { status, ...state } } },
   } as unknown as Event;
 }
+
+describe("tool events carry the SDK call id", () => {
+  test("parallel calls to the same tool are distinguishable by callID", async () => {
+    // Given two concurrent `bash` invocations with distinct SDK call ids.
+    const events: LooperEvent[] = [];
+    await consumeSessionEvents(
+      makeStream([
+        assistantMessageUpdated(),
+        toolPartUpdated("running", { input: { command: "one" } }, { partID: "tool_a", callID: "call_a" }),
+        toolPartUpdated("running", { input: { command: "two" } }, { partID: "tool_b", callID: "call_b" }),
+        toolPartUpdated("completed", { input: { command: "two" }, output: "second" }, { partID: "tool_b", callID: "call_b" }),
+        toolPartUpdated("completed", { input: { command: "one" }, output: "first" }, { partID: "tool_a", callID: "call_a" }),
+      ]),
+      SID,
+      { pushLine: () => {}, pushLines: () => {}, onEvent: (event) => events.push(event) },
+    );
+
+    // Then each emitted tool event carries the id needed to match completion to its own start.
+    const started = events.filter((event) => event.kind === "tool.started");
+    const done = events.filter((event) => event.kind === "tool.done");
+    expect(started.map((event) => (event as { callID?: string }).callID)).toEqual(["call_a", "call_b"]);
+    expect(done.map((event) => (event as { callID?: string }).callID)).toEqual(["call_b", "call_a"]);
+  });
+});
 
 describe("tool call line is emitted once per part", () => {
   test("pending(empty) then running(full) then completed yields a single ◌ tool line with full input", async () => {

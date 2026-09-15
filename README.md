@@ -96,7 +96,8 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-phase-history.json # per-story phase transition log (+ adjudicated watermark); cleared only on --fresh
     ├── .looper-signals.jsonl      # append-only log of every `looper signal`; cleared only on --fresh
     ├── .looper-permission-log.jsonl # private decision audit (0600); cleared only on --fresh
-    └── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh --reset-stories
+    ├── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh --reset-stories
+    └── .looper-state-lock.sqlite   # machine-local mutex; gitignored, recreates on next write
 ```
 
 `looper.yml` / `looper.yaml` shape:

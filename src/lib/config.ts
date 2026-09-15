@@ -421,6 +421,8 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     throw new Error(`${input.label} must be a mapping`);
   }
   const rawStep = input.rawStep as RawStep;
+  const name = stringValue(rawStep.name, `${input.label}.name`, input.defaultName);
+  if (name.trim().length === 0) throw new Error(`${input.label}.name cannot be blank`);
   const expects = rawStep.expects === undefined ? undefined : storyPhaseValue(rawStep.expects, `${input.label}.expects`);
   const setsPhase = rawStep.setsPhase === undefined ? undefined : storyPhaseValue(rawStep.setsPhase, `${input.label}.setsPhase`);
   if (expects !== undefined && setsPhase !== undefined && comparePhase(setsPhase, expects) > 0) {
@@ -429,7 +431,7 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     throw new Error(`${input.label}.setsPhase (${setsPhase}) must not be later than ${input.label}.expects (${expects})`);
   }
   return {
-    name: stringValue(rawStep.name, `${input.label}.name`, input.defaultName),
+    name,
     agent: optionalNonEmptyStringValue(rawStep.agent, `${input.label}.agent`),
     model: optionalModelValue(rawStep.model, `${input.label}.model`),
     variant: optionalVariantValue(rawStep.variant, `${input.label}.variant`),

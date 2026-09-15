@@ -11,6 +11,7 @@ import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths, readRunState } from "../src/lib/state-files.ts";
 import { createRunStateStore } from "../src/persistence/run-state-store.ts";
 import { createStoryStateStore } from "../src/persistence/story-state-store.ts";
+import { appendSignal } from "../src/lib/signal-log.ts";
 import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts";
 
 type Scratch = { readonly repoDir: string; readonly configDir: string; readonly prdDir: string };
@@ -43,13 +44,15 @@ function writePrd(prdDir: string): void {
 function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { readonly client: OpencodeClient; readonly prompts: string[]; readonly titleUpdates: string[] } {
   const prompts: string[] = [];
   const titleUpdates: string[] = [];
+  let parentID = "";
   const client = {
     session: {
       create: async () => ({ data: { id: "ses_build" } }),
-      prompt: async (params: { sessionID: string; parts: { text: string }[] }) => {
+      prompt: async (params: { sessionID: string; messageID: string; parts: { text: string }[] }) => {
         const prompt = params.parts.map((part) => part.text).join("\n");
         prompts.push(prompt);
         onPrompt?.(prompt);
+        parentID = params.messageID;
         const dir = join(repoDir, ".omo", "run-continuation");
         mkdirSync(dir, { recursive: true });
         const at = new Date().toISOString();
@@ -57,7 +60,7 @@ function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { read
         return { data: {} };
       },
       status: async () => ({ data: { ses_build: { type: "idle" } } }),
-      messages: async () => ({ data: [] }),
+      messages: async () => ({ data: [{ info: { id: "asst_done", role: "assistant", parentID, time: { created: 1, completed: 2 }, tokens: { output: 1 } }, parts: [{ id: "part_done", messageID: "asst_done", sessionID: "ses_build", type: "text", text: "done" }] }] }),
       children: async () => ({ data: [] }),
       abort: async () => ({ data: {} }),
       update: async ({ title }: { title: string }) => {
@@ -88,6 +91,36 @@ afterEach(() => {
 });
 
 describe("runIteration story phase wiring", () => {
+  test.each(["main", "us-074-story-state"])("writes the final story phase after switching from %s", async (initialBranch) => {
+    // Given a step starting on main or a different story.
+    const scratch = await setup("reviewed");
+    writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", title: "story" }, { id: "US-075", title: "next" }] }));
+    if (initialBranch === "main") await $`git checkout -q -b main`.cwd(scratch.repoDir).quiet();
+    const store = createStoryStateStore({ configDir: scratch.configDir });
+    const stub = clientFor(scratch.repoDir, () => {
+      const proc = Bun.spawnSync(["git", "checkout", "-q", "-b", "us-075-final"], { cwd: scratch.repoDir });
+      expect(proc.exitCode).toBe(0);
+    });
+    // When the step creates its final story branch.
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
+    // Then only that final story advances.
+    expect([store.readPhase("US-074"), store.readPhase("US-075")]).toEqual([undefined, "reviewed"]);
+  });
+
+  test("does not let setsPhase outrun an explicit demotion of the final story", async () => {
+    const scratch = await setup("published");
+    writeFileSync(join(scratch.configDir, "looper.yaml"), "prd: ../../spec\nsteps:\n  build:\n    prompt: build.md\n    expects: published\n    setsPhase: published\n");
+    writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074" }, { id: "US-075" }] }));
+    const store = createStoryStateStore({ configDir: scratch.configDir });
+    store.writePhase("US-075", "reviewed");
+    const stub = clientFor(scratch.repoDir, () => {
+      expect(Bun.spawnSync(["git", "checkout", "-q", "-b", "us-075-final"], { cwd: scratch.repoDir }).exitCode).toBe(0);
+      store.writePhase("US-075", "building");
+      appendSignal(scratch.configDir, { kind: "story-phase", storyId: "US-075", phase: "building", reason: "not actually done" });
+    });
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch, storyState: store });
+    expect([store.readPhase("US-074"), store.readPhase("US-075")]).toEqual([undefined, "building"]);
+  });
   test("writes setsPhase before onStepFinish", async () => {
     // Given a successful step that declares a lifecycle phase.
     const scratch = await setup("reviewed");

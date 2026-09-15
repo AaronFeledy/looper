@@ -167,6 +167,7 @@ export type RunIterationOptions = {
   client: OpencodeClient;
   repoDir: string;
   configDir: string;
+  stepsSnapshot?: readonly LoadedStep[];
   startStepIndex?: number;
   resume?: ResumeSession;
   recoveryNudge?: boolean;
@@ -283,6 +284,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     resumedStepSessions,
   } = options;
   const control = options.control ?? state.control;
+  const steps = [...(options.stepsSnapshot ?? loadSteps(configDir))];
   const prdPaths = prdDir === undefined ? undefined : derivePrdPaths(prdDir, repoDir);
   const completed: LoopStep[] = [];
   // Logical-step ledger for the `<looper-context>` prior-steps section, keyed
@@ -349,7 +351,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   };
 
   while (true) {
-    const steps = loadSteps(configDir);
     if (steps.length === 0) throw new Error("loop.yaml must define at least one step");
     if (!startStepIndexApplied) {
       index = Math.min(index, steps.length - 1);
@@ -390,6 +391,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         markRemainingSkipped(state, firstRemainingRow);
         if (initialRouting.kind === "stop") {
           adjudication?.writeStop(initialRouting.reason);
+          // No adjudicator is configured, so the run halts here. Drop the
+          // request: leaving it would immediately re-stop the next run.
           adjudication?.store.clearMarker();
           break;
         }
@@ -400,6 +403,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     }
 
     const adjudicating = pendingAdjudicateStep !== undefined;
+    // Capture the request (with its identity) ONCE for this logical
+    // adjudication. Re-reading the marker per attempt could observe a NEWER
+    // request written mid-run, whose reason would then be logged as completed
+    // and whose signal would be deleted without ever being adjudicated.
+    const consumedRequest = adjudicating ? (adjudication?.store.readRequest() ?? null) : null;
     if (!adjudicating && index >= steps.length) break;
 
     const recoveryRowIndex = state.steps.length - (steps.length - index);
@@ -593,6 +601,16 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         };
 
     const titleConfig = step.title;
+    const priorRowTitle = state.steps[currentStepIndex]?.title;
+    let candidateDescription: string | undefined;
+    let titleCommitted = false;
+    let titleActive = true;
+    let titleApplyInflight: Promise<void> | undefined;
+    let titleCoordinator: TitleCoordinator | undefined;
+    let requestBrokerOwner: ReturnType<typeof createRequestBrokerOwner> | undefined;
+    let mismatchMonitor: ReturnType<typeof createStoryBranchMismatchMonitor> | undefined;
+    let inheritedTitleTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
     let stepIndexForTitle = currentStepIndex;
     const titleLog = (line: string) => {
       pushAgentLine(state, line);
@@ -605,10 +623,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
      * opencode session via `session.update`. Idempotent on state; the opencode
      * call is skipped when sessionID is not yet bound (e.g., called from the
      * eager step-start path of a reuse step before the session exists). Also
-     * mutates the outer `workDescription` so later steps inherit the value.
+     * stages a candidate; only a successful step commits it for later steps.
      */
     const applyTitle = async (desc: string, targetSessionID?: string): Promise<void> => {
-      workDescription = desc;
+      if (!titleActive) return;
+      candidateDescription = desc;
       const row = state.steps[stepIndexForTitle];
       if (row && row.title !== desc) {
         row.title = desc;
@@ -616,17 +635,18 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
       const sid = targetSessionID ?? state.steps[stepIndexForTitle]?.sessionID;
       if (sid === undefined) return;
-      await setSessionTitle({
+      titleApplyInflight = setSessionTitle({
         client,
         repoDir,
         sessionID: sid,
         title: `${step.name}: ${desc}`,
         log: titleLog,
       });
+      await titleApplyInflight;
     };
 
     const titleMode = titleConfig === undefined ? undefined : titleModeFor(titleConfig);
-    const titleCoordinator =
+    titleCoordinator =
       titleMode === undefined
         ? undefined
         : new TitleCoordinator(
@@ -655,7 +675,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     // latch): a retry/timeout/restart swaps in a fresh session, and the title
     // must follow to the new session rather than staying on the abandoned one.
     let inheritedTitleAppliedSessionID: string | undefined;
-    let inheritedTitleTimer: ReturnType<typeof setTimeout> | undefined;
     let inheritedTitleInflight: Promise<void> | undefined;
     const applyInheritedOpencodeTitle = async (): Promise<void> => {
       const sid = state.steps[stepIndexForTitle]?.sessionID;
@@ -762,7 +781,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     control.clearTimeoutBonus();
     const remainingBudget = () => remainingStepBudgetMs(budgetMs, stepStartTime, control.timeoutBonusMs);
     let gatePausedAt: number | undefined;
-    const requestBrokerOwner = createRequestBrokerOwner({
+    const brokerOwner = createRequestBrokerOwner({
       requests: ctx.reporter.requests,
       client,
       repoDir,
@@ -784,10 +803,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       },
       onGateTimeout,
     });
+    requestBrokerOwner = brokerOwner;
     const stopStepSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
       if (sessionID === undefined) return true;
-      if (!requestBrokerOwner.owns(sessionID)) return await stopPriorSession(sessionID, stepIdx, timeoutMs);
-      const teardown = await requestBrokerOwner.teardown(sessionID, timeoutMs ?? stopSessionConfirmTimeoutMs());
+      if (!brokerOwner.owns(sessionID)) return await stopPriorSession(sessionID, stepIdx, timeoutMs);
+      const teardown = await brokerOwner.teardown(sessionID, timeoutMs ?? stopSessionConfirmTimeoutMs());
       if (teardown.safeToProceed) return true;
       logStepLine(stepIdx, `[looper] ${teardown.reason}`);
       return false;
@@ -956,9 +976,9 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const initialStepBranch = await currentGitBranch(repoDir);
     // A resumed failed repair must still be checked even though the branch
     // switch happened before this process/iteration invocation.
-    const initialBranchForRepair = resume?.sessionID !== undefined && index === startStepIndex ? undefined : initialStepBranch;
+    const initialBranchForRepair = resume?.sessionID !== undefined && index === startStepIndex ? undefined : initialStepBranch ?? readStepBranch();
     let branchRepair: StoryBranchMismatch | undefined;
-    const mismatchMonitor = createStoryBranchMismatchMonitor({
+    mismatchMonitor = createStoryBranchMismatchMonitor({
       initialBranch: initialBranchForRepair,
       getStoryIds: readStoryIds,
       getBranch: readStepBranch,
@@ -966,14 +986,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       onMismatch: (mismatch) => logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch)),
     });
 
-    try {
     while (true) {
       if (pendingResult !== undefined) {
         result = pendingResult;
         pendingResult = undefined;
       } else {
         const stepBasePrompt = adjudicating
-          ? withAdjudicationReason(promptText(step), adjudication?.store.readMarker() ?? null)
+          ? withAdjudicationReason(promptText(step), consumedRequest?.reason ?? null)
           : promptText(step);
         let prompt = attempt.resumePrompt ?? stepBasePrompt;
         // Context is for new sessions only. Follow-up turns on an existing
@@ -1053,7 +1072,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           onGateTimeout,
           onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) => {
             if (adjudicating) {
-              adjudication?.store.writeSession({ sessionID, messageID });
+              adjudication?.store.writeSession({ sessionID, messageID, ...(consumedRequest !== null ? { request: consumedRequest } : {}) });
               return;
             }
             hooks?.onStepSession?.({ iteration, index, stepName: step.name, sessionID, messageID, promptText: sentPromptText, looperMessageIDs: [...looperMessageIDs], ...(workDescription !== undefined ? { title: workDescription } : {}) });
@@ -1508,6 +1527,13 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         resetStepRowToPending(state, currentStepIndex, { statusMessage: `retry in ${delaySeconds}s` });
         await sleepInterruptible(control, delayMs);
         if (!(control.quitting || stopFileExists() || control.skipRequested || control.restartRequested)) {
+          if (remainingBudget() <= failureRetryMinRemainingMs()) {
+            logRecoveryBoundary(currentStepIndex, "skip", priorSessionID, attempt.lastPromptMessageID);
+            logStepLine(currentStepIndex, `[looper] ${step.name} failed: ${errReason} — not retrying: retry budget exhausted`);
+            writeStop?.(`${step.name} failed after retry budget exhausted: ${errReason}`);
+            failStepRow(state, currentStepIndex, "failed");
+            break;
+          }
           const retryingLine = `[looper] ${step.name} retrying now (${attemptTag})`;
           pushAgentLine(state, retryingLine);
           pushStepOutputLine(state, currentStepIndex, retryingLine);
@@ -1518,10 +1544,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
 
       break;
-    }
-
-    } finally {
-      mismatchMonitor.stop();
     }
 
     const phasesAfter =
@@ -1538,7 +1560,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       });
     }
     try {
-      // setsPhase is monotonic only; demotions come from signals / engine reset (Phase B).
+      // setsPhase is monotonic only; demotions come from signals / engine reset.
+      if (result.status === "done" && step.setsPhase !== undefined && completedStoryId === undefined && storyId !== undefined) {
+        throw new StepFailureError("final story identity is unavailable; refusing to advance story phase");
+      }
       if (
         result.status === "done" &&
         step.setsPhase !== undefined &&
@@ -1546,10 +1571,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         expectsPhaseSatisfied &&
         !phaseResetApplied
       ) {
-        const currentPhase = storyState.readPhase(completedStoryId);
-        if (currentPhase === undefined || comparePhase(currentPhase, step.setsPhase) < 0) {
-          storyState.writePhase(completedStoryId, step.setsPhase);
-        }
+        // Compare-and-advance in one transaction: a caller-side read/compare/write
+        // races `looper signal story-phase` and could regress a phase the signal
+        // advanced in between.
+        storyState.advancePhaseMonotonic(completedStoryId, step.setsPhase);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1558,7 +1583,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       logStepLine(currentStepIndex, `[looper] story phase write failed for ${completedStoryId ?? "current branch"}: ${message}`);
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
-      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `could not persist story phase for ${completedStoryId ?? "current branch"}: ${message}`,
         { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },
@@ -1579,7 +1603,6 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (!(await stopStepSession(terminalSessionID, currentStepIndex)) && terminalSessionID !== undefined) {
         titleCoordinator?.cancel();
         cancelInheritedTitleTimer();
-        requestBrokerOwner.dispose();
         throw new StepFailureError(
           `could not confirm session ${terminalSessionID} stopped; deferring adjudication to avoid overlapping opencode generations`,
           { stepName: step.name, sessionID: terminalSessionID },
@@ -1609,11 +1632,9 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       }
       if (stopRequested) {
         markRemainingSkipped(state, currentStepIndex);
-        requestBrokerOwner.dispose();
         break;
       }
       const reason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
-      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `${step.name} failed after ${attempt.failureRetryCount} retr${attempt.failureRetryCount === 1 ? "y" : "ies"}: ${reason}`,
         { stepName: step.name, ...(terminalSessionID !== undefined ? { sessionID: terminalSessionID } : {}) },
@@ -1638,6 +1659,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
     }
+    if (result.status === "done") {
+      if (candidateDescription !== undefined) workDescription = candidateDescription;
+      titleCommitted = true;
+    }
 
     if (adjudicating) {
       pendingAdjudicateStep = undefined;
@@ -1648,12 +1673,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         // resolved flips no longer count toward detection, then drop the
         // durable adjudication signals.
         if (adjudication !== undefined) {
-          adjudication.store.appendCompletion({ at: new Date().toISOString(), reason: adjudication.store.readMarker() ?? "" });
+          const adjudicatorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
+          if (adjudicatorSessionID === undefined) {
+            throw new StepFailureError("adjudicator completed without a session id; refusing to acknowledge the adjudication request");
+          }
+          // One transaction: log the completion, advance the watermark, and
+          // compare-and-remove ONLY the request this session consumed, so a
+          // newer request written mid-adjudication survives to be routed.
+          adjudication.store.completeSession(adjudicatorSessionID);
         }
-        adjudication?.store.markAdjudicated();
-        adjudication?.store.clearMarker();
-        adjudication?.store.clearSession();
-        requestBrokerOwner.dispose();
         break;
       }
       // Fail closed: keep the marker so the next iteration / resume re-routes
@@ -1665,10 +1693,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (await stopStepSession(adjSessionID, currentStepIndex)) adjudication?.store.clearSession();
       if (control.quitting || stopFileExists()) {
         markRemainingSkipped(state, currentStepIndex);
-        requestBrokerOwner.dispose();
         break;
       }
-      requestBrokerOwner.dispose();
       throw new StepFailureError(
         `adjudicate step failed: ${attempt.lastErrorMessage ?? "adjudicator did not complete"}`,
         { stepName: step.name, ...(adjSessionID !== undefined ? { sessionID: adjSessionID } : {}) },
@@ -1684,7 +1710,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       recordPriorStep: true,
       ...(blockedReason !== undefined ? { priorStatus: `blocked (${blockedReason})` } : {}),
     });
-    requestBrokerOwner.dispose();
+    } finally {
+      titleActive = false;
+      mismatchMonitor?.stop();
+      titleCoordinator?.cancel();
+      if (inheritedTitleTimer !== undefined) clearTimeout(inheritedTitleTimer);
+      requestBrokerOwner?.dispose();
+      if (titleApplyInflight !== undefined) await titleApplyInflight;
+      if (!titleCommitted && candidateDescription !== undefined) {
+        const row = state.steps[currentStepIndex];
+        if (row !== undefined) row.title = priorRowTitle;
+        const completedRow = completed[currentStepIndex];
+        if (completedRow !== undefined) completedRow.title = priorRowTitle;
+        const sessionID = row?.sessionID;
+        if (sessionID !== undefined) await setSessionTitle({ client, repoDir, sessionID, title: priorRowTitle === undefined ? step.name : `${step.name}: ${priorRowTitle}` });
+        notify();
+      }
+    }
   }
 
   return control.quitting || control.stopAfterIteration || stopFileExists() || stopAfterIterationFileExists()

@@ -1,5 +1,6 @@
 import { renameSync } from "node:fs";
 import { join } from "node:path";
+import { clearAdjudicationRequest, parseAdjudicationRequest, readAdjudicationRequest, writeAdjudicationRequest, type AdjudicationRequest } from "../persistence/adjudication-request.ts";
 
 import type { OscillationVerdict, StoryTransitionRecord } from "./adjudication-detection.ts";
 import {
@@ -31,6 +32,7 @@ export type AdjudicationCompletionRecord = {
 export type AdjudicateSession = {
   readonly sessionID: string;
   readonly messageID?: string;
+  readonly request?: AdjudicationRequest;
 };
 
 export type AdjudicateSessionRead =
@@ -154,7 +156,7 @@ function quarantineCorruptHistory(): boolean {
 }
 
 export function writeAdjudicateMarker(reason: string): void {
-  writeFileAtomically(adjudicateMarkerPath(), reason);
+  writeAdjudicationRequest(reason);
 }
 
 export function adjudicateMarkerExists(): boolean {
@@ -162,11 +164,11 @@ export function adjudicateMarkerExists(): boolean {
 }
 
 export function readAdjudicateMarker(): string | null {
-  return tolerantRead(adjudicateMarkerPath());
+  return readAdjudicationRequest()?.reason ?? null;
 }
 
 export function clearAdjudicateMarker(): void {
-  tolerantRm(adjudicateMarkerPath());
+  clearAdjudicationRequest();
 }
 
 export function appendPhaseHistory(records: readonly StoryTransitionRecord[]): void {
@@ -302,7 +304,7 @@ export function clearAdjudicationLog(): void {
 export function writeAdjudicateSession(session: AdjudicateSession): void {
   writeFileAtomically(
     adjudicateSessionPath(),
-    `${JSON.stringify(session.messageID === undefined ? { sessionID: session.sessionID } : { sessionID: session.sessionID, messageID: session.messageID })}\n`,
+    `${JSON.stringify(session)}\n`,
   );
 }
 
@@ -313,11 +315,14 @@ export function readAdjudicateSession(): AdjudicateSessionRead {
     const parsed: unknown = JSON.parse(content);
     if (!isRecord(parsed) || typeof parsed["sessionID"] !== "string" || parsed["sessionID"].length === 0) return { kind: "corrupt" };
     const messageID = parsed["messageID"];
+    const request = parseAdjudicationRequest(parsed["request"]);
+    if (parsed["request"] !== undefined && request === undefined) return { kind: "corrupt" };
     return {
       kind: "ok",
       session: {
         sessionID: parsed["sessionID"],
         ...(typeof messageID === "string" && messageID.length > 0 ? { messageID } : {}),
+        ...(request !== undefined ? { request } : {}),
       },
     };
   } catch {

@@ -216,6 +216,7 @@ describe("runOpenCodeStep headless policy events", () => {
     questionPolicy?: "ask" | "reject";
   }) {
     repoDir = mkdtempSync(join(tmpdir(), "looper-policy-"));
+    initStatePaths({ configDir: repoDir });
     const continuationDir = join(repoDir, ".omo", "run-continuation");
     mkdirSync(continuationDir, { recursive: true });
     const now = new Date().toISOString();
@@ -438,7 +439,14 @@ describe("runIteration reattach policy propagation", () => {
         abort: async () => ({ data: {} }),
       },
       event: {
-        subscribe: async () => ({ stream: fromArray([]) }),
+        subscribe: async (_params: unknown, options: { signal: AbortSignal }) => ({
+          stream: (async function* (): AsyncGenerator<never> {
+            await new Promise<void>((resolve) => {
+              if (options.signal.aborted) resolve();
+              else options.signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+          })(),
+        }),
       },
     } as unknown as OpencodeClient;
     const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });

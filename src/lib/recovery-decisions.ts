@@ -3,7 +3,7 @@ import type { RunState } from "./state-files.ts";
 
 export type RecoveryResumeDecision = {
   readonly sessionID: string;
-  readonly messageID: string;
+  readonly messageID?: string;
   readonly stepName?: string;
   readonly promptText?: string;
   readonly looperMessageIDs?: string[];
@@ -20,9 +20,13 @@ export function recoveryResumeForChoice({
   failedStepName: string | undefined;
   runState: RunState | null;
 }): RecoveryResumeDecision | undefined {
-  if (choice !== "nudge") return undefined;
+  if (choice === "quit") return undefined;
   if (failedSessionID === undefined) return undefined;
-  if (runState?.sessionID !== failedSessionID || runState.messageID === undefined) return undefined;
+  // Restart reconciles the old session, but must not reattach its old turn.
+  if (choice === "restart" || runState?.sessionID !== failedSessionID || runState.messageID === undefined) return {
+    sessionID: failedSessionID,
+    ...(failedStepName !== undefined ? { stepName: failedStepName } : {}),
+  };
   return {
     sessionID: failedSessionID,
     messageID: runState.messageID,
