@@ -476,6 +476,43 @@ describe("runEngine stale checkpoint session", () => {
     expect(started).toBe(1);
   });
 
+  test("stops a checkpoint session when resume payload was dropped but resumed stays true", async () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 1, stepName: "Verify", sessionID: "ses_stale", updatedAt: "now" });
+    const { client: sdk, aborted } = client("idle");
+    let started = 0;
+    await runEngine({
+      maxIterations: 2,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: sdk,
+      store,
+      hooks,
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run-1",
+      legacyResumeStepIndex: () => 0,
+      initialPlan: {
+        startIteration: 2,
+        firstIterationStartStepIndex: 0,
+        firstIterationResume: undefined,
+        resumed: true,
+        firstIterationTitle: undefined,
+        firstIterationStepSessions: undefined,
+        resetToFreshRun: false,
+        looperRunID: "run-1",
+      },
+      runIteration: async () => {
+        started += 1;
+        return "complete";
+      },
+    });
+    expect(aborted).toEqual(["ses_stale"]);
+    expect(started).toBe(1);
+  });
+
   test("refuses to start when the stale session cannot be confirmed stopped", async () => {
     const previous = process.env.LOOPER_STOP_SESSION_TIMEOUT_MS;
     process.env.LOOPER_STOP_SESSION_TIMEOUT_MS = "50";

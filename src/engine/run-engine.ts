@@ -182,8 +182,9 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
   if (initialPlan.looperRunID !== undefined) looperRunID = initialPlan.looperRunID;
   if (initialPlan.resetToFreshRun) looperRunID = input.createLooperRunID();
   const checkpointSessionID = input.store.read()?.sessionID;
+  const resumeSessionID = initialPlan.firstIterationResume?.sessionID;
   const staleSessionID = initialPlan.staleSessionID ?? (
-    !input.fresh && !initialPlan.resumed && checkpointSessionID !== undefined && checkpointSessionID !== initialPlan.firstIterationResume?.sessionID
+    !input.fresh && checkpointSessionID !== undefined && checkpointSessionID !== resumeSessionID
       ? checkpointSessionID
       : undefined
   );
