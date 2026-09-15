@@ -30,12 +30,27 @@ describe("scaffoldConfigDir", () => {
     });
   });
 
-  test("mentions the stop file path relative to the repo", () => {
+  test("does not scaffold the retired completion-check step", () => {
     withScratchDir((repoDir) => {
       const configDir = join(repoDir, ".looper");
       scaffoldConfigDir({ configDir, repoDir });
-      const checkDone = readFileSync(join(configDir, "check-done.md"), "utf8");
-      expect(checkDone).toContain(".looper/.looper-stop");
+      const config = readFileSync(join(configDir, "looper.yml"), "utf8");
+      expect(config).not.toContain("check-done");
+      expect(existsSync(join(configDir, "check-done.md"))).toBe(false);
+    });
+  });
+
+  test("scaffolds a commented prd example and a work prompt that signals story-phase", () => {
+    withScratchDir((repoDir) => {
+      const configDir = join(repoDir, ".looper");
+      scaffoldConfigDir({ configDir, repoDir });
+      const config = readFileSync(join(configDir, "looper.yml"), "utf8");
+      expect(config).toContain("# prd: ");
+      expect(config).toContain("# terminalPhase: merged");
+      const steps = loadSteps(configDir);
+      expect(steps.every((step) => step.gate === undefined && step.expects === undefined)).toBe(true);
+      const work = readFileSync(join(configDir, "work.md"), "utf8");
+      expect(work).toContain("looper signal story-phase implemented");
     });
   });
 

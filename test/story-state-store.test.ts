@@ -18,7 +18,7 @@ function setupCliScratch(): { readonly repoDir: string; readonly configDir: stri
   return { repoDir, configDir, statePath };
 }
 
-async function runFreshCli(repoDir: string, tty: boolean): Promise<number> {
+async function runFreshCli(repoDir: string, tty: boolean, resetStories = false): Promise<number> {
   const env = {
     ...process.env,
     LOOPER_CONFIG_DIR: join(repoDir, ".looper"),
@@ -26,10 +26,10 @@ async function runFreshCli(repoDir: string, tty: boolean): Promise<number> {
     OPENCODE_BIN: "looper-test-missing-opencode",
   };
   if (!tty) {
-    const child = Bun.spawn(["bun", MAIN_ENTRY, "--fresh", "--start", "1"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
+    const child = Bun.spawn(["bun", MAIN_ENTRY, "--fresh", ...(resetStories ? ["--reset-stories"] : []), "--start", "1"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
     return child.exited;
   }
-  const command = `bun ${MAIN_ENTRY} --fresh --start 1`;
+  const command = `bun ${MAIN_ENTRY} --fresh ${resetStories ? "--reset-stories " : ""}--start 1`;
   const child = Bun.spawn(["script", "-qefc", command, "/dev/null"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
   return child.exited;
 }
@@ -63,7 +63,7 @@ describe("story state store", () => {
   test.each([
     ["non-TTY", false],
     ["TTY", true],
-  ] as const)("--fresh clears story state on the %s path before server startup", async (_label, tty) => {
+  ] as const)("--fresh preserves story state on the %s path before server startup", async (_label, tty) => {
     // Given persisted story state in a valid CLI configuration.
     const fixture = setupCliScratch();
     scratch = fixture.repoDir;
@@ -74,9 +74,23 @@ describe("story state store", () => {
     // When a fresh run reaches the deliberately failing server startup.
     const exitCode = await runFreshCli(fixture.repoDir, tty);
 
-    // Then fresh state was cleared before startup failed.
+    // Then run artifacts are fresh, but durable story truth survives.
+    expect(exitCode).toBe(1);
+    expect(existsSync(fixture.statePath)).toBe(true);
+    expect(existsSync(auditPath)).toBe(false);
+  });
+
+  test.each([
+    ["non-TTY", false],
+    ["TTY", true],
+  ] as const)("--fresh --reset-stories clears story state on the %s path", async (_label, tty) => {
+    const fixture = setupCliScratch();
+    scratch = fixture.repoDir;
+    writeFileSync(fixture.statePath, JSON.stringify({ stories: { "US-074": { phase: "reviewed", updatedAt: "2026-07-20T00:00:00.000Z" } } }));
+
+    const exitCode = await runFreshCli(fixture.repoDir, tty, true);
+
     expect(exitCode).toBe(1);
     expect(existsSync(fixture.statePath)).toBe(false);
-    expect(existsSync(auditPath)).toBe(false);
   });
 });

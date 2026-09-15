@@ -26,6 +26,20 @@ export function resolveProgressFilePath(progress: string, repoDir: string): stri
 
 export type AppendProgressResult = { readonly appended: true } | { readonly appended: false; readonly error: string };
 
+function appendProgressEntry(progressPath: string, entry: string): AppendProgressResult {
+  try {
+    mkdirSync(dirname(progressPath), { recursive: true });
+    const existing = tolerantRead(progressPath) ?? "";
+    const prefix = existing.length === 0 || existing.endsWith("\n") ? existing : `${existing}\n`;
+    const separator = prefix.length === 0 || prefix.endsWith("\n\n") || prefix.endsWith("---\n") ? "" : "\n";
+    writeFileAtomically(progressPath, `${prefix}${separator}${entry}`);
+    return { appended: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { appended: false, error: message };
+  }
+}
+
 export function appendGateSkipToProgress(input: {
   readonly progressPath: string;
   readonly stepName: string;
@@ -37,15 +51,16 @@ export function appendGateSkipToProgress(input: {
     reason: input.reason,
     ...(input.at !== undefined ? { at: input.at } : {}),
   });
-  try {
-    mkdirSync(dirname(input.progressPath), { recursive: true });
-    const existing = tolerantRead(input.progressPath) ?? "";
-    const prefix = existing.length === 0 || existing.endsWith("\n") ? existing : `${existing}\n`;
-    const separator = prefix.length === 0 || prefix.endsWith("\n\n") || prefix.endsWith("---\n") ? "" : "\n";
-    writeFileAtomically(input.progressPath, `${prefix}${separator}${entry}`);
-    return { appended: true };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { appended: false, error: message };
-  }
+  return appendProgressEntry(input.progressPath, entry);
+}
+
+export function appendBlockedStepToProgress(input: {
+  readonly progressPath: string;
+  readonly stepName: string;
+  readonly reason: string;
+  readonly at?: Date;
+}): AppendProgressResult {
+  const timestamp = formatProgressTimestamp(input.at ?? new Date());
+  const entry = `## ${timestamp} - ${input.stepName}\n- [looper] ${input.stepName} blocked: ${input.reason}\n---\n`;
+  return appendProgressEntry(input.progressPath, entry);
 }

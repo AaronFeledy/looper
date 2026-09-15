@@ -1,7 +1,13 @@
 export const DEFAULT_STORY_ID_PATTERN = "^([a-z]+-[0-9]+[a-z]?)-";
 const GIT_BRANCH_TIMEOUT_MS = 2_000;
 
-export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PATTERN): string | undefined {
+export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PATTERN, storyIds?: readonly string[]): string | undefined {
+  // Prefer the longest complete PRD ID; split IDs need not fit the fallback regex.
+  const lowerBranch = branch.toLowerCase();
+  const knownId = storyIds
+    ?.filter((id) => id.length > 0 && lowerBranch.startsWith(`${id.toLowerCase()}-`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (knownId !== undefined) return knownId;
   let expression: RegExp;
   try {
     expression = new RegExp(pattern);
@@ -9,7 +15,12 @@ export function storyIdFromBranch(branch: string, pattern = DEFAULT_STORY_ID_PAT
     if (error instanceof SyntaxError) return undefined;
     throw error;
   }
-  return expression.exec(branch)?.[1]?.toUpperCase();
+  const captured = expression.exec(branch)?.[1]?.toUpperCase();
+  if (captured === undefined) return undefined;
+  // With a PRD id list, only those ids count — a regex-only capture must not
+  // impersonate a story (outcome/setsPhase would otherwise hit story.next).
+  if (storyIds === undefined) return captured;
+  return storyIds.find((id) => id.toUpperCase() === captured);
 }
 
 export async function currentGitBranch(repoDir: string): Promise<string | undefined> {

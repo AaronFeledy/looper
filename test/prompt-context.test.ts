@@ -60,13 +60,23 @@ function baseInput(overrides: Partial<ContextInput> = {}): ContextInput {
   };
 }
 
+const PRD_SUMMARY: NonNullable<ContextInput["prd"]> = {
+  remaining: 13,
+  total: 41,
+  terminal: "published",
+  phases: [
+    { id: "US-001", phase: "published" },
+    { id: "US-002", phase: "reviewed" },
+  ],
+};
+
 describe("buildLooperContext", () => {
   test("keeps context keys, defaults, and all-on rendered sections in sync", () => {
     const input = baseInput({
-      prd: { remaining: 13, total: 41 },
+      prd: PRD_SUMMARY,
       priorSteps: [{ name: "build", status: "done", sessionID: "ses_build1" }],
       vcs: { branch: "feature/US-007", changes: [] },
-      story: { branch: "feature/US-007", storyId: "US-007", passes: true, phase: "verified" },
+      story: { branch: "feature/US-007", storyId: "US-007", phase: "verified" },
     });
 
     const block = buildLooperContext(DEFAULT_CONTEXT_POLICY, input);
@@ -77,12 +87,12 @@ describe("buildLooperContext", () => {
 
   test("renders all known story facts", () => {
     const input = baseInput({
-      story: { branch: "feature/US-007", storyId: "US-007", passes: false, phase: "reviewed" },
+      story: { branch: "feature/US-007", storyId: "US-007", phase: "reviewed" },
     });
 
     const block = buildLooperContext(ALL_ON, input);
 
-    expect(block).toContain("story:\n  branch: feature/US-007\n  storyId: US-007\n  passes: false\n  phase: reviewed");
+    expect(block).toContain("story:\n  branch: feature/US-007\n  storyId: US-007\n  phase: reviewed");
   });
 
   test("renders only known story facts when optional facts are unavailable", () => {
@@ -90,19 +100,18 @@ describe("buildLooperContext", () => {
 
     expect(block).toContain("story:\n  branch: feature/US-007");
     expect(block).not.toContain("storyId:");
-    expect(block).not.toContain("passes:");
-    expect(block).not.toContain("phase:");
+        expect(block).not.toContain("phase:");
   });
 
   test("omits the story section when no branch is available", () => {
-    const input = baseInput({ story: { storyId: "US-007", passes: true, phase: "verified" } });
+    const input = baseInput({ story: { storyId: "US-007", phase: "verified" } });
 
     expect(buildLooperContext(ALL_ON, input)).not.toContain("story:");
   });
 
   test("renders all sections when policy is all-on and data is present", () => {
     const input = baseInput({
-      prd: { remaining: 13, total: 41 },
+      prd: PRD_SUMMARY,
       priorSteps: [
         { name: "build", status: "done", sessionID: "ses_build1" },
         { name: "lint", status: "done", sessionID: "ses_lint1" },
@@ -123,7 +132,7 @@ describe("buildLooperContext", () => {
     expect(block).toMatch(/iteration 2 of 10/);
     expect(block).toMatch(/step "test" \(2 of 3\)/);
     expect(block).toMatch(/90m/);
-    expect(block).toContain("prd:\n  passing: 28\n  total: 41\n  remaining: 13");
+    expect(block).toContain("prd:\n  complete: 28\n  total: 41\n  remaining: 13\n  terminal: published\n  phases: US-001=published, US-002=reviewed");
     expect(block).toContain("main");
     expect(block).toContain("src/a.ts");
     expect(block).toContain("Opencode sessions from earlier steps this iteration:");
@@ -159,7 +168,7 @@ describe("buildLooperContext", () => {
       const input = baseInput({
         priorSteps: [{ name: "build", status: "done", sessionID: "ses_1" }],
         vcs: { branch: "main", changes: [{ file: "a.ts", additions: 1, deletions: 0, status: "modified" }] },
-        story: { branch: "feature/US-007", storyId: "US-007", passes: true, phase: "verified" },
+        story: { branch: "feature/US-007", storyId: "US-007", phase: "verified" },
       });
       const block = buildLooperContext(policy, input);
 
@@ -338,7 +347,7 @@ describe("buildLooperContext", () => {
 
   test("renders structured PRD paths and counts when both are available", () => {
     const block = buildLooperContext(ALL_ON, baseInput({
-      prd: { remaining: 13, total: 41 },
+      prd: PRD_SUMMARY,
       prdPaths: { dir: "spec/beta-1", index: "spec/beta-1/prd.json", progress: "spec/beta-1/progress.txt" },
     }));
 
@@ -347,9 +356,11 @@ describe("buildLooperContext", () => {
       "  dir: spec/beta-1",
       "  index: spec/beta-1/prd.json",
       "  progress: spec/beta-1/progress.txt",
-      "  passing: 28",
+      "  complete: 28",
       "  total: 41",
       "  remaining: 13",
+      "  terminal: published",
+      "  phases: US-001=published, US-002=reviewed",
     ].join("\n"));
     expect(block.startsWith("<looper-context>")).toBe(true);
     expect(block.endsWith("</looper-context>")).toBe(true);
@@ -371,15 +382,15 @@ describe("buildLooperContext", () => {
       "  index: /srv/shared/prd/prd.json",
       "  progress: /srv/shared/prd/progress.txt",
     ].join("\n"));
-    expect(block).not.toContain("  passing:");
+    expect(block).not.toContain("  complete:");
     expect(block).not.toContain("  total:");
     expect(block).not.toContain("  remaining:");
   });
 
   test("renders structured PRD counts when paths are unavailable", () => {
-    const block = buildLooperContext(ALL_ON, baseInput({ prd: { remaining: 13, total: 41 } }));
+    const block = buildLooperContext(ALL_ON, baseInput({ prd: PRD_SUMMARY }));
 
-    expect(block).toContain("prd:\n  passing: 28\n  total: 41\n  remaining: 13");
+    expect(block).toContain("prd:\n  complete: 28\n  total: 41\n  remaining: 13\n  terminal: published\n  phases: US-001=published, US-002=reviewed");
     expect(block).not.toContain("  dir:");
     expect(block).not.toContain("  index:");
     expect(block).not.toContain("  progress:");
@@ -387,13 +398,13 @@ describe("buildLooperContext", () => {
 
   test("omits the entire structured PRD block when policy is off", () => {
     const block = buildLooperContext({ ...ALL_ON, prd: false }, baseInput({
-      prd: { remaining: 13, total: 41 },
+      prd: PRD_SUMMARY,
       prdPaths: { dir: "product/prd", index: "product/prd/prd.json", progress: "product/prd/progress.txt" },
     }));
 
     expect(block).not.toContain("prd:");
     expect(block).not.toContain("  dir: product/prd");
-    expect(block).not.toContain("  passing: 28");
+    expect(block).not.toContain("  complete: 28");
   });
 
   test("omits the PRD block when input is absent", () => {

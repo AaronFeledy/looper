@@ -5,6 +5,7 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { LoopState } from "../../src/lib/state.ts";
 import { initStatePaths } from "../../src/lib/state-files.ts";
+import { writeStoryPhase } from "../../src/lib/story-state-files.ts";
 
 export type Scratch = { readonly repoDir: string; readonly configDir: string; readonly prdDir: string };
 
@@ -21,6 +22,8 @@ export function setup(): Scratch {
   writeFileSync(join(configDir, "adjudicate.md"), "resolve the PRD conflict\n");
   writeFileSync(join(configDir, "looper.yaml"), "steps:\n  step1:\n    prompt: step1.md\nadjudicate:\n  prompt: adjudicate.md\n");
   writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "story-1", passes: true }] }));
+  // Seed a non-building phase so after-dispatch demotion yields a recorded transition.
+  writeStoryPhase("story-1", "reviewed");
   scratchDirs.push(repoDir);
   return { repoDir, configDir, prdDir };
 }
@@ -151,8 +154,12 @@ export function adjudicatorErrorClient(input: {
         }
         input.prompts.push(params.parts.map((part) => part.text).join("\n"));
         writeIdleContinuation(input.repoDir, params.sessionID);
-        if (input.phase === "after-dispatch" && input.prdDir !== undefined) {
-          writeFileSync(join(input.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "story-1", passes: false }] }));
+        if (input.phase === "after-dispatch") {
+          // Phase A records story-phase transitions, not PRD passes flips.
+          writeStoryPhase("story-1", "building");
+          if (input.prdDir !== undefined) {
+            writeFileSync(join(input.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "story-1", passes: false }] }));
+          }
         }
         return Promise.resolve({ data: {} });
       },

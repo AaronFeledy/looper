@@ -9,9 +9,12 @@ import {
   tolerantRm,
   writeFileAtomically,
 } from "./state-files.ts";
+import { comparePhase, isValidPhase, type StoryPhase } from "./story-state-files.ts";
 
 const ADJUDICATE_FILE_NAME = ".looper-adjudicate";
-const PRD_HISTORY_FILE_NAME = ".looper-prd-history.json";
+const PHASE_HISTORY_FILE_NAME = ".looper-phase-history.json";
+/** Legacy name; only used to quarantine/migrate if present is not required — new writes use PHASE_HISTORY. */
+const LEGACY_PRD_HISTORY_FILE_NAME = ".looper-prd-history.json";
 const ADJUDICATE_SESSION_FILE_NAME = ".looper-adjudicate-session.json";
 const ADJUDICATION_LOG_FILE_NAME = ".looper-adjudication-log.json";
 
@@ -39,8 +42,8 @@ function adjudicateMarkerPath(): string {
   return join(requireConfigDir(), ADJUDICATE_FILE_NAME);
 }
 
-function prdHistoryPath(): string {
-  return join(requireConfigDir(), PRD_HISTORY_FILE_NAME);
+function phaseHistoryPath(): string {
+  return join(requireConfigDir(), PHASE_HISTORY_FILE_NAME);
 }
 
 function adjudicateSessionPath(): string {
@@ -55,20 +58,26 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function parsePhase(value: unknown): StoryPhase | null {
+  return typeof value === "string" && isValidPhase(value) ? value : null;
+}
+
 function parseTransition(value: unknown): StoryTransitionRecord | null {
   if (!isRecord(value)) return null;
   const storyId = value["storyId"];
-  const from = value["from"];
-  const to = value["to"];
+  const from = parsePhase(value["from"]);
+  const to = parsePhase(value["to"]);
   const iteration = value["iteration"];
   const stepName = value["stepName"];
   const at = value["at"];
+  const source = value["source"];
   if (typeof storyId !== "string" || storyId.length === 0) return null;
-  if (typeof from !== "boolean" || typeof to !== "boolean") return null;
+  if (from === null || to === null) return null;
   if (typeof iteration !== "number" || !Number.isInteger(iteration)) return null;
   if (typeof stepName !== "string" || stepName.length === 0) return null;
   if (typeof at !== "string" || at.length === 0) return null;
-  return { storyId, from, to, iteration, stepName, at };
+  if (source !== "signal" && source !== "engine") return null;
+  return { storyId, from, to, iteration, stepName, at, source };
 }
 
 /**
@@ -78,14 +87,14 @@ function parseTransition(value: unknown): StoryTransitionRecord | null {
  * retrigger from its own historical flips, while the full trail is retained on
  * disk for forensics.
  */
-type PrdHistoryFile = {
+type PhaseHistoryFile = {
   readonly records: readonly StoryTransitionRecord[];
   readonly adjudicatedThrough: number;
 };
 
 type HistoryFileParse =
   | { readonly kind: "empty" }
-  | { readonly kind: "ok"; readonly file: PrdHistoryFile }
+  | { readonly kind: "ok"; readonly file: PhaseHistoryFile }
   | { readonly kind: "corrupt" };
 
 /**
@@ -118,11 +127,11 @@ function parseHistoryContent(content: string | null): HistoryFileParse {
 }
 
 function readHistoryFile(): HistoryFileParse {
-  return parseHistoryContent(tolerantRead(prdHistoryPath()));
+  return parseHistoryContent(tolerantRead(phaseHistoryPath()));
 }
 
-function writeHistoryFile(file: PrdHistoryFile): void {
-  writeFileAtomically(prdHistoryPath(), `${JSON.stringify(file, null, 2)}\n`);
+function writeHistoryFile(file: PhaseHistoryFile): void {
+  writeFileAtomically(phaseHistoryPath(), `${JSON.stringify(file, null, 2)}\n`);
 }
 
 /**
@@ -132,14 +141,14 @@ function writeHistoryFile(file: PrdHistoryFile): void {
  * write rather than overwriting unreadable forensic data.
  */
 function quarantineCorruptHistory(): boolean {
-  const path = prdHistoryPath();
+  const path = phaseHistoryPath();
   const quarantinePath = `${path}.corrupt-${Date.now()}`;
   try {
     renameSync(path, quarantinePath);
-    console.error(`[looper] adjudication: corrupt PRD history detected; moved original to ${quarantinePath}`);
+    console.error(`[looper] adjudication: corrupt phase history detected; moved original to ${quarantinePath}`);
     return true;
   } catch {
-    console.error("[looper] adjudication: corrupt PRD history detected; could not quarantine it, skipping this update");
+    console.error("[looper] adjudication: corrupt phase history detected; could not quarantine it, skipping this update");
     return false;
   }
 }
@@ -160,7 +169,7 @@ export function clearAdjudicateMarker(): void {
   tolerantRm(adjudicateMarkerPath());
 }
 
-export function appendPrdHistory(records: readonly StoryTransitionRecord[]): void {
+export function appendPhaseHistory(records: readonly StoryTransitionRecord[]): void {
   if (records.length === 0) return;
   const parse = readHistoryFile();
   if (parse.kind === "corrupt") {
@@ -172,24 +181,27 @@ export function appendPrdHistory(records: readonly StoryTransitionRecord[]): voi
   writeHistoryFile({ records: [...base.records, ...records], adjudicatedThrough: base.adjudicatedThrough });
 }
 
+
 /** Every recorded transition (forensic view). */
-export function readPrdHistory(): StoryTransitionRecord[] {
+export function readPhaseHistory(): StoryTransitionRecord[] {
   const parse = readHistoryFile();
   return parse.kind === "ok" ? [...parse.file.records] : [];
 }
 
+
 /** Only transitions after the last completed adjudication (detection view). */
-export function readActivePrdHistory(): StoryTransitionRecord[] {
+export function readActivePhaseHistory(): StoryTransitionRecord[] {
   const parse = readHistoryFile();
   return parse.kind === "ok" ? parse.file.records.slice(parse.file.adjudicatedThrough) : [];
 }
+
 
 /**
  * Advance the watermark so every transition recorded so far is considered
  * resolved. Called only when an adjudication completes successfully; records
  * are retained, but they no longer count toward future oscillation detection.
  */
-export function markPrdHistoryAdjudicated(): void {
+export function markPhaseHistoryAdjudicated(): void {
   const parse = readHistoryFile();
   if (parse.kind === "empty") return;
   if (parse.kind === "corrupt") {
@@ -199,9 +211,13 @@ export function markPrdHistoryAdjudicated(): void {
   writeHistoryFile({ records: parse.file.records, adjudicatedThrough: parse.file.records.length });
 }
 
-export function clearPrdHistory(): void {
-  tolerantRm(prdHistoryPath());
+
+export function clearPhaseHistory(): void {
+  tolerantRm(phaseHistoryPath());
+  // Also clear any leftover legacy file so --fresh does not leave stale passes history.
+  tolerantRm(join(requireConfigDir(), LEGACY_PRD_HISTORY_FILE_NAME));
 }
+
 
 function parseCompletionRecord(value: unknown): AdjudicationCompletionRecord | null {
   if (!isRecord(value)) return null;
@@ -314,14 +330,21 @@ export function clearAdjudicateSession(): void {
 }
 
 export function buildAdjudicateReason(verdict: Extract<OscillationVerdict, { oscillating: true }>): string {
-  const flipCount = verdict.trail.filter((transition) => transition.from && !transition.to).length;
+  const demotions = verdict.trail.filter(
+    (transition) => transition.source === "signal" && comparePhase(transition.to, transition.from) < 0,
+  );
+  const demotionCount = demotions.length;
+  const demotionSummary =
+    demotions.length === 0
+      ? ""
+      : ` (${demotions.map((t) => `${t.from}→${t.to}`).join(", ")})`;
   const trailLines = verdict.trail.map(
     (transition) =>
-      `  - iteration ${transition.iteration} step ${transition.stepName}: ${transition.from}->${transition.to} at ${transition.at}`,
+      `  - iteration ${transition.iteration} step ${transition.stepName}: ${transition.from}->${transition.to} (${transition.source}) at ${transition.at}`,
   );
   return [
-    `PRD oscillation detected: story ${verdict.storyId} flipped passes true->false ${flipCount} times.`,
+    `Phase oscillation detected: story ${verdict.storyId} was demoted ${demotionCount} times${demotionSummary}.`,
     ...trailLines,
-    "An adjudication step should resolve the contract conflict; see .looper-prd-history.json.",
+    "An adjudication step should resolve the contract conflict; see .looper-phase-history.json.",
   ].join("\n");
 }

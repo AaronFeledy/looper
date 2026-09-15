@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { DEFAULT_STEP_TIMEOUT_MS } from "../config/tunables.ts";
-import { STORY_PHASE_ORDER, isValidPhase, type StoryPhase } from "./story-state-files.ts";
+import { STORY_PHASE_ORDER, comparePhase, isValidPhase, type StoryPhase } from "./story-state-files.ts";
 
 export type PermissionAction = "always" | "once" | "reject" | "ask";
 
@@ -23,8 +23,8 @@ export type VariantConfig = string | null;
 
 export type GateConfig = {
   readonly branch?: "story" | "main";
-  readonly prdPasses?: true;
   readonly phase?: StoryPhase;
+  readonly phaseBelow?: StoryPhase;
   readonly script?: string;
 };
 
@@ -43,8 +43,33 @@ export type LoadedStep = {
   questionPolicy?: QuestionPolicy;
   contextPolicy?: ContextPolicyOverride;
   gate?: GateConfig;
+  /** Required outcome phase signal for the step (requires top-level `prd:`). */
+  expects?: StoryPhase;
   setsPhase?: StoryPhase;
 };
+
+export const DEFAULT_TERMINAL_PHASE: StoryPhase = "merged";
+export const DEFAULT_MAIN_BRANCH = "main";
+
+const PRD_PASSES_DEPRECATION =
+  'gate.prdPasses is deprecated; use gate.phase: implemented instead (prdPasses was accepted as an alias)';
+
+/** Soft warnings collected during the active config-load call. Cleared at begin; snapshotted onto RuntimeConfig. */
+let configLoadWarnings: string[] = [];
+
+function noteConfigWarning(message: string): void {
+  if (!configLoadWarnings.includes(message)) configLoadWarnings.push(message);
+}
+
+function beginConfigLoad(): void {
+  configLoadWarnings = [];
+}
+
+function finishConfigLoadWarnings(): readonly string[] {
+  const out = configLoadWarnings;
+  configLoadWarnings = [];
+  return Object.freeze(out.slice()) as readonly string[];
+}
 
 // Config file name candidates, in resolution order. `.yml` is preferred over
 // `.yaml`; dot-prefixed variants are last-resort fallbacks.
@@ -66,6 +91,7 @@ type RawStep = {
   questionPolicy?: unknown;
   context?: unknown;
   gate?: unknown;
+  expects?: unknown;
   setsPhase?: unknown;
 };
 
@@ -84,6 +110,8 @@ type RawConfig = {
   prd?: unknown;
   prdFlipThreshold?: unknown;
   storyIdPattern?: unknown;
+  terminalPhase?: unknown;
+  mainBranch?: unknown;
   stall?: unknown;
 };
 
@@ -116,9 +144,15 @@ export type RuntimeConfig = {
   prdDir?: string;
   prdFlipThreshold?: number;
   storyIdPattern?: string;
+  /** Phase at or past which a story is considered complete for termination/selection. Default: merged. */
+  terminalPhase: StoryPhase;
+  /** Mainline branch name used for derived merged checks. Default: main. */
+  mainBranch: string;
   stall?: StallConfig;
   useSessionIdle: boolean;
   validateResources: boolean;
+  /** Soft load-time warnings (deprecations, etc.). Empty when the config is clean. */
+  warnings: readonly string[];
 };
 
 export type StallConfig = {
@@ -212,9 +246,10 @@ function parseGateConfig(value: unknown, label: string): GateConfig | undefined 
   }
 
   let branch: GateConfig["branch"];
-  let prdPasses: GateConfig["prdPasses"];
   let phase: StoryPhase | undefined;
+  let phaseBelow: StoryPhase | undefined;
   let script: string | undefined;
+  let sawPrdPasses = false;
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     switch (key) {
       case "branch":
@@ -224,11 +259,15 @@ function parseGateConfig(value: unknown, label: string): GateConfig | undefined 
         branch = entry;
         break;
       case "prdPasses":
+        // Back-compat alias of phase: implemented. Never stored on the loaded gate.
         if (entry !== true) throw new Error(`${label}.prdPasses must be true`);
-        prdPasses = true;
+        sawPrdPasses = true;
         break;
       case "phase":
         phase = storyPhaseValue(entry, `${label}.phase`);
+        break;
+      case "phaseBelow":
+        phaseBelow = storyPhaseValue(entry, `${label}.phaseBelow`);
         break;
       case "script":
         if (typeof entry !== "string") throw new Error(`${label}.script must be a string`);
@@ -236,15 +275,23 @@ function parseGateConfig(value: unknown, label: string): GateConfig | undefined 
         script = entry;
         break;
       default:
-        throw new Error(`${label}.${key} is not a valid gate key (valid keys: branch, prdPasses, phase, script)`);
+        throw new Error(
+          `${label}.${key} is not a valid gate key (valid keys: branch, prdPasses, phase, phaseBelow, script)`,
+        );
     }
   }
 
-  if (branch === undefined && prdPasses === undefined && phase === undefined && script === undefined) return undefined;
+  if (sawPrdPasses) {
+    noteConfigWarning(PRD_PASSES_DEPRECATION);
+    // Explicit phase wins; prdPasses only supplies the default when phase is absent.
+    if (phase === undefined) phase = "implemented";
+  }
+
+  if (branch === undefined && phase === undefined && phaseBelow === undefined && script === undefined) return undefined;
   return {
     ...(branch !== undefined ? { branch } : {}),
-    ...(prdPasses !== undefined ? { prdPasses } : {}),
     ...(phase !== undefined ? { phase } : {}),
+    ...(phaseBelow !== undefined ? { phaseBelow } : {}),
     ...(script !== undefined ? { script } : {}),
   };
 }
@@ -374,6 +421,13 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     throw new Error(`${input.label} must be a mapping`);
   }
   const rawStep = input.rawStep as RawStep;
+  const expects = rawStep.expects === undefined ? undefined : storyPhaseValue(rawStep.expects, `${input.label}.expects`);
+  const setsPhase = rawStep.setsPhase === undefined ? undefined : storyPhaseValue(rawStep.setsPhase, `${input.label}.setsPhase`);
+  if (expects !== undefined && setsPhase !== undefined && comparePhase(setsPhase, expects) > 0) {
+    // setsPhase is applied after the outcome contract is satisfied; letting it
+    // exceed `expects` would promote a story past what the step actually proved.
+    throw new Error(`${input.label}.setsPhase (${setsPhase}) must not be later than ${input.label}.expects (${expects})`);
+  }
   return {
     name: stringValue(rawStep.name, `${input.label}.name`, input.defaultName),
     agent: optionalNonEmptyStringValue(rawStep.agent, `${input.label}.agent`),
@@ -389,7 +443,8 @@ function parseConfiguredStep(input: ConfiguredStepInput): LoadedStep {
     questionPolicy: parseQuestionPolicy(rawStep.questionPolicy, `${input.label}.questionPolicy`),
     contextPolicy: parseContextPolicy(rawStep.context, `${input.label}.context`),
     gate: parseGateConfig(rawStep.gate, `${input.label}.gate`),
-    setsPhase: rawStep.setsPhase === undefined ? undefined : storyPhaseValue(rawStep.setsPhase, `${input.label}.setsPhase`),
+    expects,
+    setsPhase,
   };
 }
 
@@ -531,7 +586,20 @@ function parseStallConfig(value: unknown, label: string): StallConfig | undefine
   };
 }
 
+function stepRequiresPrd(step: LoadedStep): boolean {
+  return step.gate?.phase !== undefined || step.gate?.phaseBelow !== undefined || step.expects !== undefined;
+}
+
+function describePrdRequirement(step: LoadedStep): string {
+  const parts: string[] = [];
+  if (step.gate?.phase !== undefined) parts.push("gate.phase");
+  if (step.gate?.phaseBelow !== undefined) parts.push("gate.phaseBelow");
+  if (step.expects !== undefined) parts.push("expects");
+  return parts.join(", ");
+}
+
 export function loadRuntimeConfig(configDir: string, repoDir: string = process.cwd()): RuntimeConfig {
+  beginConfigLoad();
   const rawConfig = loadRawConfig(configDir);
   let opencodeServerUrl: string | undefined;
   let title: TitleGenConfig | undefined;
@@ -550,22 +618,34 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
   const contextPolicy = parseContextPolicy(rawConfig.context, "context");
   const prdRaw = optionalNonEmptyStringValue(rawConfig.prd, "prd");
   const prdDir = prdRaw === undefined ? undefined : isAbsolute(prdRaw) ? prdRaw : resolve(repoDir, prdRaw);
+  // Always parse regular + adjudicate steps so gate.prdPasses deprecation warnings are
+  // collected even when prd: is present (the requires-prd check only runs when absent).
+  const rootTimeoutMs = timeoutValue(rawConfig.timeout, "timeout");
+  const adjudicateStep =
+    rawConfig.adjudicate === undefined
+      ? undefined
+      : parseConfiguredStep({ configDir, rawStep: rawConfig.adjudicate, label: "adjudicate", defaultName: "adjudicate", rootTimeoutMs });
+  const configuredSteps = parseConfiguredSteps(configDir, rawConfig);
   if (prdDir === undefined) {
-    const rootTimeoutMs = timeoutValue(rawConfig.timeout, "timeout");
-    const adjudicateStep =
-      rawConfig.adjudicate === undefined
-        ? undefined
-        : parseConfiguredStep({ configDir, rawStep: rawConfig.adjudicate, label: "adjudicate", defaultName: "adjudicate", rootTimeoutMs });
-    const stepRequiringPrd = [...parseConfiguredSteps(configDir, rawConfig), ...(adjudicateStep === undefined ? [] : [adjudicateStep])].find(
-      (step) => step.gate?.prdPasses === true,
+    const stepRequiringPrd = [...configuredSteps, ...(adjudicateStep === undefined ? [] : [adjudicateStep])].find(
+      (step) => stepRequiresPrd(step),
     );
     if (stepRequiringPrd !== undefined) {
-      throw new Error(`${stepRequiringPrd.name} gate requires top-level prd: when using gate.prdPasses`);
+      throw new Error(
+        `${stepRequiringPrd.name} requires top-level prd: when using ${describePrdRequirement(stepRequiringPrd)}`,
+      );
     }
   }
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
   const storyIdPattern = optionalNonEmptyStringValue(rawConfig.storyIdPattern, "storyIdPattern");
+  const terminalPhase =
+    rawConfig.terminalPhase === undefined
+      ? DEFAULT_TERMINAL_PHASE
+      : storyPhaseValue(rawConfig.terminalPhase, "terminalPhase");
+  const mainBranchParsed = optionalNonEmptyStringValue(rawConfig.mainBranch, "mainBranch");
+  const mainBranch = mainBranchParsed ?? DEFAULT_MAIN_BRANCH;
   const stall = parseStallConfig(rawConfig.stall, "stall");
+  const warnings = finishConfigLoadWarnings();
   return {
     ...(opencodeServerUrl !== undefined ? { opencodeServerUrl } : {}),
     ...(title !== undefined ? { title } : {}),
@@ -576,9 +656,12 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+    terminalPhase,
+    mainBranch,
     ...(stall !== undefined ? { stall } : {}),
     useSessionIdle: booleanFlagValue(rawConfig.useSessionIdle, "useSessionIdle", false),
     validateResources: booleanFlagValue(rawConfig.validateResources, "validateResources", false),
+    warnings,
   };
 }
 
@@ -590,20 +673,32 @@ export function assertPromptFilesExist(steps: readonly LoadedStep[]): void {
 }
 
 export function loadSteps(configDir: string): LoadedStep[] {
-  const rawConfig = loadRawConfig(configDir);
-  const steps = parseConfiguredSteps(configDir, rawConfig);
-  if (steps.length === 0) throw new Error(`${CONFIG_FILE_NAME} must define at least one step`);
-  return steps;
+  beginConfigLoad();
+  try {
+    const rawConfig = loadRawConfig(configDir);
+    const steps = parseConfiguredSteps(configDir, rawConfig);
+    if (steps.length === 0) throw new Error(`${CONFIG_FILE_NAME} must define at least one step`);
+    return steps;
+  } finally {
+    // Warnings for deprecations live on RuntimeConfig via loadRuntimeConfig; discard
+    // any collected during the steps-only load so module state never leaks across calls.
+    finishConfigLoadWarnings();
+  }
 }
 
 export function loadAdjudicateStep(configDir: string): LoadedStep | undefined {
-  const rawConfig = loadRawConfig(configDir);
-  if (rawConfig.adjudicate === undefined) return undefined;
-  return parseConfiguredStep({
-    configDir,
-    rawStep: rawConfig.adjudicate,
-    label: "adjudicate",
-    defaultName: "adjudicate",
-    rootTimeoutMs: timeoutValue(rawConfig.timeout, "timeout"),
-  });
+  beginConfigLoad();
+  try {
+    const rawConfig = loadRawConfig(configDir);
+    if (rawConfig.adjudicate === undefined) return undefined;
+    return parseConfiguredStep({
+      configDir,
+      rawStep: rawConfig.adjudicate,
+      label: "adjudicate",
+      defaultName: "adjudicate",
+      rootTimeoutMs: timeoutValue(rawConfig.timeout, "timeout"),
+    });
+  } finally {
+    finishConfigLoadWarnings();
+  }
 }

@@ -3,7 +3,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { countPrd, derivePrdPaths, prdIndexPath, PRD_INDEX_FILENAME, PRD_PROGRESS_FILENAME, readPrd } from "../src/lib/prd.ts";
+import {
+  countPrd,
+  derivePrdPaths,
+  prdIndexPath,
+  PRD_INDEX_FILENAME,
+  PRD_PROGRESS_FILENAME,
+  readPrdStories,
+  type PrdStory,
+} from "../src/lib/prd.ts";
 
 function withPrdDir(raw: string, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "looper-prd-"));
@@ -15,80 +23,125 @@ function withPrdDir(raw: string, run: (dir: string) => void): void {
   }
 }
 
-describe("prd.json parsing", () => {
-  test("counts stories as remaining when passes is not true", () => {
-    const raw = JSON.stringify({ userStories: [{ passes: true }, { passes: false }, { passes: null }, {}] });
+describe("readPrdStories", () => {
+  test("parses id, title, priority, and dependsOn and ignores passes", () => {
+    // Given a PRD with full story fields plus a leftover passes flag.
+    const raw = JSON.stringify({
+      userStories: [
+        {
+          id: "US-2",
+          title: "Second",
+          priority: 2,
+          dependsOn: ["US-1"],
+          passes: true,
+        },
+        {
+          id: "US-1",
+          title: "First",
+          priority: 1,
+          dependsOn: [],
+          passes: false,
+        },
+      ],
+    });
 
-    const result = countPrd(raw);
+    // When stories are read.
+    let stories: PrdStory[] | undefined;
+    withPrdDir(raw, (dir) => {
+      stories = readPrdStories(prdIndexPath(dir));
+    });
 
-    expect(result).toEqual({ kind: "ok", remaining: 3, total: 4 });
+    // Then identity fields are kept and passes is ignored.
+    expect(stories).toEqual([
+      { id: "US-2", title: "Second", priority: 2, dependsOn: ["US-1"] },
+      { id: "US-1", title: "First", priority: 1, dependsOn: [] },
+    ]);
   });
 
-  test("counts non-object stories as remaining", () => {
-    const raw = JSON.stringify({ userStories: [{ passes: true }, null, "story"] });
+  test("skips entries without a usable id and omits optional title when absent", () => {
+    const raw = JSON.stringify({
+      userStories: [
+        { passes: true },
+        { id: "", title: "empty" },
+        { id: "US-OK" },
+        { id: "US-DEPS", dependsOn: ["US-OK", 1, "", null, "US-OTHER"] },
+      ],
+    });
 
-    const result = countPrd(raw);
+    let stories: PrdStory[] | undefined;
+    withPrdDir(raw, (dir) => {
+      stories = readPrdStories(prdIndexPath(dir));
+    });
 
-    expect(result).toEqual({ kind: "ok", remaining: 2, total: 3 });
+    expect(stories).toEqual([
+      { id: "US-OK", dependsOn: [] },
+      { id: "US-DEPS", dependsOn: ["US-OK", "US-OTHER"] },
+    ]);
   });
 
-  test("returns an error for malformed JSON", () => {
-    const result = countPrd("not json");
+  test("returns undefined for missing file, invalid JSON, or missing userStories", () => {
+    expect(readPrdStories(join(tmpdir(), "looper-prd-missing", "prd.json"))).toBeUndefined();
 
-    if (result.kind !== "error") throw new Error("expected malformed JSON to return an error");
-    expect(result.message).toContain("invalid JSON");
-  });
+    withPrdDir("not json", (dir) => {
+      expect(readPrdStories(prdIndexPath(dir))).toBeUndefined();
+    });
 
-  test("returns an error when userStories is missing", () => {
-    const result = countPrd(JSON.stringify({ stories: [] }));
-
-    expect(result).toEqual({ kind: "error", message: "missing userStories" });
+    withPrdDir(JSON.stringify({ stories: [] }), (dir) => {
+      expect(readPrdStories(prdIndexPath(dir))).toBeUndefined();
+    });
   });
 });
 
-describe("prd.json reading", () => {
+describe("countPrd", () => {
+  test("counts remaining from effective phases vs terminal", () => {
+    // Given three stories and mixed effective phases against terminal merged.
+    const stories: PrdStory[] = [
+      { id: "A", title: "a", dependsOn: [] },
+      { id: "B", title: "b", dependsOn: [] },
+      { id: "C", title: "c", dependsOn: [] },
+    ];
+
+    // When counting with A merged, B published, C missing (building).
+    const result = countPrd({
+      stories,
+      phases: { A: "merged", B: "published" },
+      terminal: "merged",
+    });
+
+    // Then only A is complete.
+    expect(result).toEqual({ remaining: 2, total: 3 });
+  });
+
+  test("treats phase at or past terminal as complete", () => {
+    const stories: PrdStory[] = [
+      { id: "A", title: "a", dependsOn: [] },
+      { id: "B", title: "b", dependsOn: [] },
+    ];
+
+    const result = countPrd({
+      stories,
+      phases: { A: "verified", B: "reviewed" },
+      terminal: "verified",
+    });
+
+    expect(result).toEqual({ remaining: 1, total: 2 });
+  });
+});
+
+describe("PRD path helpers", () => {
   test("uses the literal prd.json index filename", () => {
     expect(PRD_INDEX_FILENAME).toBe("prd.json");
     expect(prdIndexPath("/tmp/example")).toBe("/tmp/example/prd.json");
-  });
-
-  test("returns an error for a nonexistent directory or file", () => {
-    const result = readPrd(join(tmpdir(), "looper-prd-does-not-exist"));
-
-    if (result.kind !== "error") throw new Error("expected missing prd.json to return an error");
-    expect(result.message).toBe("prd.json not found");
-  });
-
-  test("maps invalid file content to an error result", () => {
-    withPrdDir("not json", (dir) => {
-      const result = readPrd(dir);
-
-      if (result.kind !== "error") throw new Error("expected invalid prd.json to return an error");
-      expect(result.message).toContain("invalid JSON");
-    });
-  });
-
-  test("counts a deterministic prd.json fixture", () => {
-    const raw = JSON.stringify({ userStories: [{ passes: true }, { passes: false }, { passes: null }, {}] });
-
-    withPrdDir(raw, (dir) => {
-      const result = readPrd(dir);
-
-      expect(result).toEqual({ kind: "ok", remaining: 3, total: 4 });
-    });
   });
 });
 
 describe("PRD path derivation", () => {
   test("uses repo-relative display paths when the PRD directory is inside the repository", () => {
-    // Given an absolute PRD directory nested inside the repository.
     const repoDir = "/home/aaron/projects/looper";
     const prdDir = join(repoDir, "product", "prd");
 
-    // When display paths are derived.
     const paths = derivePrdPaths(prdDir, repoDir);
 
-    // Then every path is repository-relative and includes the conventional filenames.
     expect(paths).toEqual({
       dir: join("product", "prd"),
       index: join("product", "prd", PRD_INDEX_FILENAME),
@@ -98,13 +151,10 @@ describe("PRD path derivation", () => {
   });
 
   test("uses absolute display paths when the PRD directory is outside the repository", () => {
-    // Given an absolute PRD directory outside the repository.
     const prdDir = "/srv/shared/product-prd";
 
-    // When display paths are derived.
     const paths = derivePrdPaths(prdDir, "/home/aaron/projects/looper");
 
-    // Then every path remains absolute.
     expect(paths).toEqual({
       dir: prdDir,
       index: join(prdDir, PRD_INDEX_FILENAME),

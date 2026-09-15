@@ -12,7 +12,11 @@ import {
   resolvePermissionAction,
   type PermissionAction,
 } from "../src/lib/config.ts";
-import { prdFlipThreshold } from "../src/config/tunables.ts";
+import {
+  outcomeReminderMinMs,
+  prdFlipThreshold,
+  storyFetchTimeoutMs,
+} from "../src/config/tunables.ts";
 
 function withConfigDir(contents: string, run: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), "looper-config-"));
@@ -82,7 +86,7 @@ describe("loadSteps config parsing", () => {
     });
   });
 
-  test("parses every gate condition and setsPhase", () => {
+  test("parses every gate condition, expects, and setsPhase", () => {
     withConfigDir(
       [
         "prd: specs/beta-1",
@@ -91,23 +95,133 @@ describe("loadSteps config parsing", () => {
         "    prompt: hi",
         "    gate:",
         "      branch: story",
-        "      prdPasses: true",
         "      phase: reviewed",
+        "      phaseBelow: verified",
         "      script: test -f ready",
-        "    setsPhase: verified",
+        "    expects: verified",
+        "    setsPhase: implemented",
       ].join("\n"),
       (dir) => {
         expect(loadSteps(dir)[0]).toMatchObject({
           gate: {
             branch: "story",
-            prdPasses: true,
             phase: "reviewed",
+            phaseBelow: "verified",
             script: "test -f ready",
           },
-          setsPhase: "verified",
+          expects: "verified",
+          setsPhase: "implemented",
         });
       },
     );
+  });
+
+  test("rejects setsPhase later than expects", () => {
+    withConfigDir(
+      ["prd: specs/beta-1", "steps:", "  build:", "    prompt: hi", "    expects: implemented", "    setsPhase: verified"].join("\n"),
+      (dir) => {
+        expect(() => loadSteps(dir)).toThrow("steps.build.setsPhase (verified) must not be later than steps.build.expects (implemented)");
+      },
+    );
+  });
+
+  test("aliases gate.prdPasses to phase: implemented and collects a deprecation warning", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      prdPasses: true",
+      ].join("\n"),
+      (dir) => {
+        expect(loadSteps(dir)[0]!.gate).toEqual({ phase: "implemented" });
+        const warnings = loadRuntimeConfig(dir).warnings;
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/prdPasses.*deprecated/i);
+        expect(warnings[0]).toMatch(/phase:\s*implemented/i);
+      },
+    );
+  });
+
+  test("prdPasses alias does not overwrite an explicit gate.phase", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      prdPasses: true",
+        "      phase: reviewed",
+      ].join("\n"),
+      (dir) => {
+        expect(loadSteps(dir)[0]!.gate).toEqual({ phase: "reviewed" });
+        const warnings = loadRuntimeConfig(dir).warnings;
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatch(/prdPasses.*deprecated/i);
+      },
+    );
+  });
+
+  test("multiple prdPasses aliases yield a single deprecation warning on RuntimeConfig", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "adjudicate:",
+        "  prompt: hi",
+        "  gate:",
+        "    prdPasses: true",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      prdPasses: true",
+        "  review:",
+        "    prompt: hi",
+        "    gate:",
+        "      prdPasses: true",
+      ].join("\n"),
+      (dir) => {
+        const cfg = loadRuntimeConfig(dir);
+        expect(cfg.warnings).toHaveLength(1);
+        expect(cfg.warnings[0]).toMatch(/prdPasses.*deprecated/i);
+        expect(loadSteps(dir).map((s) => s.gate)).toEqual([
+          { phase: "implemented" },
+          { phase: "implemented" },
+        ]);
+        expect(loadAdjudicateStep(dir)!.gate).toEqual({ phase: "implemented" });
+      },
+    );
+  });
+
+  test("clean configs yield an empty RuntimeConfig.warnings list", () => {
+    withConfigDir(
+      [
+        "prd: specs/beta-1",
+        "steps:",
+        "  build:",
+        "    prompt: hi",
+        "    gate:",
+        "      phase: reviewed",
+      ].join("\n"),
+      (dir) => {
+        expect(loadRuntimeConfig(dir).warnings).toEqual([]);
+      },
+    );
+  });
+
+  test("rejects an invalid expects phase", () => {
+    withConfigDir("prd: specs/beta-1\nsteps:\n  build:\n    prompt: hi\n    expects: shipped\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.expects must be one of:/);
+    });
+  });
+
+  test("rejects an invalid gate.phaseBelow", () => {
+    withConfigDir("prd: specs/beta-1\nsteps:\n  build:\n    prompt: hi\n    gate:\n      phaseBelow: shipped\n", (dir) => {
+      expect(() => loadSteps(dir)).toThrow(/steps\.build\.gate\.phaseBelow must be one of:/);
+    });
   });
 
   test.each([
@@ -116,6 +230,7 @@ describe("loadSteps config parsing", () => {
     ["branch is invalid", "    gate:\n      branch: release", /steps\.build\.gate\.branch must be \"story\" or \"main\"/],
     ["prdPasses is false", "    gate:\n      prdPasses: false", /steps\.build\.gate\.prdPasses must be true/],
     ["phase is invalid", "    gate:\n      phase: shipped", /steps\.build\.gate\.phase must be one of:/],
+    ["phaseBelow is invalid", "    gate:\n      phaseBelow: shipped", /steps\.build\.gate\.phaseBelow must be one of:/],
     ["script is not a string", "    gate:\n      script: 42", /steps\.build\.gate\.script must be a string/],
     ["script is empty", '    gate:\n      script: ""', /steps\.build\.gate\.script cannot be empty/],
   ])("rejects an invalid gate when %s", (_description, gateYaml, expected) => {
@@ -310,8 +425,11 @@ describe("loadRuntimeConfig policy and flags", () => {
       expect(cfg.questionPolicy).toBeUndefined();
       expect(cfg.prdDir).toBeUndefined();
       expect(cfg.storyIdPattern).toBeUndefined();
+      expect(cfg.terminalPhase).toBe("merged");
+      expect(cfg.mainBranch).toBe("main");
       expect(cfg.useSessionIdle).toBe(false);
       expect(cfg.validateResources).toBe(false);
+      expect(cfg.warnings).toEqual([]);
     });
   });
 
@@ -351,15 +469,55 @@ describe("loadRuntimeConfig policy and flags", () => {
     });
   });
 
-  test("rejects a prdPasses gate without prd, naming the step", () => {
+  test("rejects a prdPasses-aliased phase gate without prd, naming the step", () => {
     withConfigDir("steps:\n  build-release:\n    prompt: hi\n    gate:\n      prdPasses: true\n", (dir) => {
-      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd: when using gate\.prdPasses/);
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Build Release.*requires top-level prd:/);
     });
   });
 
-  test("allows a phase-only gate without prd", () => {
+  test("rejects a phase gate without prd, naming the step", () => {
     withConfigDir("steps:\n  publish:\n    prompt: hi\n    gate:\n      phase: reviewed\n", (dir) => {
-      expect(loadRuntimeConfig(dir).prdDir).toBeUndefined();
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Publish.*requires top-level prd:/);
+    });
+  });
+
+  test("rejects a phaseBelow gate without prd, naming the step", () => {
+    withConfigDir("steps:\n  cleanup:\n    prompt: hi\n    gate:\n      phaseBelow: published\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Cleanup.*requires top-level prd:/);
+    });
+  });
+
+  test("rejects expects without prd, naming the step", () => {
+    withConfigDir("steps:\n  verify:\n    prompt: hi\n    expects: verified\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/Verify.*requires top-level prd:/);
+    });
+  });
+
+  test("defaults terminalPhase to merged and mainBranch to main", () => {
+    withConfigDir("steps:\n  build:\n    prompt: hi\n", (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.terminalPhase).toBe("merged");
+      expect(cfg.mainBranch).toBe("main");
+    });
+  });
+
+  test("parses terminalPhase and mainBranch", () => {
+    withConfigDir("terminalPhase: published\nmainBranch: master\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      const cfg = loadRuntimeConfig(dir);
+      expect(cfg.terminalPhase).toBe("published");
+      expect(cfg.mainBranch).toBe("master");
+    });
+  });
+
+  test("rejects an invalid terminalPhase", () => {
+    withConfigDir("terminalPhase: done\nsteps:\n  build:\n    prompt: hi\n", (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/terminalPhase must be one of:/);
+    });
+  });
+
+  test("rejects an empty mainBranch", () => {
+    withConfigDir('mainBranch: ""\nsteps:\n  build:\n    prompt: hi\n', (dir) => {
+      expect(() => loadRuntimeConfig(dir)).toThrow(/mainBranch cannot be empty/);
     });
   });
 
@@ -664,6 +822,41 @@ describe("resolvePermissionAction", () => {
     const action = resolvePermissionAction("unknown", {}, {});
 
     expect(action).toBe("ask");
+  });
+});
+
+describe("story tracking tunables", () => {
+  function withEnv(name: string, value: string | undefined, run: () => void): void {
+    const original = process.env[name];
+    try {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+      run();
+    } finally {
+      if (original === undefined) delete process.env[name];
+      else process.env[name] = original;
+    }
+  }
+
+  test("storyFetchTimeoutMs defaults to 15000 and accepts 0 to disable", () => {
+    withEnv("LOOPER_STORY_FETCH_TIMEOUT_MS", undefined, () => {
+      expect(storyFetchTimeoutMs()).toBe(15_000);
+    });
+    withEnv("LOOPER_STORY_FETCH_TIMEOUT_MS", "0", () => {
+      expect(storyFetchTimeoutMs()).toBe(0);
+    });
+    withEnv("LOOPER_STORY_FETCH_TIMEOUT_MS", "25000", () => {
+      expect(storyFetchTimeoutMs()).toBe(25_000);
+    });
+  });
+
+  test("outcomeReminderMinMs defaults to 60000", () => {
+    withEnv("LOOPER_OUTCOME_REMINDER_MIN_MS", undefined, () => {
+      expect(outcomeReminderMinMs()).toBe(60_000);
+    });
+    withEnv("LOOPER_OUTCOME_REMINDER_MIN_MS", "120000", () => {
+      expect(outcomeReminderMinMs()).toBe(120_000);
+    });
   });
 });
 

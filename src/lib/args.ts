@@ -4,7 +4,9 @@ export type SignalCommand =
   | { readonly kind: "adjudicate"; readonly reason: string }
   | { readonly kind: "stop"; readonly reason: string }
   | { readonly kind: "stop-after-iteration"; readonly reason: string }
-  | { readonly kind: "story-phase"; readonly phase: StoryPhase; readonly story?: string };
+  | { readonly kind: "story-phase"; readonly phase: StoryPhase; readonly story?: string; readonly reason?: string }
+  | { readonly kind: "blocked"; readonly reason: string; readonly story?: string }
+  | { readonly kind: "no-op"; readonly reason: string; readonly story?: string };
 
 export type Command =
   | { readonly kind: "run" }
@@ -17,6 +19,8 @@ export type Options = {
   readonly command: Command;
   readonly configDir?: string;
   readonly fresh: boolean;
+  /** Clear `.looper-story-state.json`. Only valid together with `--fresh`. */
+  readonly resetStories: boolean;
   readonly maxIterations: number;
   readonly start: boolean;
   readonly waitProvided: boolean;
@@ -46,8 +50,12 @@ Commands:
                       Request an immediate stop.
   signal stop-after-iteration --reason <text>
                       Request a stop after the current iteration.
-  signal story-phase <phase> [--story <ID>]
+  signal story-phase <phase> [--story <ID>] [--reason <text>]
                       Set a story phase; defaults the story ID from the current branch.
+  signal blocked --reason <text> [--story <ID>]
+                      Record that work is blocked (story optional; derived from branch when possible).
+  signal no-op --reason <text> [--story <ID>]
+                      Record that there was nothing to do (story optional).
 
 Arguments:
   max_iterations      Stop after this many iterations if no step created .looper-stop. Default: 100.
@@ -57,13 +65,19 @@ Flags:
   --config-dir=path   Use this directory for config, prompts, and state files. Overrides auto-detection and LOOPER_CONFIG_DIR.
   --start             Start immediately. Without this, the TUI waits for [g]o.
   --fresh             Ignore any saved checkpoint and start a new run from iteration 1, step 1.
+                      Story phases in .looper-story-state.json are kept unless --reset-stories is also set.
+  --reset-stories     Clear story phase state. Only valid together with --fresh.
   --continue          Deprecated alias of --start (resuming is now the default).
   --wait[=minutes]    Wait between iterations. Without minutes, wait for the previous iteration duration.
   -h, --help          Show this help.
 
+Experimental UI:
+  LOOPER_UI=constellation looper    Animated agent bubbles with simultaneous activity summaries.
+  LOOPER_REDUCED_MOTION=1           Keep the constellation still (also toggle with [m]).
+
 By default looper resumes the previous run where it left off: it restores the iteration and step, and
 reattaches to the in-progress opencode session if it is still active (otherwise it restarts that step).
-Use --fresh to start over. A run that reaches max_iterations clears its checkpoint automatically.
+Use --fresh to start over (story phases survive unless --reset-stories is also passed). A run that reaches max_iterations clears its checkpoint automatically.
 
 Without --config-dir, looper looks for its config dir under \$PWD in this order: .looper, .local/looper, .local/.looper.
 If none contain a config file it defaults to .looper. The config file is looper.yml (falling back to looper.yaml, .looper.yml, .looper.yaml).
@@ -74,9 +88,12 @@ Examples:
   looper init                      scaffold .looper/ in the current repo
   looper signal stop --reason "operator request"
   looper signal story-phase verified --story US-074
+  looper signal blocked --reason "permission gate timed out"
+  looper signal no-op --reason "already published"
   looper                           open the TUI, press [g] or [enter] to start
   looper --start                   start immediately, resuming any checkpoint
   looper --fresh --start 5         fresh run, start now, cap at 5 iterations
+  looper --fresh --reset-stories   fresh run and clear story phase state
 `;
 }
 
@@ -153,8 +170,17 @@ function parseSignalCommand(args: readonly string[]): SignalCommand {
     if (phase === undefined) throw new UsageError("signal story-phase requires a phase");
     if (!isValidPhase(phase)) throw new UsageError(`invalid story phase '${phase}'`);
     if (positionals.length !== 2) throw new UsageError(`unexpected signal argument '${positionals[2]}'`);
-    if (reason !== undefined) throw new UsageError("--reason is not valid for signal story-phase");
-    return { kind, phase, ...(story !== undefined ? { story } : {}) };
+    return {
+      kind,
+      phase,
+      ...(story !== undefined ? { story } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+    };
+  }
+  if (kind === "blocked" || kind === "no-op") {
+    if (positionals.length !== 1) throw new UsageError(`unexpected signal argument '${positionals[1]}'`);
+    if (reason === undefined) throw new UsageError(`signal ${kind} requires --reason <text>`);
+    return { kind, reason, ...(story !== undefined ? { story } : {}) };
   }
   if (kind !== "adjudicate" && kind !== "stop" && kind !== "stop-after-iteration") {
     throw new UsageError(`unknown signal '${kind}'`);
@@ -176,6 +202,7 @@ export function parseArgs(argv: readonly string[]): Options {
       command: { kind: "signal", signal: parseSignalCommand(signalArgs) },
       ...(globalArgs.configDir !== undefined ? { configDir: globalArgs.configDir } : {}),
       fresh: false,
+      resetStories: false,
       maxIterations: 100,
       start: false,
       waitProvided: false,
@@ -186,6 +213,7 @@ export function parseArgs(argv: readonly string[]): Options {
   let attach = false;
   let attachUrl: string | undefined;
   let fresh = false;
+  let resetStories = false;
   let maxIterations = 100;
   let start = false;
   let waitProvided = false;
@@ -214,6 +242,11 @@ export function parseArgs(argv: readonly string[]): Options {
 
     if (arg === "--fresh") {
       fresh = true;
+      continue;
+    }
+
+    if (arg === "--reset-stories") {
+      resetStories = true;
       continue;
     }
 
@@ -248,12 +281,17 @@ export function parseArgs(argv: readonly string[]): Options {
     throw new UsageError(`unknown argument '${arg}'`);
   }
 
+  if (resetStories && !fresh) {
+    throw new UsageError("--reset-stories is only valid together with --fresh");
+  }
+
   return {
     attach,
     attachUrl,
     command: commandToken === "init" ? { kind: "init" } : { kind: "run" },
     ...(globalArgs.configDir !== undefined ? { configDir: globalArgs.configDir } : {}),
     fresh,
+    resetStories,
     maxIterations,
     start,
     waitProvided,

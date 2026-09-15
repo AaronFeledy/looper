@@ -4,32 +4,47 @@ import { storyIdFromBranch } from "../lib/story-id.ts";
 export type StoryBranchMismatch = {
   readonly branch: string;
   readonly pattern: string;
+  readonly expectedStoryId?: string;
+  readonly suggestedBranch?: string;
 };
 
 export function decideStoryBranchMismatch(input: {
   readonly initialBranch: string | undefined;
   readonly currentBranch: string | undefined;
   readonly pattern: string;
+  readonly storyIds?: readonly string[];
 }): StoryBranchMismatch | undefined {
   const current = input.currentBranch;
   if (current === undefined || current === input.initialBranch) return undefined;
   if (branchHintFor(current) === undefined) return undefined;
-  if (storyIdFromBranch(current, input.pattern) !== undefined) return undefined;
-  return { branch: current, pattern: input.pattern };
+  if (storyIdFromBranch(current, input.pattern, input.storyIds) !== undefined) return undefined;
+  const basename = current.split("/").at(-1)!;
+  const expectedStoryId = storyIdFromBranch(basename, input.pattern, input.storyIds);
+  return {
+    branch: current,
+    pattern: input.pattern,
+    ...(expectedStoryId !== undefined ? { expectedStoryId, suggestedBranch: basename } : {}),
+  };
 }
 
 export function storyBranchMismatchPrompt(mismatch: StoryBranchMismatch): string {
   return [
-    "Continue working to completion if you haven't already.",
-    `A branch switch to '${mismatch.branch}' was detected; that name is not a story branch (it does not match ${mismatch.pattern}).`,
-    "If this branch is meant to build a user story, rename it so the name matches that pattern, then continue.",
-    "If the work is already complete, report the result.",
+    "Repair the current branch name before completing this step.",
+    `A branch switch to '${mismatch.branch}' was detected; Looper cannot resolve its story ID.`,
+    "When a PRD is configured, use the exact intended story ID from prd.json followed by '-' and a description; preserve the full ID, including any split-story suffix.",
+    "Without a PRD, use the naming pattern below while preserving the intended story ID.",
+    `The fallback story-id pattern for this run is ${mismatch.pattern} (capture group 1 is the story ID).`,
+    ...(mismatch.expectedStoryId !== undefined ? [`Expected story ID: ${mismatch.expectedStoryId}. Suggested branch name: '${mismatch.suggestedBranch}'.`] : []),
+    "Rename the current branch with git branch -m, preserving its commits and working-tree changes. Verify the name with git branch --show-current.",
+    "Do not edit Looper configuration, change PRD story IDs, stop or restart Looper, or signal stop to resolve this naming mismatch.",
+    "Completing the implementation does not complete this repair. Looper will re-read the branch before advancing.",
+    "If an identity-preserving rename is impossible, explain the specific blocker in your reply and leave Looper running.",
     "",
   ].join("\n");
 }
 
 export function storyBranchMismatchLogLine(mismatch: StoryBranchMismatch): string {
-  return `[looper] branch '${mismatch.branch}' does not match story id pattern ${mismatch.pattern}`;
+  return `[looper] branch '${mismatch.branch}' has no recognized story ID (PRD ID prefix or pattern ${mismatch.pattern})`;
 }
 
 export type StoryBranchMismatchMonitor = {
@@ -40,6 +55,7 @@ export type StoryBranchMismatchMonitor = {
 export function createStoryBranchMismatchMonitor(input: {
   readonly initialBranch: string | undefined;
   readonly getBranch: () => string | undefined;
+  readonly getStoryIds?: () => readonly string[] | undefined;
   readonly pattern: string;
   readonly onMismatch?: (mismatch: StoryBranchMismatch) => void;
   readonly pollIntervalMs?: number;
@@ -50,6 +66,7 @@ export function createStoryBranchMismatchMonitor(input: {
       initialBranch: input.initialBranch,
       currentBranch: input.getBranch(),
       pattern: input.pattern,
+      storyIds: input.getStoryIds?.(),
     });
 
   const poll = (): void => {

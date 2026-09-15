@@ -25,6 +25,14 @@ function booleanEnv(name: string, fallback: boolean): boolean {
   return !FALSE_ENV_VALUES.has(value);
 }
 
+export function constellationEnabled(value = process.env.LOOPER_UI): boolean {
+  return value?.trim().toLowerCase() === "constellation";
+}
+
+export function constellationReducedMotion(): boolean {
+  return booleanEnv("LOOPER_REDUCED_MOTION", false);
+}
+
 export function permissionBellEnabled(): boolean {
   // Terminal bell when a request starts waiting on a human. On by default; the TUI only writes it on a TTY.
   return booleanEnv("LOOPER_PERMISSION_BELL", true);
@@ -132,6 +140,19 @@ export function branchDiffCollectionTimeoutMs(): number {
 
 export function gateScriptTimeoutMs(): number {
   return positiveIntegerEnv("LOOPER_GATE_SCRIPT_TIMEOUT_MS", GATE_SCRIPT_TIMEOUT_MS_DEFAULT);
+}
+
+const STORY_FETCH_TIMEOUT_MS_DEFAULT = 15_000;
+const OUTCOME_REMINDER_MIN_MS_DEFAULT = 60_000;
+
+/** Best-effort `git fetch origin <mainBranch>` timeout. Default 15000; 0 disables the fetch. */
+export function storyFetchTimeoutMs(): number {
+  return nonNegativeIntegerEnv("LOOPER_STORY_FETCH_TIMEOUT_MS", STORY_FETCH_TIMEOUT_MS_DEFAULT);
+}
+
+/** Minimum remaining step budget required before sending an expects-outcome reminder. Default 60000. */
+export function outcomeReminderMinMs(): number {
+  return nonNegativeIntegerEnv("LOOPER_OUTCOME_REMINDER_MIN_MS", OUTCOME_REMINDER_MIN_MS_DEFAULT);
 }
 
 export function inheritedRenameDelayMs(): number {
