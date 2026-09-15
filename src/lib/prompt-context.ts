@@ -212,7 +212,7 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
           ...(story.expects !== undefined
             ? [
                 `  expects: ${story.expects}`,
-                `  outcome: end this step with exactly one of: looper signal story-phase ${story.expects} | looper signal story-phase <lower> --reason "<defect>" | looper signal blocked --reason "<why>" | looper signal no-op --reason "<why>"`,
+                `  outcome: run one of these as a shell command (do not print it as your reply): looper signal story-phase ${story.expects} | looper signal story-phase <lower> --reason "<defect>" | looper signal blocked --reason "<why>" | looper signal no-op --reason "<why>"`,
               ]
             : []),
         ].join("\n")

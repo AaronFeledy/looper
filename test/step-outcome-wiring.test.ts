@@ -195,7 +195,7 @@ describe("runIteration outcome wiring", () => {
     // so it cannot satisfy it: the step is reminded once and then fails closed.
     expect(storyState.readPhase("US-1")).toBe("implemented");
     expect(stub.prompts).toHaveLength(2);
-    expect(stub.prompts[1]).toContain("ended without an outcome signal");
+    expect(stub.prompts[1]).toContain("ended without running a looper signal");
     expect(error).toBeInstanceOf(StepFailureError);
   }, 30_000);
 

@@ -253,8 +253,8 @@ entire block independently with `context.prd: false`.
 `story` renders a `story:` block with whatever of `branch`, `storyId`, `phase` (effective), and the branch
 naming rule looper could derive, plus `next: <id> — <title>`, the story the engine selected for this iteration
 (see "Story selection"). `next` is present even when the current branch is not a story branch, so a build step
-knows what to pick up. Steps with `expects:` also get `expects: <phase>` and one `outcome:` line spelling out
-the four signals that can end the step. Each field is omitted individually when unknown, and the whole block is
+knows what to pick up. Steps with `expects:` also get `expects: <phase>` and one `outcome:` line telling the
+agent to **run** (not print) one of the four `looper signal` shell commands. Each field is omitted individually when unknown, and the whole block is
 omitted when nothing in it is derivable (e.g. no git repo and no PRD). Disable it with `context.story: false`.
 
 ### PRD progress

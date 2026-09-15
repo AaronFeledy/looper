@@ -45,7 +45,8 @@ and what "done" means for a single iteration. Keep each iteration small enough t
 finish in one sitting; the loop will run again.
 
 If this config has \`prd:\` set, work the story named under \`next:\` in the looper
-context block, and end your turn with exactly one signal:
+context block, then run exactly one of these as a shell command (do not print it
+as your reply):
 \`looper signal story-phase implemented\` once the work is committed,
 \`looper signal blocked --reason "<what stopped you>"\` if you could not finish, or
 \`looper signal no-op --reason "<why>"\` if there was nothing to do.
