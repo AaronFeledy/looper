@@ -35,17 +35,3 @@ export function recoveryResumeForChoice({
     ...(runState.looperMessageIDs !== undefined ? { looperMessageIDs: [...runState.looperMessageIDs] } : {}),
   };
 }
-
-export function shouldAutoStartSavedSession({
-  started,
-  fresh,
-  stopFilePresent,
-  stopAfterIterationFilePresent,
-}: {
-  started: boolean;
-  fresh: boolean;
-  stopFilePresent: boolean;
-  stopAfterIterationFilePresent: boolean;
-}): boolean {
-  return !started && !fresh && !stopFilePresent && !stopAfterIterationFilePresent;
-}

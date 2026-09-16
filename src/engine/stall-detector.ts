@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { relative } from "node:path";
 
-import type { PrdPassesMap } from "../lib/adjudication-detection.ts";
+import type { StoryPhasesMap } from "../lib/adjudication-detection.ts";
+import { filterMaterialPaths, materialPathsExist, prdDirRelative } from "../lib/material-paths.ts";
 import { storyIdFromBranch } from "../lib/story-id.ts";
-import { readPrdPasses } from "./adjudication-routing.ts";
+import type { StoryPhase } from "../lib/story-state-files.ts";
+
+export { materialPathsExist } from "../lib/material-paths.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -21,7 +23,8 @@ export type StallObservation = {
   readonly worktreeFingerprint: string | undefined;
   /** `true` when work is still running OR liveness could not be determined. */
   readonly inFlight: boolean;
-  readonly passes: PrdPassesMap | undefined;
+  /** Effective phases of all stories; `undefined` when the snapshot is unreadable. */
+  readonly phases: StoryPhasesMap | undefined;
   readonly phase: string | undefined;
   readonly adjudicationCompletions: number;
 };
@@ -41,7 +44,7 @@ function worktreeAdvanced(before: string | undefined, after: string | undefined)
   return before !== after;
 }
 
-function passesEqual(a: PrdPassesMap | undefined, b: PrdPassesMap | undefined): boolean {
+export function phasesEqual(a: StoryPhasesMap | undefined, b: StoryPhasesMap | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;
   const aKeys = Object.keys(a);
   if (aKeys.length !== Object.keys(b).length) return false;
@@ -51,12 +54,12 @@ function passesEqual(a: PrdPassesMap | undefined, b: PrdPassesMap | undefined): 
 /**
  * Pure cross-iteration circuit breaker. An iteration counts as material
  * progress when it produced commits outside the PRD directory, changed the
- * PRD passes map, advanced the story phase, or moved to a different
+ * story phases map, advanced the active story phase, or moved to a different
  * story/branch. K consecutive non-progress iterations, or M completed
  * adjudications for one story within a run, is an unbreakable loop: every
  * step can succeed and every gate can legitimately pass while the run as a
  * whole goes nowhere, so only this cross-iteration view can catch it.
- * Fail-open by design: unknown facts (git failures, unreadable PRD) count as
+ * Fail-open by design: unknown facts (git failures, unreadable phases) count as
  * progress so a flaky environment can never stop a healthy run.
  */
 export function createStallDetector(input: { readonly limits: StallLimits; readonly initialAdjudicationCompletions: number }): StallDetector {
@@ -102,7 +105,7 @@ export function createStallDetector(input: { readonly limits: StallLimits; reado
         observation.branch !== prev.branch ||
         observation.storyId !== prev.storyId ||
         observation.phase !== prev.phase ||
-        !passesEqual(observation.passes, prev.passes);
+        !phasesEqual(observation.phases, prev.phases);
       prev = observation;
       if (progressed) {
         noProgressCount = 0;
@@ -112,7 +115,7 @@ export function createStallDetector(input: { readonly limits: StallLimits; reado
       if (limits.iterations > 0 && noProgressCount >= limits.iterations) {
         return {
           stalled: true,
-          reason: `stall detected: ${noProgressCount} consecutive iterations with no material progress on ${observation.storyId ?? observation.branch} (limit ${limits.iterations}): no commits outside the PRD directory, no PRD passes change, no story phase change. The loop is spinning without advancing; human review required. HEAD ${observation.headCommit ?? "unknown"}.`,
+          reason: `stall detected: ${noProgressCount} consecutive iterations with no material progress on ${observation.storyId ?? observation.branch} (limit ${limits.iterations}): no commits outside the PRD directory, no story phase change. The loop is spinning without advancing; human review required. HEAD ${observation.headCommit ?? "unknown"}.`,
         };
       }
       return { stalled: false };
@@ -137,16 +140,6 @@ async function gitStdout(repoDir: string, args: readonly string[]): Promise<stri
   }
 }
 
-function materialPaths(paths: readonly string[], prdRel: string | undefined): string[] {
-  if (prdRel === undefined || prdRel === "" || prdRel.startsWith("..")) return [...paths];
-  const prefix = prdRel.endsWith("/") ? prdRel : `${prdRel}/`;
-  return paths.filter((path) => path !== prdRel && !path.startsWith(prefix));
-}
-
-export function materialPathsExist(paths: readonly string[], prdRel: string | undefined): boolean {
-  return materialPaths(paths, prdRel).length > 0;
-}
-
 function gitLines(stdout: string): string[] {
   return stdout.split("\n").filter((line) => line.length > 0);
 }
@@ -157,8 +150,8 @@ async function probeWorktreeFingerprint(repoDir: string, prdRel: string | undefi
     gitStdout(repoDir, ["ls-files", "--others", "--exclude-standard"]),
   ]);
   if (tracked === undefined || untracked === undefined) return undefined;
-  const trackedPaths = materialPaths(gitLines(tracked), prdRel).sort();
-  const untrackedPaths = materialPaths(gitLines(untracked), prdRel).sort();
+  const trackedPaths = filterMaterialPaths(gitLines(tracked), prdRel).sort();
+  const untrackedPaths = filterMaterialPaths(gitLines(untracked), prdRel).sort();
   // PRD-only churn (a progress.txt rewritten every iteration) must read as a
   // clean tree, or the counter would reset forever and never trip.
   if (trackedPaths.length === 0 && untrackedPaths.length === 0) return "";
@@ -188,17 +181,36 @@ export type CreateStallObserverInput = {
   readonly storyIdPattern?: string;
   readonly readPhase?: (storyId: string) => string | undefined;
   readonly readCompletionsCount: () => number;
-  readonly readPasses?: (prdDir: string) => PrdPassesMap | undefined;
+  /**
+   * Effective phases of all PRD stories. `undefined` return = unreadable
+   * snapshot (hold counter when `prdDir` is configured). Omit the callback
+   * when no phase snapshot is available yet (Phase B wires the resolver).
+   */
+  readonly readPhases?: () => StoryPhasesMap | undefined;
+  /** Optional explicit story id list for branch→id resolution when phases keys are insufficient. */
+  readonly storyIds?: readonly string[];
   readonly probeInFlight?: () => Promise<boolean>;
 };
 
 export function createStallObserver(input: CreateStallObserverInput): StallObserver {
   const detector = createStallDetector({ limits: input.limits, initialAdjudicationCompletions: input.readCompletionsCount() });
-  const readPasses = input.readPasses ?? readPrdPasses;
   const probeInFlight = input.probeInFlight ?? (async () => false);
-  const prdRel = input.prdDir === undefined ? undefined : relative(input.repoDir, input.prdDir).replaceAll("\\", "/");
+  const prdRel = prdDirRelative(input.repoDir, input.prdDir);
   let prevHead: string | undefined;
   let lastObservation: StallObservation | undefined;
+
+  function resolvePhases(): StoryPhasesMap | undefined {
+    if (input.prdDir === undefined) return undefined;
+    if (input.readPhases !== undefined) return input.readPhases();
+    // No reader wired yet: stable empty map so stall detection still works on
+    // git/branch/phase-of-active-story signals without holding forever.
+    return {};
+  }
+
+  function resolveStoryId(branch: string, phases: StoryPhasesMap | undefined): string | undefined {
+    const ids = input.storyIds ?? (phases === undefined ? undefined : Object.keys(phases));
+    return storyIdFromBranch(branch, input.storyIdPattern, ids);
+  }
 
   return {
     async checkIteration(branch) {
@@ -216,23 +228,23 @@ export function createStallObserver(input: CreateStallObserverInput): StallObser
       }
       const worktreeFingerprint = await probeWorktreeFingerprint(input.repoDir, prdRel);
 
-      const storyId = storyIdFromBranch(branch, input.storyIdPattern);
-      const passes = input.prdDir === undefined ? undefined : readPasses(input.prdDir);
-      // A configured PRD that will not read is an UNKNOWN fact, not a stable
-      // one, but `passesEqual(undefined, undefined)` reads as "no change" —
-      // correct only when no PRD is configured at all. Fold the unreadable case
-      // into the quiescence gate so it holds the counter instead of silently
-      // scoring strikes against a fact nobody could observe.
-      const passesUnknown = input.prdDir !== undefined && passes === undefined;
+      const phases = resolvePhases();
+      const storyId = resolveStoryId(branch, phases);
+      // A configured PRD whose phase snapshot will not read is an UNKNOWN fact,
+      // not a stable one, but `phasesEqual(undefined, undefined)` reads as "no
+      // change" — correct only when no PRD is configured at all. Fold the
+      // unreadable case into the quiescence gate so it holds the counter
+      // instead of silently scoring strikes against a fact nobody could observe.
+      const phasesUnknown = input.prdDir !== undefined && input.readPhases !== undefined && phases === undefined;
       lastObservation = {
         branch,
         storyId,
         headCommit: head,
         hasMaterialChange,
         worktreeFingerprint,
-        inFlight: (await probeInFlight()) || passesUnknown,
-        passes,
-        phase: storyId === undefined ? undefined : input.readPhase?.(storyId),
+        inFlight: (await probeInFlight()) || phasesUnknown,
+        phases,
+        phase: storyId === undefined ? undefined : phases?.[storyId] ?? input.readPhase?.(storyId),
         adjudicationCompletions: input.readCompletionsCount(),
       };
       if (!lastObservation.inFlight && head !== undefined) prevHead = head;
@@ -254,16 +266,21 @@ export function createStallObserver(input: CreateStallObserverInput): StallObser
       if (head?.trim() !== tripped.headCommit) return false;
       if (worktreeAdvanced(tripped.worktreeFingerprint, worktreeFingerprint)) return false;
 
-      // PRD passes, story phase, and adjudications can all advance during the
-      // settle window with no git change at all, so the verdict is only still
-      // valid if every signal it was built from is also unchanged.
-      const storyId = storyIdFromBranch(branch, input.storyIdPattern);
+      // Story phases and adjudications can all advance during the settle window
+      // with no git change at all, so the verdict is only still valid if every
+      // signal it was built from is also unchanged.
+      const phases = resolvePhases();
+      const storyId = resolveStoryId(branch, phases);
       if (storyId !== tripped.storyId) return false;
-      if ((storyId === undefined ? undefined : input.readPhase?.(storyId)) !== tripped.phase) return false;
+      if ((storyId === undefined ? undefined : phases?.[storyId] ?? input.readPhase?.(storyId)) !== tripped.phase) return false;
       if (input.readCompletionsCount() !== tripped.adjudicationCompletions) return false;
-      const passes = input.prdDir === undefined ? undefined : readPasses(input.prdDir);
-      if (input.prdDir !== undefined && (passes === undefined || tripped.passes === undefined)) return false;
-      return passesEqual(passes, tripped.passes);
+      if (input.prdDir !== undefined && input.readPhases !== undefined && (phases === undefined || tripped.phases === undefined)) {
+        return false;
+      }
+      return phasesEqual(phases, tripped.phases);
     },
   };
 }
+
+/** Re-export StoryPhase for callers that type phase maps from this module. */
+export type { StoryPhase };

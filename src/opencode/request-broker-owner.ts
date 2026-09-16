@@ -4,7 +4,7 @@ import type { PendingRequestPort } from "../engine/step-reporter.ts";
 import type { PermissionPolicy, QuestionPolicy } from "../lib/config.ts";
 import { OwnedSessionSet } from "../lib/owned-session-set.ts";
 import { DEFAULT_STEP_TIMEOUT_MS, permissionGateMaxMs, permissionTeardownMs } from "../config/tunables.ts";
-import { createRequestBroker, type RequestBroker, type RequestFrictionState } from "./request-broker.ts";
+import { createRequestBroker, type GateTimeoutInfo, type RequestBroker, type RequestFrictionState } from "./request-broker.ts";
 import { reconcileOpenRequests } from "./request-reconcile.ts";
 import { teardownRequests, type TeardownClock, type TeardownResult } from "./request-teardown.ts";
 import type { Step } from "./step-runner-types.ts";
@@ -26,6 +26,7 @@ type RequestBrokerOwnerOptions = {
   readonly permissionPolicy?: PermissionPolicy;
   readonly questionPolicy?: QuestionPolicy;
   readonly onHumanGateChange?: (open: boolean) => void;
+  readonly onGateTimeout?: (info: GateTimeoutInfo) => void;
   readonly gateMaxMs?: number;
   readonly teardownMs?: number;
   readonly teardownClock?: TeardownClock;
@@ -89,6 +90,7 @@ export function createRequestBrokerOwner(options: RequestBrokerOwnerOptions): Re
         gateMaxMs,
         ...(options.permissionPolicy !== undefined ? { permissionPolicy: options.permissionPolicy } : {}),
         ...(options.questionPolicy !== undefined ? { questionPolicy: options.questionPolicy } : {}),
+        ...(options.onGateTimeout !== undefined ? { onGateTimeout: options.onGateTimeout } : {}),
         onHumanGateChange: (open) => {
           for (const listener of humanGateListeners) listener(open);
         },

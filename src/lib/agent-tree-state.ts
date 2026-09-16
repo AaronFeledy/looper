@@ -87,7 +87,7 @@ export function syncStepAgentTree(state: LoopState, stepIndex: number, agents: P
     merged.push(current);
   }
 
-  if (RETAINS_MISSING_AGENTS[step.status]) {
+  if (RETAINS_MISSING_AGENTS[step.status] || state.constellation) {
     for (const current of step.backgroundAgents) {
       if (incomingIDs.has(current.sessionID)) continue;
       // Deleted/dropped sessions must not keep spinning: force idle + stamp

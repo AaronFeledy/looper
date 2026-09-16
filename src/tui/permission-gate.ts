@@ -2,12 +2,15 @@ import type { PendingPermission, PendingQuestion, PendingRequest } from "../lib/
 
 export type PermissionKeyAction = "once" | "always" | "reject" | "skip";
 export type QuestionKeyAction = "reject" | "skip";
-export type ModalFocusWinner = "recovery" | "escConfirm" | "permission" | "help" | "prompt" | "config" | "none";
+export type ModalFocusWinner = "recovery" | "escConfirm" | "permission" | "help" | "prompt" | "config" | "diagnostics" | "inspector" | "none";
 
 type ModalFocusState = {
+  readonly constellation?: { readonly detailsOpen: boolean };
+  readonly historyView?: unknown;
   readonly recovery: object | null;
   readonly escConfirm: string | null;
   readonly pendingRequests: readonly unknown[];
+  readonly diagnostics?: { readonly visible: boolean };
   readonly helpVisible: boolean;
   readonly promptModalVisible: boolean;
   readonly configModalVisible: boolean;
@@ -71,6 +74,8 @@ export function modalFocusWinner(state: ModalFocusState): ModalFocusWinner {
   if (state.helpVisible) return "help";
   if (state.promptModalVisible) return "prompt";
   if (state.configModalVisible) return "config";
+  if (state.diagnostics?.visible) return "diagnostics";
+  if (state.constellation?.detailsOpen && state.historyView == null) return "inspector";
   return "none";
 }
 

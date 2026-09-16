@@ -1,3 +1,4 @@
+import { includeBranchDiffPath } from "./branch-diff-paths.ts";
 import type { BranchDiffTotals, BranchDiffVcsFile } from "./branch-diff.ts";
 
 export const BRANCH_DIFF_GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -132,19 +133,22 @@ export async function collectGitBranchDiff(
   repoDir: string,
   defaultBranch: string | undefined,
   signal: AbortSignal | undefined,
+  prdDir?: string,
 ): Promise<BranchDiffTotals> {
+  const include = includeBranchDiffPath(repoDir, prdDir);
   const baseOid = await resolveBaseRef(repoDir, defaultBranch, signal);
   const headResult = await runGit(repoDir, ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"], signal);
   if (headResult.exitCode !== 0) throw new BranchDiffGitError("unable to resolve the current commit for branch diff");
   const mergeBaseResult = await runGit(repoDir, ["merge-base", baseOid, headResult.stdout.trim()], signal);
   if (mergeBaseResult.exitCode !== 0) throw new BranchDiffGitError("unable to resolve the branch diff merge-base");
   const mergeBase = mergeBaseResult.stdout.trim();
-  const trackedResult = await runGit(repoDir, ["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", mergeBase, "--", "."], signal);
+  const trackedResult = await runGit(repoDir, ["diff", "--no-ext-diff", "--no-renames", "--relative", "--numstat", "-z", mergeBase, "--", "."], signal);
   if (trackedResult.exitCode !== 0) throw new BranchDiffGitError("unable to collect the tracked branch diff");
   const statsByPath = parseGitNumstat(trackedResult.stdout);
+  for (const path of statsByPath.keys()) if (!include(path)) statsByPath.delete(path);
   const untrackedResult = await runGit(repoDir, ["ls-files", "--others", "--exclude-standard", "-z", "--", "."], signal);
   if (untrackedResult.exitCode !== 0) throw new BranchDiffGitError("unable to enumerate untracked files");
-  const untrackedPaths = new Set(untrackedResult.stdout.split("\0").filter((path) => path.length > 0));
+  const untrackedPaths = new Set(untrackedResult.stdout.split("\0").filter((path) => path.length > 0 && include(path)));
   if (untrackedPaths.size > BRANCH_DIFF_GIT_MAX_UNTRACKED_FILES) {
     throw new BranchDiffGitError(`too many untracked files for branch diff (${untrackedPaths.size})`);
   }

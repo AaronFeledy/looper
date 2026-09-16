@@ -10,6 +10,9 @@ import { createStallObserver, stallDetectionEnabled, type StallLimits, type Stal
 import { createInFlightProbe, runStallCheck } from "./stall-quiescence.ts";
 import { stallConfirmMs } from "../config/tunables.ts";
 import type { RunControl } from "./run-control.ts";
+import { isPrdComplete, type StoryPhaseResolver } from "./story-phases.ts";
+import { stopServerSession } from "../opencode/session-health.ts";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 export type RunResumePlan = {
   readonly startIteration: number;
@@ -20,6 +23,8 @@ export type RunResumePlan = {
   readonly firstIterationStepSessions: StepSessionEntry[] | undefined;
   readonly resetToFreshRun: boolean;
   readonly looperRunID: string | undefined;
+  /** In-flight session from a checkpoint whose step no longer exists; must be stopped before starting replacement work. */
+  readonly staleSessionID?: string;
 };
 
 export type ComputeRunResumePlanInput<StepLike extends RunStateStoreStep> = {
@@ -28,6 +33,7 @@ export type ComputeRunResumePlanInput<StepLike extends RunStateStoreStep> = {
   readonly steps: readonly StepLike[];
   readonly store: RunStateStore;
   readonly legacyResumeStepIndex: (steps: readonly StepLike[]) => number;
+  readonly log?: (line: string) => void;
 };
 
 export type RunEngineInput<S, Client> = RunEngineOptions & {
@@ -51,6 +57,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
   readonly storyState?: StoryStatePort;
+  readonly storyResolver?: StoryPhaseResolver;
   readonly adjudication?: AdjudicationConfig;
   readonly stall?: StallLimits;
   readonly stallConfirmMs?: number;
@@ -58,6 +65,7 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly elapsedSeconds?: (startedAt: number) => number;
   readonly initialPlan?: RunResumePlan;
   readonly persistTitles?: boolean;
+  readonly log?: (line: string) => void;
 };
 
 function stepSessionsForPlan(runState: ReturnType<RunStateStore["read"]>, iteration: number): StepSessionEntry[] | undefined {
@@ -84,25 +92,35 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
   let firstIterationTitle: string | undefined;
   let firstIterationStepSessions: StepSessionEntry[] | undefined;
   let looperRunID: string | undefined;
+  let staleSessionID: string | undefined;
 
   if (!input.fresh) {
     const runState = input.store.read();
     if (runState !== null) {
-      resumed = true;
-      startIteration = Math.max(1, runState.iteration);
-      firstIterationStartStepIndex = stepIndexFromRunState(runState, input.steps);
-      firstIterationTitle = runState.title;
-      firstIterationStepSessions = stepSessionsForPlan(runState, startIteration);
       looperRunID = runState.looperRunID;
-      if (runState.sessionID !== undefined) {
-        const looperMessageIDs = runState.looperMessageIDs ?? (runState.messageID !== undefined ? [runState.messageID] : undefined);
-        firstIterationResume = {
-          sessionID: runState.sessionID,
-          ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
-          stepName: runState.stepName,
-          ...(runState.promptText !== undefined ? { promptText: runState.promptText } : {}),
-          ...(looperMessageIDs !== undefined ? { looperMessageIDs: [...looperMessageIDs] } : {}),
-        };
+      const namePresent = input.steps.some((step) => step.name === runState.stepName);
+      if (!namePresent) {
+        startIteration = Math.max(1, runState.iteration + 1);
+        staleSessionID = runState.sessionID;
+        input.log?.(
+          `[looper] saved resume step ${runState.stepIndex} (${runState.stepName}) no longer matches configuration; continuing at iteration ${startIteration}, step 0`,
+        );
+      } else {
+        resumed = true;
+        startIteration = Math.max(1, runState.iteration);
+        firstIterationStartStepIndex = stepIndexFromRunState(runState, input.steps);
+        firstIterationTitle = runState.title;
+        firstIterationStepSessions = stepSessionsForPlan(runState, startIteration);
+        if (runState.sessionID !== undefined) {
+          const looperMessageIDs = runState.looperMessageIDs ?? (runState.messageID !== undefined ? [runState.messageID] : undefined);
+          firstIterationResume = {
+            sessionID: runState.sessionID,
+            ...(runState.messageID !== undefined ? { messageID: runState.messageID } : {}),
+            stepName: runState.stepName,
+            ...(runState.promptText !== undefined ? { promptText: runState.promptText } : {}),
+            ...(looperMessageIDs !== undefined ? { looperMessageIDs: [...looperMessageIDs] } : {}),
+          };
+        }
       }
     } else {
       firstIterationStartStepIndex = input.legacyResumeStepIndex(input.steps);
@@ -121,6 +139,7 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
       firstIterationStepSessions: undefined,
       resetToFreshRun: true,
       looperRunID: undefined,
+      ...(staleSessionID !== undefined ? { staleSessionID } : {}),
     };
   }
 
@@ -133,6 +152,7 @@ export function computeRunResumePlan<StepLike extends RunStateStoreStep>(input: 
     firstIterationStepSessions,
     resetToFreshRun: false,
     looperRunID,
+    ...(staleSessionID !== undefined ? { staleSessionID } : {}),
   };
 }
 
@@ -161,6 +181,27 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
   let iterationStepSessions = initialPlan.firstIterationStepSessions ?? [];
   if (initialPlan.looperRunID !== undefined) looperRunID = initialPlan.looperRunID;
   if (initialPlan.resetToFreshRun) looperRunID = input.createLooperRunID();
+  const checkpointSessionID = input.store.read()?.sessionID;
+  const resumeSessionID = initialPlan.firstIterationResume?.sessionID;
+  const staleSessionID = initialPlan.staleSessionID ?? (
+    !input.fresh && checkpointSessionID !== undefined && checkpointSessionID !== resumeSessionID
+      ? checkpointSessionID
+      : undefined
+  );
+  if (staleSessionID !== undefined) {
+    const stopped = await stopServerSession({
+      client: input.client as OpencodeClient,
+      repoDir: input.repoDir,
+      sessionID: staleSessionID,
+      log: input.log,
+    });
+    if (!stopped) {
+      const reason = `could not confirm session ${staleSessionID} stopped; not starting a replacement run to avoid overlapping opencode generations`;
+      input.log?.(`[looper] ${reason}`);
+      return { kind: "stopped", reason };
+    }
+    input.log?.(`[looper] stopped stale checkpoint session ${staleSessionID} before continuing`);
+  }
   const persistTitles = input.persistTitles ?? true;
   if (!persistTitles) firstIterationTitle = undefined;
   const stopRequested = (): boolean =>
@@ -168,6 +209,32 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
     input.control?.stopAfterIteration === true ||
     input.store.stopFileExists() ||
     input.store.stopAfterIterationFileExists();
+  const loggedUnreadablePrd = new Set<number>();
+  const stopForCompletedPrd = async (
+    iteration: number,
+    phase: "before-iteration" | "after-iteration",
+  ): Promise<RunEngineResult | undefined> => {
+    const resolver = input.storyResolver;
+    if (resolver === undefined) return undefined;
+    await resolver.fetchMain();
+    const snapshot = resolver.snapshot();
+    if (snapshot === undefined || snapshot.stories.length === 0) {
+      if (!loggedUnreadablePrd.has(iteration)) {
+        loggedUnreadablePrd.add(iteration);
+        input.log?.(
+          snapshot === undefined
+            ? "[looper] PRD completion check skipped: story snapshot is unreadable"
+            : "[looper] PRD completion check skipped: no stories configured",
+        );
+      }
+      return undefined;
+    }
+    if (!isPrdComplete(snapshot)) return undefined;
+    const reason = `PRD complete: ${snapshot.stories.length}/${snapshot.stories.length} stories at phase ${snapshot.terminal}`;
+    input.store.writeStop(reason);
+    await input.hooks.onStopRequested?.({ iteration, reason, phase });
+    return { kind: "stopped", reason };
+  };
 
   let recoveryNudgeNext = false;
   let recoveryStateNext: { readonly state: S } | undefined;
@@ -183,6 +250,9 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
           ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
           ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
           ...(input.storyState !== undefined ? { readPhase: input.storyState.readPhase } : {}),
+          ...(input.storyResolver !== undefined
+            ? { readPhases: () => input.storyResolver?.snapshot()?.phases }
+            : {}),
           readCompletionsCount: () => input.adjudication?.store.readCompletions().length ?? 0,
           probeInFlight: createInFlightProbe({
             repoDir: input.repoDir,
@@ -198,6 +268,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
       await input.hooks.onStopRequested?.({ iteration, reason, phase: "before-iteration" });
       return { kind: "stopped", reason };
     }
+    const completedBeforeIteration = await stopForCompletedPrd(iteration, "before-iteration");
+    if (completedBeforeIteration !== undefined) return completedBeforeIteration;
     if (stepSessionsIteration !== iteration) {
       if (stepSessionsIteration !== undefined) iterationStepSessions = [];
       stepSessionsIteration = iteration;
@@ -251,6 +323,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
         ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
         ...(input.storyState !== undefined ? { storyState: input.storyState } : {}),
+        ...(input.storyResolver !== undefined ? { storyResolver: input.storyResolver } : {}),
         ...(input.adjudication !== undefined
           ? { adjudication: { ...input.adjudication, writeStop: input.store.writeStop } }
           : {}),
@@ -279,6 +352,8 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         await input.hooks.onStopRequested?.({ iteration, reason, phase: "after-iteration" });
         return { kind: "stopped", reason };
       }
+      const completedAfterIteration = await stopForCompletedPrd(iteration, "after-iteration");
+      if (completedAfterIteration !== undefined) return completedAfterIteration;
       if (stallObserver !== undefined) {
         const outcome = await runStallCheck({
           observer: stallObserver,

@@ -10,6 +10,13 @@ import {
 const PATTERN = DEFAULT_STORY_ID_PATTERN;
 
 describe("decideStoryBranchMismatch", () => {
+  test("accepts PRD split IDs and suggests an identity-preserving rename for a prefixed branch", () => {
+    const input = { initialBranch: "main", pattern: PATTERN, storyIds: ["US-609E0"] };
+    expect(decideStoryBranchMismatch({ ...input, currentBranch: "us-609e0-recipe-init" })).toBeUndefined();
+    const mismatch = decideStoryBranchMismatch({ ...input, currentBranch: "feat/us-609e0-recipe-init" });
+    expect(mismatch).toMatchObject({ expectedStoryId: "US-609E0", suggestedBranch: "us-609e0-recipe-init" });
+    expect(storyBranchMismatchPrompt(mismatch!)).toContain("Expected story ID: US-609E0");
+  });
   test("returns none when the branch did not switch", () => {
     expect(
       decideStoryBranchMismatch({
@@ -65,7 +72,11 @@ describe("storyBranchMismatchPrompt", () => {
 
     expect(prompt).toContain(`'${mismatch.branch}'`);
     expect(prompt).toContain(mismatch.pattern);
-    expect(prompt.startsWith("Continue working")).toBe(true);
+    expect(prompt).toContain("Repair the current branch name before completing this step");
+    expect(prompt).toContain("Do not edit Looper configuration");
+    expect(prompt).toContain("stop or restart Looper");
+    expect(prompt).toContain("git branch -m");
+    expect(prompt).toContain("preserve the full ID");
   });
 });
 
@@ -76,6 +87,6 @@ describe("storyBranchMismatchLogLine", () => {
         branch: "feat/foo",
         pattern: PATTERN,
       }),
-    ).toBe(`[looper] branch 'feat/foo' does not match story id pattern ${PATTERN}`);
+    ).toBe(`[looper] branch 'feat/foo' has no recognized story ID (PRD ID prefix or pattern ${PATTERN})`);
   });
 });

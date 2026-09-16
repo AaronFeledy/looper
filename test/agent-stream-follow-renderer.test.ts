@@ -78,7 +78,7 @@ afterEach(() => {
 });
 
 describe("agent stream follow rendering", () => {
-  test("places the follow arrow one column under the scrollbar", async () => {
+  test("places the follow control below the native scrollbar", async () => {
     const state = createScrollableState();
     const testRenderer = await createTestRenderer({ width: 40, height: 8 });
     const stream = createAgentStream(testRenderer.renderer, state);
@@ -88,7 +88,7 @@ describe("agent stream follow rendering", () => {
     const col = arrowColumn(frame);
     testRenderer.renderer.destroy();
 
-    // width 40: corner at 39, scrollbar/track column at 38
+    // width 40: corner at 39, follow control column at 38
     expect(col).toBe(38);
   });
 

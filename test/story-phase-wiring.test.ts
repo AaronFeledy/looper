@@ -11,6 +11,7 @@ import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths, readRunState } from "../src/lib/state-files.ts";
 import { createRunStateStore } from "../src/persistence/run-state-store.ts";
 import { createStoryStateStore } from "../src/persistence/story-state-store.ts";
+import { appendSignal } from "../src/lib/signal-log.ts";
 import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts";
 
 type Scratch = { readonly repoDir: string; readonly configDir: string; readonly prdDir: string };
@@ -28,7 +29,7 @@ async function setup(setsPhase?: string, title?: string): Promise<Scratch> {
     join(configDir, "looper.yaml"),
     ["prd: ../../spec", "steps:", "  build:", "    prompt: build.md", ...(setsPhase === undefined ? [] : [`    setsPhase: ${setsPhase}`]), ...(title === undefined ? [] : [`    title: ${title}`])].join("\n") + "\n",
   );
-  writePrd(prdDir, true);
+  writePrd(prdDir);
   await $`git init -q -b us-074-story-state`.cwd(repoDir).quiet();
   await $`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init`.cwd(repoDir).quiet();
   initStatePaths({ configDir });
@@ -36,8 +37,8 @@ async function setup(setsPhase?: string, title?: string): Promise<Scratch> {
   return { repoDir, configDir, prdDir };
 }
 
-function writePrd(prdDir: string, passes: boolean): void {
-  writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", passes }] }));
+function writePrd(prdDir: string): void {
+  writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", title: "story" }] }));
 }
 
 function clientFor(repoDir: string, onPrompt?: (prompt: string) => void): { readonly client: OpencodeClient; readonly prompts: string[]; readonly titleUpdates: string[] } {
@@ -93,6 +94,7 @@ describe("runIteration story phase wiring", () => {
   test.each(["main", "us-074-story-state"])("writes the final story phase after switching from %s", async (initialBranch) => {
     // Given a step starting on main or a different story.
     const scratch = await setup("reviewed");
+    writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", title: "story" }, { id: "US-075", title: "next" }] }));
     if (initialBranch === "main") await $`git checkout -q -b main`.cwd(scratch.repoDir).quiet();
     const store = createStoryStateStore({ configDir: scratch.configDir });
     const stub = clientFor(scratch.repoDir, () => {
@@ -105,18 +107,18 @@ describe("runIteration story phase wiring", () => {
     expect([store.readPhase("US-074"), store.readPhase("US-075")]).toEqual([undefined, "reviewed"]);
   });
 
-  test("guards the final story passes flip even without adjudication configured", async () => {
-    // Given two passing stories before the step.
+  test("does not let setsPhase outrun an explicit demotion of the final story", async () => {
     const scratch = await setup("published");
-    writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", passes: true }, { id: "US-075", passes: true }] }));
+    writeFileSync(join(scratch.configDir, "looper.yaml"), "prd: ../../spec\nsteps:\n  build:\n    prompt: build.md\n    expects: published\n    setsPhase: published\n");
+    writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074" }, { id: "US-075" }] }));
     const store = createStoryStateStore({ configDir: scratch.configDir });
+    store.writePhase("US-075", "reviewed");
     const stub = clientFor(scratch.repoDir, () => {
       expect(Bun.spawnSync(["git", "checkout", "-q", "-b", "us-075-final"], { cwd: scratch.repoDir }).exitCode).toBe(0);
-      writeFileSync(join(scratch.prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "US-074", passes: true }, { id: "US-075", passes: false }] }));
+      store.writePhase("US-075", "building");
+      appendSignal(scratch.configDir, { kind: "story-phase", storyId: "US-075", phase: "building", reason: "not actually done" });
     });
-    // When the new story fails its PRD checks during the step.
-    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
-    // Then the final story is demoted rather than published.
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch, storyState: store });
     expect([store.readPhase("US-074"), store.readPhase("US-075")]).toEqual([undefined, "building"]);
   });
   test("writes setsPhase before onStepFinish", async () => {
@@ -134,19 +136,6 @@ describe("runIteration story phase wiring", () => {
     expect(store.readPhase("US-074")).toBe("reviewed");
   });
 
-  test("blocks setsPhase on a true-to-false flip", async () => {
-    // Given a reviewed story and a step that would advance it while changing passes to false.
-    const scratch = await setup("published");
-    const store = createStoryStateStore({ configDir: scratch.configDir });
-    store.writePhase("US-074", "reviewed");
-
-    // When the step flips the PRD snapshot.
-    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1,
-      client: clientFor(scratch.repoDir, () => writePrd(scratch.prdDir, false)).client, ...scratch, adjudication: adjudication() });
-
-    // Then the requested phase is blocked and the independent demotion wins.
-    expect(store.readPhase("US-074")).toBe("building");
-  });
 
   test("does not regress a published story through setsPhase", async () => {
     // Given a published story and a later step declaring an earlier phase.
@@ -154,30 +143,16 @@ describe("runIteration story phase wiring", () => {
     const store = createStoryStateStore({ configDir: scratch.configDir });
     store.writePhase("US-074", "published");
 
-    // When the step completes without a PRD flip.
+    // When the step completes with a lower setsPhase than the stored phase.
     await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: clientFor(scratch.repoDir).client, ...scratch });
 
     // Then monotonic lifecycle state is preserved.
     expect(store.readPhase("US-074")).toBe("published");
   });
 
-  test("auto-demotes on a true-to-false flip without setsPhase", async () => {
-    // Given a verified story and a step with no setsPhase declaration.
-    const scratch = await setup();
-    const store = createStoryStateStore({ configDir: scratch.configDir });
-    store.writePhase("US-074", "verified");
-    const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
-
-    // When the step flips passes from true to false.
-    await runIteration({ state, iteration: 1, client: clientFor(scratch.repoDir, () => writePrd(scratch.prdDir, false)).client, ...scratch, adjudication: adjudication() });
-
-    // Then the phase moves backward only through auto-demotion and emits one line.
-    expect(store.readPhase("US-074")).toBe("building");
-    expect(state.agentLines.filter((line) => line.includes("auto-demoted US-074"))).toHaveLength(1);
-  });
 
   test("injects real story facts into the prompt", async () => {
-    // Given a story branch, passing PRD story, and persisted phase.
+    // Given a story branch, PRD story, and persisted phase.
     const scratch = await setup();
     createStoryStateStore({ configDir: scratch.configDir }).writePhase("US-074", "reviewed");
     const stub = clientFor(scratch.repoDir);
@@ -186,11 +161,11 @@ describe("runIteration story phase wiring", () => {
     await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Build"] }), iteration: 1, client: stub.client, ...scratch });
 
     // Then the rendered block carries the values collected at the engine boundary.
-    expect(stub.prompts[0]).toContain("story:\n  branch: us-074-story-state\n  storyId: US-074\n  passes: true\n  phase: reviewed");
+    expect(stub.prompts[0]).toContain("story:\n  branch: us-074-story-state\n  storyId: US-074\n  phase: reviewed");
   });
 
   test("same-session failure retry does not rebuild looper-context", async () => {
-    // Given a passing story whose first prompt attempt changes PRD state and fails.
+    // Given a story whose first prompt attempt fails and is retried in-session.
     const originalBase = process.env.LOOPER_FAILURE_RETRY_BASE_MS;
     const originalMax = process.env.LOOPER_FAILURE_RETRY_MAX_DELAY_MS;
     const originalMin = process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS;
@@ -205,8 +180,7 @@ describe("runIteration story phase wiring", () => {
       const stub = clientFor(scratch.repoDir, () => {
         promptCount += 1;
         if (promptCount === 1) {
-          writePrd(scratch.prdDir, false);
-          throw new Error("retry after PRD change");
+          throw new Error("retry after first attempt failure");
         }
       });
 
@@ -215,7 +189,8 @@ describe("runIteration story phase wiring", () => {
 
       // Then the follow-up turn is a continue nudge, not a new-session context rebuild.
       expect(stub.prompts).toHaveLength(2);
-      expect(stub.prompts[0]).toContain("passes: true");
+      expect(stub.prompts[0]).toContain("<looper-context>");
+      expect(stub.prompts[0]).toContain("storyId: US-074");
       expect(stub.prompts[1]).not.toContain("<looper-context>");
       expect(stub.prompts[1]).toContain("Continue working to completion if you haven't already.");
     } finally {

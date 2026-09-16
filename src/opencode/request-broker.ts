@@ -12,6 +12,7 @@ import type {
 
 export type {
   AutomatedRejectOrigin,
+  GateTimeoutInfo,
   RequestBroker,
   RequestBrokerOptions,
   RequestBrokerScheduler,
@@ -134,6 +135,12 @@ export function createRequestBroker(options: RequestBrokerOptions): RequestBroke
     const request = requests.list().find((candidate) => candidate.requestID === requestID && candidate.generation === generation);
     if (request === undefined || request.status === "resolving") return;
     submit(request, "reject", "gate_timeout");
+    options.onGateTimeout?.({
+      requestID: request.requestID,
+      sessionID: request.sessionID,
+      kind: request.kind,
+      ...(request.kind === "permission" ? { permission: request.permission } : {}),
+    });
   };
 
   const armDeadline = (requestID: string, askedAt: number): void => {

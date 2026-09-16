@@ -62,7 +62,7 @@ describe("computeRunResumePlan", () => {
   });
 
   test("run-state resumes by step name with title, session, and prior step sessions", () => {
-    const store = memoryStore({ iteration: 2, stepIndex: 0, stepName: "review", sessionID: "ses", messageID: "msg_plugin", promptText: "persisted prompt", looperMessageIDs: ["msg_looper"], title: "work", looperRunID: "run-old", stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses-build" }], updatedAt: "now" });
+    const store = memoryStore({ iteration: 2, stepIndex: 1, stepName: "review", sessionID: "ses", messageID: "msg_plugin", promptText: "persisted prompt", looperMessageIDs: ["msg_looper"], title: "work", looperRunID: "run-old", stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses-build" }], updatedAt: "now" });
     const plan = computeRunResumePlan({ fresh: false, maxIterations: 5, steps: [{ name: "build" }, { name: "review" }], store, legacyResumeStepIndex: () => 0 });
     expect(plan.startIteration).toBe(2);
     expect(plan.firstIterationStartStepIndex).toBe(1);
@@ -99,6 +99,40 @@ describe("computeRunResumePlan", () => {
     expect(plan.startIteration).toBe(1);
     expect(plan.firstIterationStartStepIndex).toBe(0);
     expect(store.read()).toBeNull();
+  });
+
+  test("keeps the stale session when a removed step also exceeds max iterations", () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+    const plan = computeRunResumePlan({
+      fresh: false,
+      maxIterations: 2,
+      steps: [{ name: "Build" }, { name: "Verify" }],
+      store,
+      legacyResumeStepIndex: () => 0,
+    });
+    expect(plan.resetToFreshRun).toBe(true);
+    expect(plan.staleSessionID).toBe("ses_stale");
+  });
+
+  test("a stale resume step falls forward to the next iteration", () => {
+    const logs: string[] = [];
+    const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+
+    const plan = computeRunResumePlan({
+      fresh: false,
+      maxIterations: 5,
+      steps: [{ name: "Build" }, { name: "Verify" }],
+      store,
+      legacyResumeStepIndex: () => 0,
+      log: (line) => logs.push(line),
+    });
+
+    expect(plan.startIteration).toBe(3);
+    expect(plan.firstIterationStartStepIndex).toBe(0);
+    expect(plan.resumed).toBe(false);
+    expect(plan.firstIterationResume).toBeUndefined();
+    expect(plan.staleSessionID).toBe("ses_stale");
+    expect(logs).toHaveLength(1);
   });
 });
 
@@ -354,5 +388,166 @@ describe("runEngine", () => {
     expect(receivedStates[1]).toBe(receivedStates[0]);
     expect(receivedResumes[1]).toBe(reusableResume);
     expect(recoveryNudges).toEqual([false, true]);
+  });
+});
+
+describe("runEngine stale checkpoint session", () => {
+  const steps: Step[] = [{ name: "Build", prompt: "b" }, { name: "Verify", prompt: "v" }];
+  const hooks = { createIterationState: () => ({}) };
+
+  function client(statusType: "idle" | "busy") {
+    const aborted: string[] = [];
+    return {
+      aborted,
+      client: {
+        session: {
+          abort: async (input: { sessionID: string }) => {
+            aborted.push(input.sessionID);
+            return { data: {} };
+          },
+          status: async () => ({ data: { ses_stale: { type: statusType } } }),
+        },
+      },
+    };
+  }
+
+  test("stops the stale checkpoint session before starting replacement work", async () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+    const { client: sdk, aborted } = client("idle");
+    let started = 0;
+    const result = await runEngine({
+      maxIterations: 3,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: sdk,
+      store,
+      hooks,
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run-1",
+      legacyResumeStepIndex: () => 0,
+      runIteration: async () => {
+        started += 1;
+        return "complete";
+      },
+    });
+    expect(aborted).toEqual(["ses_stale"]);
+    expect(started).toBe(1);
+    expect(result).toEqual({ kind: "max-iterations" });
+  });
+
+  test("stops a mismatched checkpoint session even when initialPlan omits staleSessionID", async () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+    const { client: sdk, aborted } = client("idle");
+    let started = 0;
+    await runEngine({
+      maxIterations: 3,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: sdk,
+      store,
+      hooks,
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run-1",
+      legacyResumeStepIndex: () => 0,
+      initialPlan: {
+        startIteration: 3,
+        firstIterationStartStepIndex: 0,
+        firstIterationResume: undefined,
+        resumed: false,
+        firstIterationTitle: undefined,
+        firstIterationStepSessions: undefined,
+        resetToFreshRun: false,
+        looperRunID: "run-1",
+      },
+      runIteration: async () => {
+        started += 1;
+        return "complete";
+      },
+    });
+    expect(aborted).toEqual(["ses_stale"]);
+    expect(started).toBe(1);
+  });
+
+  test("stops a checkpoint session when resume payload was dropped but resumed stays true", async () => {
+    const store = memoryStore({ iteration: 2, stepIndex: 1, stepName: "Verify", sessionID: "ses_stale", updatedAt: "now" });
+    const { client: sdk, aborted } = client("idle");
+    let started = 0;
+    await runEngine({
+      maxIterations: 2,
+      fresh: false,
+      waitProvided: false,
+      waitDuration: 0,
+      repoDir: "/repo",
+      configDir: "/cfg",
+      client: sdk,
+      store,
+      hooks,
+      loadSteps: () => steps,
+      currentBranch: async () => "main",
+      createLooperRunID: () => "run-1",
+      legacyResumeStepIndex: () => 0,
+      initialPlan: {
+        startIteration: 2,
+        firstIterationStartStepIndex: 0,
+        firstIterationResume: undefined,
+        resumed: true,
+        firstIterationTitle: undefined,
+        firstIterationStepSessions: undefined,
+        resetToFreshRun: false,
+        looperRunID: "run-1",
+      },
+      runIteration: async () => {
+        started += 1;
+        return "complete";
+      },
+    });
+    expect(aborted).toEqual(["ses_stale"]);
+    expect(started).toBe(1);
+  });
+
+  test("refuses to start when the stale session cannot be confirmed stopped", async () => {
+    const previous = process.env.LOOPER_STOP_SESSION_TIMEOUT_MS;
+    process.env.LOOPER_STOP_SESSION_TIMEOUT_MS = "50";
+    process.env.LOOPER_STOP_SESSION_POLL_MS = "5";
+    try {
+      const store = memoryStore({ iteration: 2, stepIndex: 2, stepName: "Check Done", sessionID: "ses_stale", updatedAt: "now" });
+      const { client: sdk, aborted } = client("busy");
+      let started = 0;
+      const result = await runEngine({
+        maxIterations: 5,
+        fresh: false,
+        waitProvided: false,
+        waitDuration: 0,
+        repoDir: "/repo",
+        configDir: "/cfg",
+        client: sdk,
+        store,
+        hooks,
+        loadSteps: () => steps,
+        currentBranch: async () => "main",
+        createLooperRunID: () => "run-1",
+        legacyResumeStepIndex: () => 0,
+        runIteration: async () => {
+          started += 1;
+          return "complete";
+        },
+      });
+      expect(aborted).toEqual(["ses_stale"]);
+      expect(started).toBe(0);
+      expect(result.kind).toBe("stopped");
+      if (result.kind === "stopped") expect(result.reason).toContain("ses_stale");
+    } finally {
+      if (previous === undefined) delete process.env.LOOPER_STOP_SESSION_TIMEOUT_MS;
+      else process.env.LOOPER_STOP_SESSION_TIMEOUT_MS = previous;
+      delete process.env.LOOPER_STOP_SESSION_POLL_MS;
+    }
   });
 });

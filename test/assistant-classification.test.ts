@@ -4,6 +4,8 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import {
   classifyMessagesForCurrentTurn,
+  classifyMessagesForParent,
+  type ClassifiableMessage,
   latestUserMessageID,
   latestUserMessageIdFrom,
   resolveOutcomeParentID,
@@ -110,5 +112,73 @@ describe("resolveOutcomeParentID", () => {
       { info: { id: "msg_label_only", role: "user" } },
     ];
     expect(resolveOutcomeParentID(messages, "msg_sent")).toBe("msg_sent");
+  });
+});
+
+
+describe("recovery after a non-retryable assistant error", () => {
+  const user = (id: string): ClassifiableMessage => ({ info: { id, role: "user" } });
+  const fatal = (parentID: string): ClassifiableMessage => ({
+    info: {
+      id: "msg_error", role: "assistant", parentID, time: { created: 1 },
+      error: { name: "APIError", data: { message: "final block cannot be thinking", isRetryable: false } },
+    },
+  });
+  const done = (parentID: string): ClassifiableMessage => ({
+    info: { id: "msg_done", role: "assistant", parentID, time: { completed: 2 } },
+    parts: [{ type: "text", text: "Build is complete." }],
+  });
+  const open = (parentID: string): ClassifiableMessage => ({
+    info: { id: "msg_open", role: "assistant", parentID, time: { created: 2 } },
+  });
+  const empty = (parentID: string): ClassifiableMessage => ({
+    info: { id: "msg_empty", role: "assistant", parentID, time: { completed: 3 } },
+    parts: [],
+  });
+  const failed = { kind: "failed", errorMessage: "APIError: final block cannot be thinking" } as const;
+
+  for (const parentID of ["msg_original", "msg_nudge"]) {
+    test(`successful recovery on ${parentID} supersedes the historical error`, () => {
+      const messages = [user("msg_original"), fatal("msg_original"), ...(parentID === "msg_original" ? [] : [user(parentID)]), done(parentID)];
+      expect(classifyMessagesForParent(messages, parentID)).toEqual({ kind: "done" });
+      expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual({ kind: "done" });
+    });
+
+    test(`active recovery on ${parentID} is in progress despite the historical error`, () => {
+      const messages = [user("msg_original"), fatal("msg_original"), ...(parentID === "msg_original" ? [] : [user(parentID)]), open(parentID)];
+      expect(classifyMessagesForParent(messages, parentID)).toEqual({ kind: "in-progress" });
+      expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual({ kind: "in-progress" });
+    });
+  }
+
+  test("an unrelated historical error does not manufacture an outcome for an unanswered user turn", () => {
+    const messages = [user("msg_original"), fatal("msg_original"), done("msg_original"), user("msg_label")];
+    expect(classifyMessagesForParent(messages, "msg_label")).toEqual({ kind: "missing" });
+    expect(resolveOutcomeParentID(messages, "msg_original")).toBe("msg_original");
+    expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual({ kind: "done" });
+  });
+
+  test("an unrecovered error remains failed even without a completion timestamp", () => {
+    const messages = [user("msg_original"), fatal("msg_original")];
+    expect(classifyMessagesForParent(messages, "msg_original")).toEqual(failed);
+    expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual(failed);
+  });
+
+  test("empty bookkeeping after an error is not recovery", () => {
+    const messages = [user("msg_original"), fatal("msg_original"), empty("msg_original")];
+    expect(classifyMessagesForParent(messages, "msg_original")).toEqual(failed);
+    expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual(failed);
+  });
+
+  test("a later fatal error overrides earlier success even when its user turn is absent from the snapshot", () => {
+    const messages = [user("msg_original"), done("msg_original"), fatal("msg_continuation")];
+    expect(classifyMessagesForParent(messages, "msg_original")).toEqual({ kind: "done" });
+    expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual(failed);
+  });
+
+  test("a new failure after recovery is still reported", () => {
+    const messages = [user("msg_original"), fatal("msg_original"), user("msg_nudge"), done("msg_nudge"), fatal("msg_nudge")];
+    expect(classifyMessagesForParent(messages, "msg_nudge")).toEqual(failed);
+    expect(classifyMessagesForCurrentTurn(messages, "msg_original")).toEqual(failed);
   });
 });

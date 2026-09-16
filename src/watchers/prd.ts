@@ -1,8 +1,8 @@
 import { statSync } from "node:fs";
 
-import { prdIndexPath, readPrd } from "../lib/prd.ts";
-import type { PrdResult } from "../lib/prd.ts";
+import { countPrd, prdIndexPath, readPrdStories } from "../lib/prd.ts";
 import type { PrdStatus } from "./watcher-events.ts";
+import type { StoryPhaseResolver } from "../engine/story-phases.ts";
 
 export const DEFAULT_PRD_POLL_INTERVAL_MS = 3_000;
 
@@ -11,19 +11,56 @@ export type PrdWatcher = {
   readonly stop: () => void;
 };
 
+/** Local status shape used until Phase B injects the story-phase resolver. */
+export type PrdReadResult =
+  | { readonly kind: "ok"; readonly remaining: number; readonly total: number; readonly terminal?: string }
+  | { readonly kind: "error"; readonly message: string };
+
 function assertNever(value: never): never {
   throw new Error(`unhandled PRD result: ${JSON.stringify(value)}`);
 }
 
-function resultToStatus(result: PrdResult): PrdStatus {
+function resultToStatus(result: PrdReadResult): PrdStatus {
   switch (result.kind) {
     case "ok":
-      return { kind: "ok", remaining: result.remaining, total: result.total };
+      return { kind: "ok", remaining: result.remaining, total: result.total, ...(result.terminal !== undefined ? { terminal: result.terminal } : {}) };
     case "error":
       return { kind: "error", message: result.message };
     default:
       return assertNever(result);
   }
+}
+
+/**
+ * Best-effort counts without a phase resolver: every story is treated as
+ * `building` against terminal `merged`, so remaining === total. Phase B will
+ * inject the resolver for effective-phase counts.
+ */
+export function readPrdStatus(prdDir: string): PrdReadResult {
+  const indexPath = prdIndexPath(prdDir);
+  const stories = readPrdStories(indexPath);
+  if (stories === undefined) {
+    try {
+      // Distinguish missing vs unreadable-ish content for the panel.
+      statSync(indexPath);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+        return { kind: "error", message: "prd.json not found" };
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return { kind: "error", message };
+    }
+    return { kind: "error", message: "unreadable prd.json" };
+  }
+  const counts = countPrd({ stories, phases: {}, terminal: "merged" });
+  return { kind: "ok", remaining: counts.remaining, total: counts.total, terminal: "merged" };
+}
+
+export function readResolvedPrdStatus(resolver: StoryPhaseResolver): PrdReadResult {
+  const snapshot = resolver.snapshot();
+  if (snapshot === undefined) return { kind: "error", message: "unreadable prd.json" };
+  const counts = countPrd(snapshot);
+  return { kind: "ok", remaining: counts.remaining, total: counts.total, terminal: snapshot.terminal };
 }
 
 function readMtimeMs(path: string): number | null {
@@ -43,9 +80,9 @@ export function watchPrd(opts: {
   readonly prdDir: string;
   readonly onUpdate: (status: PrdStatus) => void;
   readonly pollIntervalMs?: number;
-  readonly read?: (dir: string) => PrdResult;
+  readonly read?: (dir: string) => PrdReadResult;
 }): PrdWatcher {
-  const read = opts.read ?? readPrd;
+  const read = opts.read ?? readPrdStatus;
   const indexPath = prdIndexPath(opts.prdDir);
   let lastMtimeMs: number | null = null;
   let lastStatus: PrdStatus | null = null;

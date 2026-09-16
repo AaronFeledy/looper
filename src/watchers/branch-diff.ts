@@ -1,3 +1,4 @@
+import { includeBranchDiffPath } from "./branch-diff-paths.ts";
 import { collectGitBranchDiff } from "./branch-diff-git.ts";
 
 export type BranchDiffTotals = { readonly additions: number; readonly deletions: number; readonly files: number };
@@ -13,7 +14,7 @@ export type BranchDiffVcsResult<TData> = { readonly data?: TData; readonly error
 
 export type BranchDiffVcsInfo = { readonly branch?: string; readonly default_branch?: string };
 
-export type BranchDiffVcsFile = { readonly additions: number; readonly deletions: number };
+export type BranchDiffVcsFile = { readonly file?: string; readonly additions: number; readonly deletions: number };
 
 export type BranchDiffVcsRequestOptions = { readonly signal?: AbortSignal };
 
@@ -108,6 +109,7 @@ export async function collectBranchDiff(
   repoDir: string,
   authoritativeBranch: string,
   signal?: AbortSignal,
+  prdDir?: string,
 ): Promise<BranchDiffCollection> {
   const requestOptions = signal === undefined ? undefined : { signal };
   const info = await client.vcs.get({ directory: repoDir }, requestOptions);
@@ -116,11 +118,12 @@ export async function collectBranchDiff(
   const defaultBranch = info.data?.default_branch;
   if (defaultBranch !== undefined && authoritativeBranch === defaultBranch) return { kind: "hidden" };
   if (sdkBranch !== authoritativeBranch) {
-    return { kind: "ok", totals: await collectGitBranchDiff(repoDir, defaultBranch, signal) };
+    return { kind: "ok", totals: await collectGitBranchDiff(repoDir, defaultBranch, signal, prdDir) };
   }
   const diff = await client.vcs.diff({ directory: repoDir, mode: "branch", context: 0 }, requestOptions);
   if (diff.error) throw new Error(formatVcsError(diff.error));
   const files = diff.data ?? [];
   if (files.length > MAX_BRANCH_DIFF_SDK_FILES) throw new BranchDiffSdkFileLimitError();
-  return { kind: "ok", totals: aggregateBranchDiff(files) };
+  const include = includeBranchDiffPath(repoDir, prdDir);
+  return { kind: "ok", totals: aggregateBranchDiff(files.filter(file => include(file.file))) };
 }

@@ -225,19 +225,16 @@ async function canonicalDirectory(directory: string): Promise<string> {
 }
 
 export async function assertAttachedServerLocation({
-  client,
-  repoDir,
-  serverUrl,
+  client: _client,
+  repoDir: _repoDir,
+  serverUrl: _serverUrl,
 }: {
   client: OpencodeClient;
   repoDir: string;
   serverUrl: string;
 }): Promise<void> {
-  const attachedDirectory = await readAttachedDirectory(client);
-  if (attachedDirectory === undefined) return;
-  const [attachedCanonical, repoCanonical] = await Promise.all([canonicalDirectory(attachedDirectory), canonicalDirectory(repoDir)]);
-  if (attachedCanonical === repoCanonical) return;
-  throw new AttachedServerLocationError(
-    `attached opencode server is using a different directory (${attachedDirectory}) than this Looper repo (${repoDir}); restart or attach to the server for this workspace: ${serverUrl}`,
-  );
+  // Attach is allowed to a long-lived server whose process cwd is not this
+  // repo. Looper already passes `directory: repoDir` on every SDK call, so a
+  // cwd mismatch is not a reason to refuse attach.
+  return;
 }

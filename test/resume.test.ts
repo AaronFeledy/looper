@@ -203,7 +203,7 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
     expect(createIdx).toBeGreaterThan(abortIdx);
   });
 
-  test("pending prior session with a messageID reattaches instead of creating a new session", async () => {
+  test.each([false, true])("saved active work reattaches without a fresh session (background only: %s)", async (backgroundOnly) => {
     const { repoDir, configDir } = setupScratch();
     scratch = repoDir;
     const state: LoopState = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
@@ -228,9 +228,13 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
         },
         status: async () => {
           statusReads += 1;
-          // First read (resume gate) reports busy so we reattach; subsequent
-          // reattach polls report idle so the reattach loop completes.
-          return { data: { ses_old: { type: statusReads <= 1 ? "busy" : "idle" } } };
+          // Foreground work is busy on the gate read. In the background-only
+          // case the gate sees an idle parent and then a live child; both are
+          // idle once reattachment begins.
+          return { data: {
+            ses_old: { type: !backgroundOnly && statusReads <= 1 ? "busy" : "idle" },
+            ses_child: { type: backgroundOnly && statusReads <= 2 ? "busy" : "idle" },
+          } };
         },
         messages: async () => ({
           data: [
@@ -241,7 +245,7 @@ describe("resume gate (reattach if active, otherwise restart)", () => {
             },
           ],
         }),
-        children: async () => ({ data: [] }),
+        children: async () => ({ data: backgroundOnly ? [{ id: "ses_child", parentID: "ses_old", time: { created: Date.now() } }] : [] }),
       },
       event: {
         subscribe: async (_p: unknown, options: { signal: AbortSignal }) => ({ stream: abortableStream(options.signal) }),

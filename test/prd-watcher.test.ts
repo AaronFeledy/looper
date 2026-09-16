@@ -22,8 +22,9 @@ async function waitForPrdStatus(
   throw new Error(`timed out waiting for PRD status; observed=${JSON.stringify(observed)}`);
 }
 
-function writePrd(dir: string, passes: readonly boolean[]): void {
-  const userStories = passes.map((value) => ({ passes: value }));
+/** Without a phase resolver the watcher treats every story as remaining. */
+function writePrd(dir: string, storyIds: readonly string[]): void {
+  const userStories = storyIds.map((id) => ({ id, title: id }));
   writeFileSync(join(dir, PRD_INDEX_FILENAME), JSON.stringify({ userStories }));
 }
 
@@ -39,8 +40,8 @@ describe("watchPrd", () => {
   });
 
   test("fires an initial status immediately", () => {
-    // Given: a PRD file with one passing and one remaining story.
-    writePrd(dir, [true, false]);
+    // Given: a PRD file with two stories (both remaining without a phase resolver).
+    writePrd(dir, ["US-1", "US-2"]);
     const observed: PrdStatus[] = [];
 
     // When: the watcher starts.
@@ -52,7 +53,7 @@ describe("watchPrd", () => {
 
     try {
       // Then: the first status is pushed synchronously.
-      expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 2 }]);
+      expect(observed).toEqual([{ kind: "ok", remaining: 2, total: 2, terminal: "merged" }]);
     } finally {
       watcher.stop();
     }
@@ -60,7 +61,7 @@ describe("watchPrd", () => {
 
   test("publishes a changed count after prd.json is rewritten", async () => {
     // Given: a started watcher observing a PRD file.
-    writePrd(dir, [true, false]);
+    writePrd(dir, ["US-1", "US-2"]);
     const observed: PrdStatus[] = [];
     const watcher = watchPrd({
       prdDir: dir,
@@ -69,16 +70,16 @@ describe("watchPrd", () => {
     });
 
     try {
-      expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 2 }]);
+      expect(observed).toEqual([{ kind: "ok", remaining: 2, total: 2, terminal: "merged" }]);
 
-      // When: the file is rewritten with a different remaining count.
-      writePrd(dir, [false, false]);
+      // When: the file is rewritten with a different story count.
+      writePrd(dir, ["US-1", "US-2", "US-3"]);
 
       // Then: polling sees the mtime change and publishes the new count.
-      await waitForPrdStatus(observed, (statuses) => statuses.some((status) => status.kind === "ok" && status.remaining === 2));
+      await waitForPrdStatus(observed, (statuses) => statuses.some((status) => status.kind === "ok" && status.total === 3));
       expect(observed).toEqual([
-        { kind: "ok", remaining: 1, total: 2 },
-        { kind: "ok", remaining: 2, total: 2 },
+        { kind: "ok", remaining: 2, total: 2, terminal: "merged" },
+        { kind: "ok", remaining: 3, total: 3, terminal: "merged" },
       ]);
     } finally {
       watcher.stop();
@@ -87,7 +88,7 @@ describe("watchPrd", () => {
 
   test("publishes an error when prd.json disappears", async () => {
     // Given: a watcher with a readable PRD file.
-    writePrd(dir, [true]);
+    writePrd(dir, ["US-1"]);
     const observed: PrdStatus[] = [];
     const watcher = watchPrd({
       prdDir: dir,
@@ -111,7 +112,7 @@ describe("watchPrd", () => {
 
   test("refresh() re-reads immediately and suppresses identical statuses", () => {
     // Given: a long-poll watcher so only refresh() can observe within the test.
-    writePrd(dir, [true, false]);
+    writePrd(dir, ["US-1", "US-2"]);
     const observed: PrdStatus[] = [];
     const watcher = watchPrd({
       prdDir: dir,
@@ -124,16 +125,16 @@ describe("watchPrd", () => {
       watcher.refresh();
 
       // Then: the identical status is not emitted again.
-      expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 2 }]);
+      expect(observed).toEqual([{ kind: "ok", remaining: 2, total: 2, terminal: "merged" }]);
 
       // When: the file changes and refresh() is called.
-      writePrd(dir, [true, true]);
+      writePrd(dir, ["US-1"]);
       watcher.refresh();
 
       // Then: the changed status is emitted immediately.
       expect(observed).toEqual([
-        { kind: "ok", remaining: 1, total: 2 },
-        { kind: "ok", remaining: 0, total: 2 },
+        { kind: "ok", remaining: 2, total: 2, terminal: "merged" },
+        { kind: "ok", remaining: 1, total: 1, terminal: "merged" },
       ]);
     } finally {
       watcher.stop();
@@ -142,22 +143,22 @@ describe("watchPrd", () => {
 
   test("stop() prevents timer and refresh callbacks", async () => {
     // Given: a running watcher.
-    writePrd(dir, [false]);
+    writePrd(dir, ["US-1"]);
     const observed: PrdStatus[] = [];
     const watcher = watchPrd({
       prdDir: dir,
       pollIntervalMs: POLL_MS,
       onUpdate: (status) => observed.push(status),
     });
-    expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 1 }]);
+    expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 1, terminal: "merged" }]);
 
     // When: the watcher stops and the file changes.
     watcher.stop();
-    writePrd(dir, [true]);
+    writePrd(dir, ["US-1", "US-2"]);
     watcher.refresh();
     await Bun.sleep(POLL_MS * 4);
 
     // Then: no further updates are published.
-    expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 1 }]);
+    expect(observed).toEqual([{ kind: "ok", remaining: 1, total: 1, terminal: "merged" }]);
   });
 });

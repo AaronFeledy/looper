@@ -9,6 +9,7 @@ import { runNonTtyIterations } from "../src/lib/fallback.ts";
 import { runIteration } from "../src/lib/orchestrator.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths, readRunState, writeRunState } from "../src/lib/state-files.ts";
+import { writeStoryPhase } from "../src/lib/story-state-files.ts";
 import { createAdjudicationStore } from "../src/persistence/adjudication-store.ts";
 import { createRunStateStore } from "../src/persistence/run-state-store.ts";
 import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts";
@@ -36,12 +37,18 @@ function setup(stepCount: number, adjudicate = true): Scratch {
   }
   writeFileSync(join(configDir, "looper.yaml"), `${lines.join("\n")}\n`);
   writePrd(prdDir, true);
+  writeStoryPhase("story-1", "reviewed");
   scratchDirs.push(repoDir);
   return { repoDir, configDir, prdDir };
 }
 
 function writePrd(prdDir: string, passes: boolean): void {
   writeFileSync(join(prdDir, "prd.json"), JSON.stringify({ userStories: [{ id: "story-1", passes }] }));
+}
+
+/** Mirror the old true/false PRD flip as a reviewed↔building phase demotion/promotion. */
+function writePhaseLikePasses(passes: boolean): void {
+  writeStoryPhase("story-1", passes ? "reviewed" : "building");
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -92,18 +99,21 @@ afterEach(() => {
 });
 
 describe("PRD adjudication routing", () => {
-  test("accrues passes transitions across normal steps", async () => {
+  test("accrues phase transitions across normal steps", async () => {
     const scratch = setup(3);
     const store = createInMemoryAdjudicationStore();
-    const stub = clientFor(scratch.repoDir, (_prompt, ordinal) => writePrd(scratch.prdDir, ordinal % 2 === 0));
+    const stub = clientFor(scratch.repoDir, (_prompt, ordinal) => {
+      writePrd(scratch.prdDir, ordinal % 2 === 0);
+      writePhaseLikePasses(ordinal % 2 === 0);
+    });
     const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2", "Step3"] });
 
     await runIteration({ state, iteration: 1, client: stub.client, ...scratch, adjudication: { store, step: undefined, threshold: 99, writeStop: () => {} } });
 
-    expect(store.readHistory().map(({ from, to, stepName }) => ({ from, to, stepName }))).toEqual([
-      { from: true, to: false, stepName: "Step1" },
-      { from: false, to: true, stepName: "Step2" },
-      { from: true, to: false, stepName: "Step3" },
+    expect(store.readHistory().map(({ from, to, stepName, source }) => ({ from, to, stepName, source }))).toEqual([
+      { from: "reviewed", to: "building", stepName: "Step1", source: "signal" },
+      { from: "building", to: "reviewed", stepName: "Step2", source: "signal" },
+      { from: "reviewed", to: "building", stepName: "Step3", source: "signal" },
     ]);
   });
 
@@ -111,7 +121,10 @@ describe("PRD adjudication routing", () => {
     const scratch = setup(4);
     const store = createInMemoryAdjudicationStore();
     const stub = clientFor(scratch.repoDir, (prompt, ordinal) => {
-      if (!prompt.includes("resolve the PRD conflict")) writePrd(scratch.prdDir, ordinal % 2 === 0);
+      if (!prompt.includes("resolve the PRD conflict")) {
+        writePrd(scratch.prdDir, ordinal % 2 === 0);
+        writePhaseLikePasses(ordinal % 2 === 0);
+      }
     });
     const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2", "Step3", "Step4"] });
 
@@ -137,7 +150,10 @@ describe("PRD adjudication routing", () => {
     const scratch = setup(3);
     const store = createInMemoryAdjudicationStore();
     const stub = clientFor(scratch.repoDir, (prompt, ordinal) => {
-      if (!prompt.includes("resolve the PRD conflict")) writePrd(scratch.prdDir, ordinal % 2 === 0);
+      if (!prompt.includes("resolve the PRD conflict")) {
+        writePrd(scratch.prdDir, ordinal % 2 === 0);
+        writePhaseLikePasses(ordinal % 2 === 0);
+      }
     });
     const state = createLoopState({ maxIterations: 1, stepNames: ["Step1", "Step2", "Step3"] });
 
@@ -154,11 +170,11 @@ describe("PRD adjudication routing", () => {
     const scratch = setup(1);
     const store = createInMemoryAdjudicationStore();
     store.appendHistory([
-      { storyId: "story-1", from: true, to: false, iteration: 1, stepName: "prior", at: "2026-07-18T00:00:01.000Z" },
-      { storyId: "story-1", from: true, to: false, iteration: 1, stepName: "prior", at: "2026-07-18T00:00:02.000Z" },
+      { storyId: "story-1", from: "reviewed", to: "building", iteration: 1, stepName: "prior", at: "2026-07-18T00:00:01.000Z", source: "signal" },
+      { storyId: "story-1", from: "reviewed", to: "building", iteration: 1, stepName: "prior", at: "2026-07-18T00:00:02.000Z", source: "signal" },
     ]);
     store.markAdjudicated();
-    const stub = clientFor(scratch.repoDir, () => writePrd(scratch.prdDir, false));
+    const stub = clientFor(scratch.repoDir, () => { writePrd(scratch.prdDir, false); writePhaseLikePasses(false); });
     const state = createLoopState({ maxIterations: 1, stepNames: ["Step1"] });
 
     // When a single new true->false flip accrues after the watermark.
@@ -322,7 +338,7 @@ describe("PRD adjudication routing", () => {
     createAdjudicationStore({ configDir: scratch.configDir }).writeMarker("fallback route");
     const stub = clientFor(scratch.repoDir, () => createRunStateStore({ configDir: scratch.configDir }).writeStop("adjudication complete"));
 
-    await runNonTtyIterations({ options: { attach: false, command: { kind: "run" }, fresh: false, start: true, maxIterations: 1, waitProvided: false, waitDuration: 0 }, ...scratch, client: stub.client, recoverySnapshots: false, currentBranch: async () => "main" });
+    await runNonTtyIterations({ options: { attach: false, command: { kind: "run" }, fresh: false, resetStories: false, start: true, maxIterations: 1, waitProvided: false, waitDuration: 0 }, ...scratch, client: stub.client, recoverySnapshots: false, currentBranch: async () => "main" });
 
     expect(stub.prompts).toHaveLength(1);
     expect(stub.prompts[0]).toContain("resolve the PRD conflict");

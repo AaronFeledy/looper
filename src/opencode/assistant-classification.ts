@@ -72,7 +72,7 @@ function completedAt(time: unknown): unknown {
 
 function assistantIsOpen(entry: ClassifiableMessage): boolean {
   if (entry.info.role !== "assistant" || !isRecord(entry.info.time)) return false;
-  return completedAt(entry.info.time) === undefined;
+  return assistantErrorMessage(entry.info.error) === undefined && completedAt(entry.info.time) === undefined;
 }
 
 export function classifyMessagesForParent(
@@ -80,15 +80,10 @@ export function classifyMessagesForParent(
   parentMessageID: string,
 ): AssistantClassification {
   let tracked: AssistantClassification | undefined;
-  let terminalError: AssistantClassification | undefined;
   for (const entry of messages) {
     if (entry.info.role !== "assistant") continue;
-    const error = entry.info.error;
-    const errorMessage = assistantErrorMessage(error);
-    if (errorMessage !== undefined && isNonRetryableAssistantError(error)) {
-      terminalError ??= { kind: "failed", errorMessage };
-    }
     if (stringValue(entry.info.parentID) !== parentMessageID) continue;
+    const errorMessage = assistantErrorMessage(entry.info.error);
     if (errorMessage !== undefined) {
       tracked = { kind: "failed", errorMessage };
       continue;
@@ -96,14 +91,13 @@ export function classifyMessagesForParent(
     if (completedAt(entry.info.time) !== undefined) {
       if (assistantHasMeaningfulActivity(entry)) {
         tracked = { kind: "done" };
-      } else if (tracked?.kind !== "done") {
+      } else if (tracked?.kind !== "done" && tracked?.kind !== "failed") {
         tracked = { kind: "empty", errorMessage: emptyAssistantMessage(stringValue(entry.info.id) ?? parentMessageID) };
       }
     } else {
       tracked = { kind: "in-progress" };
     }
   }
-  if (terminalError !== undefined) return terminalError;
   return tracked ?? { kind: "missing" };
 }
 
@@ -121,12 +115,18 @@ export function classifyMessagesForCurrentTurn(
   messages: readonly ClassifiableMessage[],
   fallbackParentID?: string,
 ): AssistantClassification {
-  for (const entry of messages) {
+  // A fatal continuation can arrive before its user message is in the snapshot.
+  // Preserve that failure, but only until a later assistant actually resumes or
+  // completes work. Historical errors must not poison every recovery turn.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const entry = messages[index]!;
     if (entry.info.role !== "assistant") continue;
     const errorMessage = assistantErrorMessage(entry.info.error);
-    if (errorMessage !== undefined && isNonRetryableAssistantError(entry.info.error)) {
-      return { kind: "failed", errorMessage };
+    if (errorMessage !== undefined) {
+      if (isNonRetryableAssistantError(entry.info.error)) return { kind: "failed", errorMessage };
+      break;
     }
+    if (assistantIsOpen(entry) || (completedAt(entry.info.time) !== undefined && assistantHasMeaningfulActivity(entry))) break;
   }
   if (messages.some(assistantIsOpen)) return { kind: "in-progress" };
   const latest = latestUserMessageIdFrom(messages);

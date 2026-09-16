@@ -31,7 +31,7 @@ export type GithubStatus =
 
 export type PrdStatus =
   | { readonly kind: "loading" }
-  | { readonly kind: "ok"; readonly remaining: number; readonly total: number }
+  | { readonly kind: "ok"; readonly remaining: number; readonly total: number; readonly terminal?: string }
   | { readonly kind: "error"; readonly message: string };
 
 export type BranchDiffStatus =

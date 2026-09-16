@@ -1,3 +1,4 @@
+import { displayStepAt } from "../lib/state.ts";
 import {
   BoxRenderable,
   LayoutEvents,
@@ -10,7 +11,7 @@ import {
 import type { LooperEvent } from "../core/events.ts";
 import type { BackgroundAgent, HistoryView, LoopState, LoopStep, ScrollIntent } from "../lib/state.ts";
 import { ansiToStyledText } from "../lib/ansi.ts";
-import { backgroundAgentLabel, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
+import { backgroundAgentLabel, selectedHistoryStep, consumeScrollIntent, setHistoryViewScroll, setSelectedStepOutputScroll, subscribe } from "../lib/state.ts";
 import { eventsToOutputBlocks, type OutputBlock } from "../presentation/tui/stream-blocks.ts";
 import {
   FOLLOW_INDICATOR,
@@ -18,6 +19,9 @@ import {
   pinAfterUserScroll,
 } from "../lib/output-follow.ts";
 import { createToolBlock, toolOutputBlockKey } from "./tool-block.ts";
+import { childActivitySummary, stepActivitySummary } from "../presentation/tui/agent-activity.ts";
+import { constellationReducedMotion } from "../config/tunables.ts";
+import { flowingActivityText } from "./activity-text.ts";
 import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
 
 const FOLLOW_PULSE_MS = 80;
@@ -184,7 +188,7 @@ function resolveSelectedOutput(state: LoopState): SelectedOutput {
 
   for (const candidateStepIndex of candidateStepIndexes) {
     if (candidateStepIndex === null) continue;
-    const step = state.steps[candidateStepIndex];
+    const step = displayStepAt(state, candidateStepIndex);
     if (!step) continue;
     if (
       candidateStepIndex === state.selectedStepIndex &&
@@ -260,6 +264,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     borderColor: "#45475a",
     title: outputTitle(state, initialOutput),
     paddingX: 1,
+    wrapperOptions: { marginBottom: 1 },
     scrollY: true,
     scrollX: false,
     // Terminal wheel events commonly carry a three-row delta. Scale that to one row per notch so
@@ -282,7 +287,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   const followIndicator = new TextRenderable(renderer, {
     id: "loop-agent-follow-indicator",
     position: "absolute",
-    // Sit on the bottom border under the scrollbar (one column right of former bottomTitle).
+    // Sit on the bottom border under the scrollbar.
     right: 0,
     bottom: -1,
     width: 1,
@@ -294,6 +299,33 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   });
   // ScrollBox.add routes into content; BoxRenderable.add keeps this as fixed chrome.
   BoxRenderable.prototype.add.call(stream, followIndicator);
+
+  const activity = new TextRenderable(renderer, {
+    id: "loop-agent-activity", position: "absolute", left: 1, right: 1, bottom: 0,
+    height: 1, truncate: true, wrapMode: "none", selectable: false,
+    content: "", fg: "#91d9df", zIndex: 100,
+  });
+  BoxRenderable.prototype.add.call(stream, activity);
+  let activityPhase = 0;
+  let activityText = "";
+  let activityRunning = false;
+  const paintActivity = () => {
+    // Let the native row truncate after layout, including its first classic-UI frame.
+    const text = activityText;
+    const animate = activityRunning && !(state.constellation?.reducedMotion ?? constellationReducedMotion());
+    activity.content = animate ? ansiToStyledText(flowingActivityText(text, activityPhase)) : text;
+  };
+  const refreshActivity = (output: SelectedOutput) => {
+    const sessionID = output.backgroundAgent?.sessionID ?? output.step?.sessionID;
+    const request = state.pendingRequests.find(candidate => candidate.sessionID === sessionID);
+    const historyReason = output.history ? selectedHistoryStep(state)?.step.restartReason : undefined;
+    activityText = output.history ? historyReason === "timeout" ? "Timed out" : historyReason === "manual" ? "Restarted" : "Recorded output" : output.backgroundAgent
+      ? childActivitySummary(output.backgroundAgent, request, undefined, state.activityContext)
+      : output.step ? stepActivitySummary(output.step, request, state.activityContext) : "Waiting for activity";
+    activityRunning = !output.history && !request && (output.backgroundAgent
+      ? output.backgroundAgent.activity !== "idle" : output.step?.status === "running");
+    paintActivity();
+  };
 
   const applyFollowIndicator = (pinnedToBottom: boolean): void => {
     if (followIndicator.isDestroyed) return;
@@ -488,7 +520,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   };
 
   const onVerticalScrollChange = (): void => {
-    if (applyingProgrammaticScroll) return;
+    if (applyingProgrammaticScroll || !stream.visible) return;
     const nextPin = pinAfterUserScroll(stream.scrollTop, maxScrollTop());
     const pinChanged = nextPin !== pinToBottom;
     pinToBottom = nextPin;
@@ -497,7 +529,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   };
 
   const applyFollowScroll = (): void => {
-    if (stream.isDestroyed) return;
+    if (stream.isDestroyed || !stream.visible) return;
     if (pinToBottom) scrollToBottomIfPinned();
     else restoreSelectedScroll();
   };
@@ -568,6 +600,7 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     selectedHistoryKey = nextHistoryKey;
     pinToBottom = (selectedOutput.history ?? selectedOutput.backgroundAgent ?? selectedOutput.step)?.outputPinnedToBottom ?? pinToBottom;
     stream.title = outputTitle(state, selectedOutput);
+    refreshActivity(selectedOutput);
     applyFollowIndicator(pinToBottom);
     const nextOutputKey = outputKey(selectedOutput);
     if (nextOutputKey !== renderedOutputKey) {
@@ -580,17 +613,23 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
     scheduleFollowScroll(hasIntent);
   };
 
+  stream.on(LayoutEvents.RESIZED, paintActivity);
   const unsubscribe = subscribe(rebuild);
   const pulseTimer = setInterval(() => {
-    if (!pinToBottom) return;
+    if (!stream.visible) return;
     pulsePhaseMs = (pulsePhaseMs + FOLLOW_PULSE_MS) % 2400;
-    applyFollowIndicator(true);
+    if (pinToBottom) applyFollowIndicator(true);
+    if (activityRunning) {
+      activityPhase = (activityPhase + 0.1) % (Math.PI * 2);
+      paintActivity();
+    }
   }, FOLLOW_PULSE_MS);
   pulseTimer.unref?.();
   rebuild();
 
   stream.on(RenderableEvents.DESTROYED, () => {
     clearInterval(pulseTimer);
+    stream.off(LayoutEvents.RESIZED, paintActivity);
     stream.verticalScrollBar.off("change", onVerticalScrollChange);
     stream.content.off(LayoutEvents.LAYOUT_CHANGED, applyFollowScroll);
     stream.content.onSizeChange = previousContentSizeChange;

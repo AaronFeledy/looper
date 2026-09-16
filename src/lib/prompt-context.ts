@@ -50,14 +50,21 @@ export type ContextInput = {
   readonly totalSteps: number;
   readonly priorSteps: readonly PriorStepInfo[];
   readonly timeoutMs: number;
-  readonly prd?: { readonly remaining: number; readonly total: number };
+  readonly prd?: {
+    readonly remaining: number;
+    readonly total: number;
+    readonly terminal: StoryPhase;
+    readonly phases: readonly { readonly id: string; readonly phase: StoryPhase }[];
+  };
   readonly prdPaths?: PrdPaths;
   readonly vcs?: VcsSnapshot;
   readonly story?: {
     readonly branch?: string;
     readonly storyId?: string;
-    readonly passes?: boolean;
+    readonly branchRule?: string;
     readonly phase?: StoryPhase;
+    readonly next?: { readonly id: string; readonly title?: string };
+    readonly expects?: StoryPhase;
   };
 };
 
@@ -175,9 +182,15 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
       prdLines.push(`  progress: ${input.prdPaths.progress}`);
     }
     if (input.prd !== undefined) {
-      prdLines.push(`  passing: ${input.prd.total - input.prd.remaining}`);
+      prdLines.push(`  complete: ${input.prd.total - input.prd.remaining}`);
       prdLines.push(`  total: ${input.prd.total}`);
       prdLines.push(`  remaining: ${input.prd.remaining}`);
+      prdLines.push(`  terminal: ${input.prd.terminal}`);
+      if (input.prd.phases.length > 0) {
+        const shown = input.prd.phases.slice(0, 12).map(({ id, phase }) => `${id}=${phase}`);
+        const omitted = input.prd.phases.length - shown.length;
+        prdLines.push(`  phases: ${shown.join(", ")}${omitted > 0 ? `, +${omitted} more` : ""}`);
+      }
     }
     fixedLines.push(prdLines.join("\n"));
   }
@@ -188,13 +201,20 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
 
   const story = input.story;
   const storyBlock =
-    policy.story && story?.branch
+    policy.story && story !== undefined && (story.branch !== undefined || story.next !== undefined || story.expects !== undefined)
       ? [
           "story:",
-          `  branch: ${story.branch}`,
+          ...(story.branch !== undefined ? [`  branch: ${story.branch}`] : []),
           ...(story.storyId !== undefined ? [`  storyId: ${story.storyId}`] : []),
-          ...(story.passes !== undefined ? [`  passes: ${story.passes}`] : []),
           ...(story.phase !== undefined ? [`  phase: ${story.phase}`] : []),
+          ...(story.branchRule !== undefined ? [`  branchRule: ${story.branchRule}`] : []),
+          ...(story.next !== undefined ? [`  next: ${story.next.id}${story.next.title === undefined ? "" : ` — ${story.next.title}`}`] : []),
+          ...(story.expects !== undefined
+            ? [
+                `  expects: ${story.expects}`,
+                `  outcome: run one of these as a shell command (do not print it as your reply): looper signal story-phase ${story.expects} | looper signal story-phase <lower> --reason "<defect>" | looper signal blocked --reason "<why>" | looper signal no-op --reason "<why>"`,
+              ]
+            : []),
         ].join("\n")
       : "";
 

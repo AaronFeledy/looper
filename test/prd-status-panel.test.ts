@@ -35,11 +35,11 @@ describe("buildPrdPanelLines", () => {
     expect(line.styledContent).toBeUndefined();
   });
 
-  test("colors all-passing status green", () => {
+  test("colors all-terminal status green", () => {
     const line = buildPrdPanelLines({ kind: "ok", remaining: 0, total: 41 }, 0, 40)[0]!;
 
     expect(line.content).toContain("41/41");
-    expect(line.content).toContain("all passing");
+    expect(line.content).toContain("all merged");
     expect(line.fg).toBe("#a6e3a1");
   });
 

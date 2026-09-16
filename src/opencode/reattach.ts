@@ -123,6 +123,19 @@ export async function resumeSessionWorkState({
     }
   }
 
+  // A parent can be idle while its delegated session is still working, even
+  // without a continuation marker (for example after a plugin/server restart).
+  // Verify children before allowing the caller to restart that parent fresh.
+  if (parentState === "idle") {
+    try {
+      const probe = await boundedBackgroundLivenessProbe({ client, repoDir, parentSessionID: sessionID, timeoutMs, signal });
+      if (probe.errorMessage !== undefined) return "unknown";
+      if (probe.parent === "pending" || probe.pendingChildren.length > 0) return "running";
+      return probe.parent;
+    } catch {
+      return "unknown";
+    }
+  }
   return parentState;
 }
 

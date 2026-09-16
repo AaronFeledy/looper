@@ -9,20 +9,22 @@ import { createInMemoryAdjudicationStore } from "./helpers/adjudication-stub.ts"
 
 const FIRST_TRANSITION: StoryTransitionRecord = {
   storyId: "US-1",
-  from: true,
-  to: false,
+  from: "reviewed",
+  to: "building",
   iteration: 2,
   stepName: "build",
   at: "2026-07-19T12:00:00.000Z",
+  source: "signal",
 };
 
 const SECOND_TRANSITION: StoryTransitionRecord = {
   storyId: "US-1",
-  from: false,
-  to: true,
+  from: "building",
+  to: "reviewed",
   iteration: 3,
   stepName: "review",
   at: "2026-07-19T12:05:00.000Z",
+  source: "signal",
 };
 
 type StoreHarness = {
@@ -154,7 +156,7 @@ describe("adjudication store paths", () => {
     store.appendHistory([FIRST_TRANSITION]);
 
     expect(existsSync(join(configDir, ".looper-adjudicate"))).toBe(true);
-    expect(existsSync(join(configDir, ".looper-prd-history.json"))).toBe(true);
+    expect(existsSync(join(configDir, ".looper-phase-history.json"))).toBe(true);
   });
 
   test("fails closed when the adjudicator session record is corrupt", () => {

@@ -1223,6 +1223,41 @@ describe("runOpenCodeStep event stream recovery", () => {
     expect(abortCalled).toBe(true);
   });
 
+  test("completes a same-session recovery nudge despite a historical fatal error", async () => {
+    repoDir = mkdtempSync(join(tmpdir(), "looper-recovered-fatal-"));
+    writeIdleContinuationRecord(repoDir, SID);
+    let promptMessageID = "";
+    let promptCount = 0;
+    const client = {
+      session: {
+        prompt: async (params: { messageID: string }) => {
+          promptMessageID = params.messageID;
+          promptCount += 1;
+          return { data: {} };
+        },
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: [
+          assistantFatalError(),
+          { info: { id: promptMessageID, role: "user" }, parts: [] },
+          assistantDone(promptMessageID),
+        ] }),
+        children: async () => ({ data: [] }),
+        abort: async () => ({ data: {} }),
+      },
+      event: { subscribe: async () => ({ stream: fromArray([]) }) },
+    } as unknown as OpencodeClient;
+    const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
+    const result = await runOpenCodeStep({
+      ctx: loopStateRunStepContext(state, state.control), stepIndex: 0,
+      prompt: "Continue working to completion if you haven't already.",
+      client, repoDir, sessionID: SID,
+      step: { name: "build", prompt: "/tmp/unused-prompt" },
+    });
+    expect(result.status).toBe("done");
+    expect(result.errorMessage).toBeUndefined();
+    expect(promptCount).toBe(1);
+  });
+
   test("fails instead of waiting when a later assistant has a non-retryable error", async () => {
     repoDir = mkdtempSync(join(tmpdir(), "looper-fatal-later-"));
     let promptMessageID = "";

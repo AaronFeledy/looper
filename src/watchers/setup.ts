@@ -1,12 +1,13 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { branchDiffCollectionTimeoutMs } from "../config/tunables.ts";
+import type { StoryPhaseResolver } from "../engine/story-phases.ts";
 import { detectGithubRepo } from "../lib/github.ts";
 import { watchBranch } from "./branch.ts";
 import { collectBranchDiff } from "./branch-diff.ts";
 import { watchBranchDiff, type BranchDiffWatcher } from "./branch-diff-watcher.ts";
 import { watchGithubPr, type GithubWatcher } from "./github.ts";
-import { watchPrd, type PrdWatcher } from "./prd.ts";
+import { readResolvedPrdStatus, watchPrd, type PrdWatcher } from "./prd.ts";
 import type { BranchDiffWatcherEvent, BranchWatcherEvent, GithubWatcherEvent, PrdWatcherEvent } from "./watcher-events.ts";
 
 export type BranchWatcherHandle = {
@@ -56,13 +57,14 @@ export async function startGithubWatcher(opts: {
 export function startBranchDiffWatcher(opts: {
   readonly client: OpencodeClient;
   readonly repoDir: string;
+  readonly prdDir?: string;
   readonly getBranch: () => string;
   readonly emit: (event: BranchDiffWatcherEvent) => void;
 }): BranchDiffWatcher {
   return watchBranchDiff({
     getBranch: opts.getBranch,
     collectionTimeoutMs: branchDiffCollectionTimeoutMs(),
-    collect: (branch, signal) => collectBranchDiff(opts.client, opts.repoDir, branch, signal),
+    collect: (branch, signal) => collectBranchDiff(opts.client, opts.repoDir, branch, signal, opts.prdDir),
     onUpdate: (status) => opts.emit({ kind: "branch-diff", status }),
   });
 }
@@ -71,11 +73,14 @@ export function startPrdWatcher(opts: {
   readonly prdDir: string | undefined;
   readonly emit: (event: PrdWatcherEvent) => void;
   readonly onEnabled: () => void;
+  readonly storyResolver?: StoryPhaseResolver;
 }): PrdWatcher | undefined {
   if (opts.prdDir === undefined) return undefined;
   opts.onEnabled();
+  const resolver = opts.storyResolver;
   return watchPrd({
     prdDir: opts.prdDir,
     onUpdate: (status) => opts.emit({ kind: "prd-status", status }),
+    ...(resolver !== undefined ? { read: () => readResolvedPrdStatus(resolver) } : {}),
   });
 }

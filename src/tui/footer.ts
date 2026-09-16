@@ -1,3 +1,4 @@
+import { setDiagnosticsVisible } from "../lib/tui-diagnostics.ts";
 import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
@@ -28,6 +29,8 @@ export function footerStatus(state: LoopState): string {
     const queued = state.pendingRequests.length > 1 ? `  (+${state.pendingRequests.length - 1} waiting)` : "";
     return `agent is waiting on you - ${keys}${queued}  [q]uit`;
   }
+  if (modalFocusWinner(state) === "diagnostics") return "[esc/l] close diagnostics  ·  ↑↓ scroll";
+  if (modalFocusWinner(state) === "inspector") return "[esc] close inspector  ·  [tab] section  ·  [c] config";
   if (state.historyView !== null) {
     const navHint =
       state.focusedPane === "steps"
@@ -48,6 +51,9 @@ export function footerStatus(state: LoopState): string {
     return `press any key to close config`;
   }
 
+  if (!state.started && state.bootResumeSession?.workState === "running" && !state.bootResumeSession.canReattach) {
+    return "[g] check saved session recovery";
+  }
   const flags: string[] = [];
   if (isPauseEngaged(state)) flags.push("paused — press p to resume");
   if (state.stopAfterIteration) flags.push("ending after iteration");
@@ -55,6 +61,7 @@ export function footerStatus(state: LoopState): string {
   if (state.skipRequested) flags.push("skipping step");
   const timeoutHint = timeoutExtendHintText(state.control.timeoutSnapshot());
   if (timeoutHint !== undefined) flags.push(timeoutHint);
+  if (state.constellation && flags.length === 0) return "[o/enter] inspect  ·  [b] context  ·  [i] plan";
   return flags.join("  ·  ");
 }
 
@@ -132,9 +139,19 @@ export function createFooter(renderer: CliRenderer, state: LoopState): BoxRender
     truncate: true,
   });
 
+  const diagnostics = new TextRenderable(renderer, {
+    id: "loop-footer-diagnostics", flexShrink: 0, height: 1, marginLeft: 1, selectable: false, content: "",
+    onMouseUp(event) {
+      const winner = modalFocusWinner(state);
+      if (event.button === 0 && event.type === "up" && (winner === "none" || winner === "inspector"))
+        setDiagnosticsVisible(state, true);
+    },
+  });
+
   footer.add(branch);
   footer.add(divider);
   footer.add(status);
+  footer.add(diagnostics);
   footer.add(help);
 
   const paint = () => {
@@ -145,9 +162,13 @@ export function createFooter(renderer: CliRenderer, state: LoopState): BoxRender
     status.content = footerStatus(state);
     status.fg = footerColor(state);
     help.content = footerHelpHint();
+    diagnostics.visible = Boolean(state.diagnostics?.entries.length);
+    diagnostics.content = state.diagnostics?.unread ? `[l] ! ${state.diagnostics.unread} new` : "[l] diagnostics";
+    diagnostics.fg = state.diagnostics?.unread ? "#f3bf7a" : HELP_COLOR;
     renderer.requestRender();
   };
 
+  paint();
   const unsubscribe = subscribe(paint);
   const timer = setInterval(paint, 1_000);
   timer.unref?.();

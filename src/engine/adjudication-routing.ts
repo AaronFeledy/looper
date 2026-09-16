@@ -1,27 +1,24 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
 import { buildAdjudicateReason } from "../lib/adjudication-files.ts";
 import { loadAdjudicateStep } from "../lib/config.ts";
 import {
   detectOscillation,
-  diffPasses,
-  type PrdPassesMap,
+  diffPhases,
+  type StoryPhasesMap,
   type StoryTransitionRecord,
 } from "../lib/adjudication-detection.ts";
 import type { LoadedStep } from "../lib/config.ts";
 import { createStepRow, notify, type LoopState } from "../lib/state.ts";
+import type { StoryPhase } from "../lib/story-state-files.ts";
 import { prdFlipThreshold } from "../config/tunables.ts";
 import { createAdjudicationStore } from "../persistence/adjudication-store.ts";
 import type { AdjudicationStore } from "./engine-ports.ts";
 
-export type PrdPassesReader = (prdDir: string) => PrdPassesMap | undefined;
+export type StoryPhaseReader = (storyId: string) => StoryPhase | undefined;
 
 export type AdjudicationConfig = {
   readonly store: AdjudicationStore;
   readonly step?: LoadedStep;
   readonly threshold: number;
-  readonly readPasses?: PrdPassesReader;
   readonly now?: () => Date;
 };
 
@@ -50,41 +47,14 @@ export type RoutingDecision =
 
 type RecordStepTransitionsInput = {
   readonly adjudication: AdjudicationConfig;
-  readonly before: PrdPassesMap | undefined;
-  readonly after: PrdPassesMap | undefined;
+  readonly before: StoryPhasesMap | undefined;
+  readonly after: StoryPhasesMap | undefined;
   readonly iteration: number;
   readonly stepName: string;
   readonly detect: boolean;
+  /** Defaults to `"signal"` (step-window diffs). Engine resets pass `"engine"`. */
+  readonly source?: "signal" | "engine";
 };
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function readPrdPasses(prdDir: string): PrdPassesMap | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(join(prdDir, "prd.json"), "utf8"));
-  } catch {
-    // Absent or unparseable prd.json: no snapshot this step (matches the
-    // canonical reader treating these as "cannot count").
-    return undefined;
-  }
-  if (!isRecord(parsed) || !Array.isArray(parsed["userStories"])) return undefined;
-  // Per-story tolerance mirrors the canonical PRD reader (src/lib/prd.ts): a
-  // story passes only when `passes === true`; any other shape counts as not
-  // passing. Skip stories without a usable id (they can't be tracked) instead
-  // of discarding the whole snapshot, so one malformed entry can't silently
-  // disable detection for every valid story.
-  const passes: Record<string, boolean> = {};
-  for (const story of parsed["userStories"]) {
-    if (!isRecord(story)) continue;
-    const id = story["id"];
-    if (typeof id !== "string" || id.length === 0) continue;
-    passes[id] = story["passes"] === true;
-  }
-  return passes;
-}
 
 /**
  * Prepend the adjudication trigger (the marker reason: which story oscillated
@@ -96,21 +66,36 @@ export function withAdjudicationReason(prompt: string, reason: string | null): s
   return `<adjudication-trigger>\n${reason}\n</adjudication-trigger>\n\n${prompt}`;
 }
 
-export function snapshotPrd(adjudication: AdjudicationConfig | undefined, prdDir: string | undefined): PrdPassesMap | undefined {
-  if (adjudication === undefined || prdDir === undefined) return undefined;
-  return (adjudication.readPasses ?? readPrdPasses)(prdDir);
+/**
+ * Snapshot stored phases for the given story ids. Missing stored phase reads as
+ * `"building"`. Returns `undefined` when there is no reader or no ids (caller
+ * has nothing to diff).
+ */
+export function snapshotPhases(
+  readPhase: StoryPhaseReader | undefined,
+  storyIds: readonly string[] | undefined,
+): StoryPhasesMap | undefined {
+  if (readPhase === undefined || storyIds === undefined) return undefined;
+  const phases: Record<string, StoryPhase> = {};
+  for (const storyId of storyIds) {
+    phases[storyId] = readPhase(storyId) ?? "building";
+  }
+  return phases;
 }
+
 
 export function recordStepTransitions(input: RecordStepTransitionsInput): void {
   if (input.before === undefined || input.after === undefined) return;
-  const transitions = diffPasses(input.before, input.after);
+  const transitions = diffPhases(input.before, input.after);
   if (transitions.length === 0) return;
   const at = (input.adjudication.now ?? (() => new Date()))().toISOString();
+  const source = input.source ?? "signal";
   const records: StoryTransitionRecord[] = transitions.map((transition) => ({
     ...transition,
     iteration: input.iteration,
     stepName: input.stepName,
     at,
+    source,
   }));
   input.adjudication.store.appendHistory(records);
   if (!input.detect || input.adjudication.store.markerExists()) return;

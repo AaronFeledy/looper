@@ -21,7 +21,7 @@ function observation(overrides: Partial<StallObservation> = {}): StallObservatio
     hasMaterialChange: false,
     worktreeFingerprint: "",
     inFlight: false,
-    passes: { "US-1": false },
+    phases: { "US-1": "building" },
     phase: "building",
     adjudicationCompletions: 0,
     ...overrides,
@@ -60,7 +60,7 @@ describe("createStallDetector iteration limit", () => {
   });
 
   test.each([
-    ["passes change", { passes: { "US-1": true } }],
+    ["phases change", { phases: { "US-1": "implemented" } }],
     ["phase change", { phase: "implemented" }],
     ["branch change", { branch: "us-2-next", storyId: "US-2" }],
   ] as const)("resets the counter on %s", (_label, progressOverrides) => {
@@ -135,12 +135,12 @@ describe("createStallDetector iteration limit", () => {
     expect(detector.observe(observation({ worktreeFingerprint: undefined })).stalled).toBe(false);
   });
 
-  test("unknown passes on both sides does not count as progress", () => {
+  test("unknown phases on both sides does not count as progress", () => {
     const detector = createStallDetector({ limits: { iterations: 2, adjudications: 0 }, initialAdjudicationCompletions: 0 });
 
-    expect(detector.observe(observation({ passes: undefined }))).toEqual({ stalled: false });
-    expect(detector.observe(observation({ passes: undefined }))).toEqual({ stalled: false });
-    expect(detector.observe(observation({ passes: undefined })).stalled).toBe(true);
+    expect(detector.observe(observation({ phases: undefined }))).toEqual({ stalled: false });
+    expect(detector.observe(observation({ phases: undefined }))).toEqual({ stalled: false });
+    expect(detector.observe(observation({ phases: undefined })).stalled).toBe(true);
   });
 
   test("zero iteration limit disables no-progress detection", () => {
@@ -235,7 +235,7 @@ describe("createStallObserver against a real git repo", () => {
       limits: { iterations, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => 0,
-      readPasses: () => ({ "US-1": false }),
+      readPhases: () => ({ "US-1": "building" }),
     });
   }
 
@@ -326,7 +326,7 @@ describe("createStallObserver against a real git repo", () => {
       limits: { iterations: 2, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => 0,
-      readPasses: () => ({ "US-1": false }),
+      readPhases: () => ({ "US-1": "building" }),
       probeInFlight: createInFlightProbe({
         repoDir,
         client,
@@ -442,16 +442,33 @@ describe("createStallObserver against a real git repo", () => {
     expect(await observer.confirmStall("us-1-story")).toBe(false);
   });
 
+  test("tracks split-story phase changes through PRD identity in both observations and confirmation", async () => {
+    const repoDir = await gitScratch();
+    let phase: "building" | "implemented" = "building";
+    const observer = createStallObserver({
+      repoDir, limits: { iterations: 2, adjudications: 0 }, prdDir: join(repoDir, "spec"),
+      readCompletionsCount: () => 0,
+      readPhases: () => ({ "US-609E0": phase }),
+    });
+    const branch = "us-609e0-recipe-init-integration";
+    expect((await observer.checkIteration(branch)).stalled).toBe(false);
+    expect((await observer.checkIteration(branch)).stalled).toBe(false);
+    expect((await observer.checkIteration(branch)).stalled).toBe(true);
+    expect(await observer.confirmStall(branch)).toBe(true);
+    phase = "implemented";
+    expect(await observer.confirmStall(branch)).toBe(false);
+    expect((await observer.checkIteration(branch)).stalled).toBe(false);
+  });
+
   test("confirmStall fails open when the story phase advances during the window", async () => {
     const repoDir = await gitScratch();
-    let phase = "building";
+    let phase: "building" | "implemented" = "building";
     const observer = createStallObserver({
       repoDir,
       limits: { iterations: 2, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => 0,
-      readPasses: () => ({ "US-1": false }),
-      readPhase: () => phase,
+      readPhases: () => ({ "US-1": phase }),
     });
 
     expect((await observer.checkIteration("us-1-story")).stalled).toBe(false);
@@ -463,15 +480,15 @@ describe("createStallObserver against a real git repo", () => {
     expect(await observer.confirmStall("us-1-story")).toBe(false);
   });
 
-  test("confirmStall fails open when PRD passes change during the window", async () => {
+  test("confirmStall fails open when story phases change during the window", async () => {
     const repoDir = await gitScratch();
-    let passes: Record<string, boolean> = { "US-1": false };
+    let phases: Record<string, "building" | "implemented"> = { "US-1": "building" };
     const observer = createStallObserver({
       repoDir,
       limits: { iterations: 2, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => 0,
-      readPasses: () => passes,
+      readPhases: () => phases,
     });
 
     expect((await observer.checkIteration("us-1-story")).stalled).toBe(false);
@@ -479,18 +496,18 @@ describe("createStallObserver against a real git repo", () => {
     expect((await observer.checkIteration("us-1-story")).stalled).toBe(true);
     expect(await observer.confirmStall("us-1-story")).toBe(true);
 
-    passes = { "US-1": true };
+    phases = { "US-1": "implemented" };
     expect(await observer.confirmStall("us-1-story")).toBe(false);
   });
 
-  test("configured but unreadable PRD passes hold the counter and never trip", async () => {
+  test("configured but unreadable story phases hold the counter and never trip", async () => {
     const repoDir = await gitScratch();
     const observer = createStallObserver({
       repoDir,
       limits: { iterations: 2, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => 0,
-      readPasses: () => undefined,
+      readPhases: () => undefined,
     });
 
     for (let index = 0; index < 6; index += 1) {
@@ -511,7 +528,7 @@ describe("createStallObserver against a real git repo", () => {
     expect((await observer.checkIteration("us-1-story")).stalled).toBe(true);
   });
 
-  test("confirmStall refuses to confirm while configured PRD passes are unreadable", async () => {
+  test("confirmStall refuses to confirm while configured story phases are unreadable", async () => {
     const repoDir = await gitScratch();
     let completions = 0;
     const observer = createStallObserver({
@@ -519,7 +536,7 @@ describe("createStallObserver against a real git repo", () => {
       limits: { iterations: 0, adjudications: 2 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => completions,
-      readPasses: () => undefined,
+      readPhases: () => undefined,
     });
 
     completions = 1;
@@ -555,7 +572,7 @@ describe("createStallObserver against a real git repo", () => {
       limits: { iterations: 2, adjudications: 0 },
       prdDir: join(repoDir, "spec"),
       readCompletionsCount: () => completions,
-      readPasses: () => ({ "US-1": false }),
+      readPhases: () => ({ "US-1": "building" }),
     });
 
     expect((await observer.checkIteration("us-1-story")).stalled).toBe(false);

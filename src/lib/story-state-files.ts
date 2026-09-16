@@ -58,7 +58,12 @@ function parseStoryState(content: string | null): StoryStateFile {
 }
 
 function readStoryState(): StoryStateFile {
-  return parseStoryState(tolerantRead(storyStatePath()));
+  try {
+    return parseStoryState(tolerantRead(storyStatePath()));
+  } catch {
+    // no-excuse-ok: catch -- story state is a tolerant cache; unreadable state is equivalent to an empty map
+    return { stories: {} };
+  }
 }
 
 export function readStoryPhase(storyId: string): StoryPhase | undefined {

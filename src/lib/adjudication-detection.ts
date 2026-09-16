@@ -1,18 +1,22 @@
-export type PrdPassesMap = Readonly<Record<string, boolean>>;
+import { comparePhase, type StoryPhase } from "./story-state-files.ts";
 
-export type PrdTransition = {
+export type StoryPhasesMap = Readonly<Record<string, StoryPhase>>;
+
+export type PhaseTransition = {
   readonly storyId: string;
-  readonly from: boolean;
-  readonly to: boolean;
+  readonly from: StoryPhase;
+  readonly to: StoryPhase;
 };
 
 export type StoryTransitionRecord = {
   readonly storyId: string;
-  readonly from: boolean;
-  readonly to: boolean;
+  readonly from: StoryPhase;
+  readonly to: StoryPhase;
   readonly iteration: number;
   readonly stepName: string;
   readonly at: string;
+  /** `signal` = agent/operator story-phase write; `engine` = engine reset (never counts as demotion). */
+  readonly source: "signal" | "engine";
 };
 
 export type OscillationVerdict =
@@ -23,16 +27,26 @@ export type OscillationVerdict =
       readonly trail: readonly StoryTransitionRecord[];
     };
 
-export function diffPasses(before: PrdPassesMap, after: PrdPassesMap): PrdTransition[] {
-  const transitions: PrdTransition[] = [];
-  for (const [storyId, beforePasses] of Object.entries(before)) {
-    const afterPasses = after[storyId];
-    if (afterPasses === undefined || beforePasses === afterPasses) continue;
-    transitions.push({ storyId, from: beforePasses, to: afterPasses });
+/**
+ * Emit phase transitions for stories present in both maps whose phase changed.
+ * Callers should normalize missing stored phases to `"building"` before diffing.
+ */
+export function diffPhases(before: StoryPhasesMap, after: StoryPhasesMap): PhaseTransition[] {
+  const transitions: PhaseTransition[] = [];
+  for (const [storyId, beforePhase] of Object.entries(before)) {
+    const afterPhase = after[storyId];
+    if (afterPhase === undefined || beforePhase === afterPhase) continue;
+    transitions.push({ storyId, from: beforePhase, to: afterPhase });
   }
   return transitions;
 }
 
+/**
+ * Oscillation = a story was demoted (to < from) by a `signal` source at least
+ * `threshold` times in the active history window. Engine-sourced records
+ * (phase resets on new commits) never count. `prdFlipThreshold` config/env
+ * names are retained as the demotion threshold.
+ */
 export function detectOscillation(history: readonly StoryTransitionRecord[], threshold: number): OscillationVerdict {
   // Non-positive thresholds disable detection rather than making every history oscillate.
   if (threshold <= 0) return { oscillating: false };
@@ -40,7 +54,7 @@ export function detectOscillation(history: readonly StoryTransitionRecord[], thr
   const qualifyingCounts = new Map<string, number>();
   for (const transition of history) {
     if (!qualifyingCounts.has(transition.storyId)) qualifyingCounts.set(transition.storyId, 0);
-    if (transition.from && !transition.to) {
+    if (transition.source === "signal" && comparePhase(transition.to, transition.from) < 0) {
       qualifyingCounts.set(transition.storyId, (qualifyingCounts.get(transition.storyId) ?? 0) + 1);
     }
   }

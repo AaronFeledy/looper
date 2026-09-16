@@ -313,10 +313,10 @@ function handlePartUpdate(
       } else if (status === "completed") {
         printCall();
         const retainedPath = retainedOutputPath(state, part as { metadata?: Record<string, unknown> });
-        emit({ kind: "tool.done", tool: part.tool, callID: part.callID, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
+        emit({ kind: "tool.done", tool: part.tool, callID: part.callID, input: state.input ?? {}, output: state.output ?? "", ...(retainedPath !== undefined ? { retainedOutputPath: retainedPath } : {}) }, "lines");
       } else if (status === "error") {
         printCall();
-        emit({ kind: "tool.failed", tool: part.tool, callID: part.callID, error: state.error ?? "" });
+        emit({ kind: "tool.failed", tool: part.tool, callID: part.callID, input: state.input ?? {}, error: state.error ?? "" });
       }
       parts.set(part.id, {
         kind: "tool",
@@ -397,7 +397,7 @@ export function createSessionEventConsumer(
     emit(event, delivery);
   };
 
-  const printAssistantMessageError = (info: Message): void => {
+  const printAssistantMessageError = (info: Message, opts?: { readonly fatal?: boolean }): void => {
     if (info.role !== "assistant" || printedMessageErrors.has(info.id)) return;
     const error = (info as { error?: unknown }).error;
     const message = formatMessageError(error);
@@ -409,7 +409,7 @@ export function createSessionEventConsumer(
       return;
     }
     emitAt(at, { kind: "assistant.error", message });
-    callbacks.onSessionError?.(message);
+    if (opts?.fatal !== false) callbacks.onSessionError?.(message);
   };
 
   const dropPendingParts = (messageID: string): void => {
@@ -582,7 +582,7 @@ export function createSessionEventConsumer(
       for (const entry of orderMessagesForRender(messages)) {
         const info = entry.info;
         rememberMessage(info);
-        printAssistantMessageError(info);
+        printAssistantMessageError(info, { fatal: false });
         if (info.role === "user" && isHiddenUserMessage(info.id)) {
           dropPendingParts(info.id);
           continue;

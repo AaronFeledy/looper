@@ -8,6 +8,10 @@ import { HelpRequested, parseArgs, resolveAttachUrl as resolveConfiguredAttachUr
 import { scaffoldConfigDir } from "./lib/init-scaffold.ts";
 import { assertAttachedServerLocation, assertConfiguredResourcesExist, AttachedServerAgentError, AttachedServerLocationError } from "./lib/attached-server-agents.ts";
 import { assertPromptFilesExist, CONFIG_FILE_NAMES, configFilePath, findConfigFile, loadAdjudicateStep, loadRuntimeConfig, loadSteps } from "./lib/config.ts";
+import { startAgentActivityFeed } from "./lib/agent-activity-feed.ts";
+import { captureTuiDiagnostics } from "./lib/tui-diagnostics.ts";
+import { createDiagnosticsView } from "./tui/diagnostics.ts";
+import { createConstellationView } from "./tui/constellation.ts";
 import { startBackgroundAgentStreamer } from "./lib/background-agent-stream.ts";
 import { startAgentRegistryController } from "./lib/agent-registry-controller.ts";
 import { runNonTty } from "./lib/fallback.ts";
@@ -16,15 +20,17 @@ import { waitWithCountdown } from "./lib/fallback-ui.ts";
 import { runIteration } from "./lib/orchestrator.ts";
 import { computeRunResumePlan, runEngine, type RunResumePlan } from "./engine/run-engine.ts";
 import { createRunControl } from "./engine/run-control.ts";
-import { permissionBellEnabled, stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
+import { constellationEnabled, constellationReducedMotion, permissionBellEnabled, stallAdjudicationLimit, stallIterationLimit } from "./config/tunables.ts";
 import {
   applyManagedOpencodeResources,
   assertManagedOpencodeResourcesLoaded,
   DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
   LOOPER_MANAGED_RESOURCES,
 } from "./lib/opencode-managed-resources.ts";
-import { resumeSessionWorkState, type Step } from "./lib/runner.ts";
-import { recoveryResumeForChoice, shouldAutoStartSavedSession } from "./lib/recovery-decisions.ts";
+import type { Step } from "./lib/runner.ts";
+import { checkSavedSessionOnStartup, resumePlanForSelection } from "./lib/startup-resume.ts";
+import { createResumeBanner } from "./tui/resume-banner.ts";
+import { recoveryResumeForChoice } from "./lib/recovery-decisions.ts";
 import { lookupServerVersion } from "./lib/server-version.ts";
 import { createLooperRunID } from "./lib/session-metadata.ts";
 import { startOrAttachServer, type ServerHandle } from "./lib/sdk-server.ts";
@@ -43,6 +49,8 @@ import {
   resetPrdIterationBaseline,
   snapshotIterationToHistory,
 } from "./lib/state.ts";
+import { startAgentTrailPersistence } from "./lib/agent-trail.ts";
+import { createAgentTrailStore } from "./persistence/agent-trail-store.ts";
 import { startHistoryStreamer } from "./lib/history-stream.ts";
 import {
   resumeStepIndex,
@@ -76,6 +84,9 @@ import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 import { createStoryStateStore } from "./persistence/story-state-store.ts";
 import { clearPermissionAudit } from "./opencode/permission-audit.ts";
 import { handleSignal } from "./lib/signal.ts";
+import { clearSignalLog } from "./lib/signal-log.ts";
+import { prdIndexPath } from "./lib/prd.ts";
+import { createStoryPhaseResolver } from "./engine/story-phases.ts";
 import { closeBeforeExit, installProcessSignals, runStartupProbe, scheduleProcessExit } from "./tui/process-lifecycle.ts";
 
 const repoDir = process.env.LOOPER_REPO_DIR ? resolve(process.env.LOOPER_REPO_DIR) : process.cwd();
@@ -148,6 +159,7 @@ function resetIterationState(
   state.control.clearStepRequests();
   clearAgentOutput(state);
   state.stepOutputLines = steps.map(() => []);
+  state.configuredStepNames = steps.map(step => step.name);
   state.steps = steps.map((step) => createStepRow(step.name));
   resetIterationNavigationState(state);
   resetPrdIterationBaseline(state);
@@ -191,17 +203,21 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const steps = loadSteps(configDir);
   if (options.start) runStateStore.clearStopFiles();
   if (options.start && options.fresh) {
+    createAgentTrailStore(configDir).clear();
     runStateStore.clearRunArtifacts();
     adjudicationStore.clearHistory();
     adjudicationStore.clearMarker();
     adjudicationStore.clearSession();
-    storyStateStore.clear();
+    if (options.resetStories) storyStateStore.clear();
+    clearSignalLog(configDir);
     clearPermissionAudit(configDir);
   }
   let looperRunID = options.fresh ? createLooperRunID() : runStateStore.read()?.looperRunID ?? createLooperRunID();
 
   const control = createRunControl();
   const state = createLoopState({ maxIterations: options.maxIterations, stepNames: steps.map((step) => step.name), control });
+  if (constellationEnabled()) state.constellation = { detailsOpen: false, reducedMotion: constellationReducedMotion() };
+  state.branch = await currentBranch();
   state.started = options.start;
 
   // Re-read on-disk checkpoints both at boot and at go: a checkpoint edited
@@ -214,12 +230,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       steps: planSteps,
       store: runStateStore,
       legacyResumeStepIndex: (resumeSteps) => resumeStepIndex([...resumeSteps]),
+      log: (line) => pushAgentLine(state, line),
     });
     looperRunID = plan.looperRunID ?? (plan.resetToFreshRun ? createLooperRunID() : looperRunID);
     return plan;
   };
 
-  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle, firstIterationStepSessions } =
+  let { startIteration, firstIterationStartStepIndex, firstIterationResume, resumed: firstIterationResumed, firstIterationTitle, firstIterationStepSessions, staleSessionID } =
     computeResumePlan(steps);
 
   // Iteration-scoped, in-memory ledger of the opencode sessionID each logical
@@ -238,46 +255,27 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     firstIterationResumed = plan.resumed;
     firstIterationTitle = plan.firstIterationTitle;
     iterationStepSessions = plan.firstIterationStepSessions ?? [];
+    staleSessionID = plan.staleSessionID;
   };
 
-  const autoStartIfSavedSessionRunning = async (client: ReturnType<typeof createOpencodeClient>): Promise<void> => {
-    if (!shouldAutoStartSavedSession({
-      started: state.started,
-      fresh: options.fresh,
-      stopFilePresent: runStateStore.stopFileExists(),
-      stopAfterIterationFilePresent: runStateStore.stopAfterIterationFileExists(),
-    })) return;
+  const checkSavedSession = async (client: ReturnType<typeof createOpencodeClient>): Promise<void> => {
+    if (options.fresh || state.started) return;
     const savedSteps = loadSteps(configDir);
     const plan = computeResumePlan(savedSteps);
-    const sessionID = plan.firstIterationResume?.sessionID;
-    const messageID = plan.firstIterationResume?.messageID;
-    if (sessionID === undefined || messageID === undefined) return;
-    const savedStep = savedSteps[plan.firstIterationStartStepIndex];
-    const workState = await resumeSessionWorkState({
-      client,
-      repoDir,
-      sessionID,
-      statusTimeoutMs: DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
-      ...(savedStep?.timeoutMs !== undefined ? { staleBusyThresholdMs: savedStep.timeoutMs } : {}),
+    const shouldStart = await checkSavedSessionOnStartup({
+      state, plan, client, repoDir, fresh: options.fresh,
+      timeoutMs: DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
+      staleBusyThresholdMs: savedSteps[plan.firstIterationStartStepIndex]?.timeoutMs,
       signal: bootAbort.signal,
     });
-    if (workState !== "running") return;
+    if (!shouldStart) return;
     applyResumePlan(plan);
-    firstIterationWasResumed = plan.resumed;
-    firstIterationResumePoint = plan.firstIterationStartStepIndex;
+    state.bootResumeSession = undefined;
     state.resumable = false;
+    // Reopening an active checkpoint resumes it, including after a prior UI stop.
     runStateStore.clearStopFiles();
     state.started = true;
   };
-
-  // Snapshot the original resume point and "was resumed" flag computed from
-  // on-disk state. These are used below to decide whether a manual Up/Down
-  // selection that lands back on the checkpoint step should still pass
-  // resumedPriorSteps (so the TUI shows prior steps as "done" rather than
-  // "skipped"). Resetting the run clears both so a fresh manual start after
-  // ESC reset does not inherit stale "resumed" semantics.
-  let firstIterationWasResumed = firstIterationResumed;
-  let firstIterationResumePoint = firstIterationStartStepIndex;
 
   // Make a resumable boot look like the prior run never exited: mark prior
   // steps done, attach stepSessions, hydrate the resume target, and select it.
@@ -307,14 +305,17 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       state.selectedBackgroundSessionID = null;
     }
   }
+  const agentTrail = startAgentTrailPersistence(configDir, () => state);
   let renderer: CliRenderer | undefined;
   let bootScreen: BootScreen | undefined;
   let booting = true;
   const bootAbort = new AbortController();
   let server: ServerHandle | undefined;
   let cleanupBootInterrupt: (() => void) | undefined;
+  let cleanupDiagnostics: (() => void) | undefined;
   let cleanupKeys: (() => void) | undefined;
   let cleanupBell: (() => void) | undefined;
+  let agentActivityFeed: { stop: () => void } | undefined;
   let backgroundAgentStreamer: { stop: () => void } | undefined;
   let agentRegistry: AgentRegistry | undefined;
   let agentRegistryController: { stop: () => void } | undefined;
@@ -423,9 +424,13 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     renderer = await createCliRenderer({
       exitOnCtrlC: false,
       exitSignals: [],
+      consoleMode: "disabled",
+      openConsoleOnError: false,
+      onDestroy: () => cleanupDiagnostics?.(),
       targetFps: 30,
       maxFps: 30,
     });
+    cleanupDiagnostics = captureTuiDiagnostics(state);
     cleanupBootInterrupt = installBootInterruptHandler(renderer, handleSigint);
     throwIfBootAborted();
 
@@ -442,6 +447,18 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
 
     bootScreen.begin("Loading configuration");
     const runtimeConfig = loadRuntimeConfig(configDir, repoDir);
+    const storyResolver = runtimeConfig.prdDir === undefined
+      ? undefined
+      : createStoryPhaseResolver({
+          repoDir,
+          prdIndex: prdIndexPath(runtimeConfig.prdDir),
+          storyState: storyStateStore,
+          mainBranch: runtimeConfig.mainBranch,
+          terminalPhase: runtimeConfig.terminalPhase,
+          ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
+          log: (line) => pushAgentLine(state, line),
+        });
+    state.activityContext = { repoDir, prdDir: runtimeConfig.prdDir };
     const attachUrl = resolveAttachUrl(options, runtimeConfig);
 
     bootScreen.begin(attachUrl !== undefined ? `Attaching to opencode (${attachUrl})` : "Starting opencode server");
@@ -472,7 +489,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     }
 
     bootScreen.begin("Checking saved session");
-    await autoStartIfSavedSessionRunning(client);
+    await checkSavedSession(client);
     throwIfBootAborted();
 
     bootScreen.begin("Checking server health");
@@ -482,7 +499,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       DEFAULT_ATTACH_VALIDATION_TIMEOUT_MS,
     );
 
+    void agentTrail.recoverTimes(client, repoDir);
     backgroundAgentStreamer = startBackgroundAgentStreamer({ state, client, repoDir });
+    if (state.constellation) agentActivityFeed = startAgentActivityFeed({ state, client, repoDir });
     agentRegistry = startAgentRegistry({
       client,
       repoDir,
@@ -507,8 +526,9 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       columnGap: 1,
     });
 
-    const stepList = createStepList(renderer, state);
-    const stream = createAgentStream(renderer, state);
+    const constellation = state.constellation ? createConstellationView(renderer, state) : undefined;
+    const stepList = constellation ? undefined : createStepList(renderer, state);
+    const stream = constellation ? undefined : createAgentStream(renderer, state);
     const tuiRenderer = renderer;
 
     const leftColumn = new BoxRenderable(renderer, {
@@ -517,34 +537,43 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       height: "100%",
       flexDirection: "column",
     });
-    leftColumn.add(stepList);
-    leftColumn.add(createBranchDiffPanel(renderer, state));
+    if (stepList) leftColumn.add(stepList);
+    if (!constellation) leftColumn.add(createBranchDiffPanel(renderer, state));
     bootScreen.begin("Detecting GitHub repository");
     githubWatcher = await startGithubWatcher({
       repoDir,
       getBranch: () => state.branch,
       emit: handleWatcherEvent,
-      onEnabled: () => leftColumn.add(createGithubStatusPanel(tuiRenderer, state)),
+      onEnabled: () => { if (!constellation) leftColumn.add(createGithubStatusPanel(tuiRenderer, state)); },
     });
     throwIfBootAborted();
-    leftColumn.add(createTodoPanel(renderer, state));
+    if (!constellation) leftColumn.add(createTodoPanel(renderer, state));
     branchDiffWatcher = startBranchDiffWatcher({
       client,
       repoDir,
+      ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       getBranch: () => state.branch,
       emit: handleWatcherEvent,
     });
     prdWatcher = startPrdWatcher({
       prdDir: runtimeConfig.prdDir,
+      ...(storyResolver !== undefined ? { storyResolver } : {}),
       emit: handleWatcherEvent,
-      onEnabled: () => leftColumn.add(createPrdPanel(tuiRenderer, state)),
+      onEnabled: () => { if (!constellation) leftColumn.add(createPrdPanel(tuiRenderer, state)); },
     });
     bootScreen.done();
 
     root.add(createHeader(renderer, state, serverVersion));
-    body.add(leftColumn);
-    body.add(stream);
+    root.add(createResumeBanner(renderer, state));
+    if (constellation) {
+      leftColumn.destroyRecursively();
+      body.add(constellation);
+    } else {
+      body.add(leftColumn);
+      body.add(stream!);
+    }
     root.add(body);
+    root.add(createDiagnosticsView(renderer, state));
     root.add(createHelpOverlay(renderer, state));
     root.add(createPromptOverlay(renderer, state));
     root.add(createConfigOverlay(renderer, state, configDir));
@@ -577,21 +606,24 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       escConfirmTimer.unref?.();
     };
     const resetToFreshSlate = () => {
+      agentTrail.clear();
       runStateStore.clearRunArtifacts();
       adjudicationStore.clearHistory();
       adjudicationStore.clearMarker();
       adjudicationStore.clearSession();
-      storyStateStore.clear();
+      if (options.resetStories) storyStateStore.clear();
+      clearSignalLog(configDir);
       clearPermissionAudit(configDir);
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
       firstIterationResumed = false;
-      firstIterationWasResumed = false;
-      firstIterationResumePoint = 0;
+      state.bootResumeSession = undefined;
       firstIterationTitle = undefined;
       iterationStepSessions = [];
+      staleSessionID = undefined;
       const freshSteps = loadSteps(configDir);
+      state.configuredStepNames = freshSteps.map(step => step.name);
       state.steps = freshSteps.map((step) => createStepRow(step.name));
       state.stepOutputLines = freshSteps.map(() => []);
       state.agentEvents = [];
@@ -636,32 +668,20 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       state.resumable = false;
       runStateStore.clearStopFiles();
       if (options.fresh) {
+        agentTrail.clear();
         runStateStore.clearRunArtifacts();
         adjudicationStore.clearHistory();
         adjudicationStore.clearMarker();
         adjudicationStore.clearSession();
-        storyStateStore.clear();
+        if (options.resetStories) storyStateStore.clear();
+        clearSignalLog(configDir);
         clearPermissionAudit(configDir);
       }
       if (!state.started) {
-        if (state.manualStepSelection && state.selectedStepIndex !== null) {
-          firstIterationStartStepIndex = state.selectedStepIndex;
-          firstIterationResume = undefined;
-          // If the idle boot was a checkpoint resume and the user selected at/after
-          // that checkpoint, the prefix steps were done in a prior process → pass
-          // resumedPriorSteps so they render "done", not "skipped".
-          firstIterationResumed = firstIterationWasResumed && (state.selectedStepIndex >= firstIterationResumePoint);
-          // Clear the title and prior step sessions only if selecting before
-          // the checkpoint; keep both if resuming at/after the checkpoint so
-          // inherited-title steps and the context block still see them.
-          if (!firstIterationResumed) {
-            firstIterationTitle = undefined;
-            iterationStepSessions = [];
-          }
-        } else {
-          applyResumePlan(computeResumePlan(loadSteps(configDir)));
-        }
+        const plan = computeResumePlan(loadSteps(configDir));
+        applyResumePlan(resumePlanForSelection(plan, state.manualStepSelection && state.selectedStepIndex !== null && state.selectedStepIndex >= 0 ? state.selectedStepIndex : null));
       }
+      state.bootResumeSession = undefined;
       state.started = true;
       control.setStopAfterIteration(false);
       control.setQuitting(false);
@@ -739,6 +759,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       legacyResumeStepIndex: (resumeSteps) => resumeStepIndex([...resumeSteps]),
       runIteration: (input) => runIteration(input),
       storyState: storyStateStore,
+      ...(storyResolver !== undefined ? { storyResolver } : {}),
       initialPlan: {
         startIteration,
         firstIterationStartStepIndex,
@@ -748,6 +769,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         firstIterationStepSessions: iterationStepSessions.length > 0 ? iterationStepSessions : undefined,
         resetToFreshRun: false,
         looperRunID,
+        ...(staleSessionID !== undefined ? { staleSessionID } : {}),
       },
       ...(runtimeConfig.title !== undefined ? { titleGenConfig: runtimeConfig.title } : {}),
       ...(runtimeConfig.permissionPolicy !== undefined ? { permissionPolicy: runtimeConfig.permissionPolicy } : {}),
@@ -764,20 +786,26 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       useSessionIdle: runtimeConfig.useSessionIdle,
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       elapsedSeconds,
+      log: (line) => pushAgentLine(state, line),
       hooks: {
         createIterationState: ({ iteration, steps, branch }) => {
+          agentTrail.capture();
           resetIterationState(state, iteration, branch, [...steps]);
+          void agentTrail.recoverTimes(client, repoDir);
           return state;
         },
         onStepBegin: () => {
           branchWatcher?.refresh();
           githubWatcher?.refresh();
           branchDiffWatcher?.refresh();
+          prdWatcher?.refresh();
         },
         onStepFinish: () => {
+          agentTrail.capture();
           branchWatcher?.refresh();
           githubWatcher?.refresh();
           branchDiffWatcher?.refresh();
+          prdWatcher?.refresh();
         },
         onStepFailure: async ({ error }) => {
           state.started = false;
@@ -820,12 +848,14 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     if (bootAbort.signal.aborted) return finish(130, exitReason ?? "looper startup interrupted");
     throw error;
   } finally {
+    agentTrail.stop();
     detachMemoryPressure();
     cleanupBootInterrupt?.();
     cleanupKeys?.();
     cleanupBell?.();
     agentRegistryController?.stop();
     agentRegistry?.stop();
+    agentActivityFeed?.stop();
     backgroundAgentStreamer?.stop();
     historyStreamer?.stop();
     githubWatcher?.stop();
@@ -835,6 +865,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     cancelPendingNotify();
     bootScreen?.destroy();
     renderer?.destroy();
+    cleanupDiagnostics?.();
     await server?.close();
     if (exitReason !== undefined) process.stdout.write(`Looper exited: ${exitReason}\n`);
   }
@@ -876,7 +907,9 @@ async function main(): Promise<number> {
         return 0;
       } catch (error) {
         if (error instanceof UsageError) {
-          process.stderr.write(`error: ${error.message}\n\n${usage()}`);
+          // Argument parsing already ran; a rejection here is a precondition or
+          // config problem, so keep stderr to the actionable line an agent needs.
+          process.stderr.write(`error: ${error.message}\n(run \`looper --help\` for signal usage)\n`);
           return 2;
         }
         throw error;
@@ -913,6 +946,8 @@ async function main(): Promise<number> {
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       ...(runtimeConfig.prdFlipThreshold !== undefined ? { prdFlipThreshold: runtimeConfig.prdFlipThreshold } : {}),
       ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
+      mainBranch: runtimeConfig.mainBranch,
+      terminalPhase: runtimeConfig.terminalPhase,
       ...(runtimeConfig.stall !== undefined ? { stall: runtimeConfig.stall } : {}),
       recoverySnapshots: runtimeConfig.recovery.snapshots,
       currentBranch,

@@ -46,6 +46,29 @@ const STORY_ID_CASES: readonly StoryIdCase[] = [
 ];
 
 describe("storyIdFromBranch", () => {
+  test("recognizes split PRD IDs before applying the fallback pattern", () => {
+    const ids = ["US-609E", "US-609E0", "US-609E0-SUB", "US-609E6"];
+    expect(storyIdFromBranch("us-609e0-recipe-init-integration", undefined, ids)).toBe("US-609E0");
+    expect(storyIdFromBranch("US-609E6-finish", undefined, ids)).toBe("US-609E6");
+    expect(storyIdFromBranch("us-609e0-sub-work", undefined, ids)).toBe("US-609E0-SUB");
+    expect(ids).toEqual(["US-609E", "US-609E0", "US-609E0-SUB", "US-609E6"]);
+  });
+
+  test("requires a full ID and delimiter and never guesses an unknown split ID", () => {
+    const ids = ["", "US-609E0"];
+    for (const branch of ["us-609e0", "us-609e01-work", "us-609e6-work", "feat/us-609e0-work", "main"]) {
+      expect(storyIdFromBranch(branch, undefined, ids)).toBeUndefined();
+    }
+  });
+
+  test("preserves canonical PRD spelling and custom-pattern support", () => {
+    expect(storyIdFromBranch("us-609e0-work", "[", ["Us-609e0"])).toBe("Us-609e0");
+    expect(storyIdFromBranch("story/us-609e0", "^story/(.+)$", ["Us-609e0"])).toBe("Us-609e0");
+    expect(storyIdFromBranch("us-074-work", undefined, [])).toBeUndefined();
+    expect(storyIdFromBranch("us-999-work", undefined, ["US-1"])).toBeUndefined();
+    expect(storyIdFromBranch("us-074-work")).toBe("US-074");
+  });
+
   for (const testCase of STORY_ID_CASES) {
     test(testCase.name, () => {
       // Given a branch and an optional configured pattern.

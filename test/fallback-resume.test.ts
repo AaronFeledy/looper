@@ -50,21 +50,21 @@ describe("computeNonTtyResumePlan", () => {
     writeRunState({
       iteration: 2,
       stepIndex: 1,
-      stepName: "review",
-      stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses_build_prior" }],
+      stepName: "Review",
+      stepSessions: [{ stepIndex: 0, stepName: "Build", sessionID: "ses_build_prior" }],
     });
     const plan = computeNonTtyResumePlan(configDir, { fresh: false, maxIterations: 5 });
     expect(plan.startIteration).toBe(2);
     expect(plan.firstStartStepIndex).toBe(1);
     expect(plan.firstIterationResumedPriorSteps).toBe(true);
-    expect(plan.iterationStepSessions).toEqual([{ stepIndex: 0, stepName: "build", sessionID: "ses_build_prior" }]);
+    expect(plan.iterationStepSessions).toEqual([{ stepIndex: 0, stepName: "Build", sessionID: "ses_build_prior" }]);
     expect(plan.resetToFreshRun).toBe(false);
   });
 
   test("old-format run-state (no stepSessions field) resumes without step sessions", () => {
     const { repoDir, configDir } = setupScratch(["build", "review"]);
     scratch = repoDir;
-    writeRunState({ iteration: 2, stepIndex: 1, stepName: "review" });
+    writeRunState({ iteration: 2, stepIndex: 1, stepName: "Review" });
     const plan = computeNonTtyResumePlan(configDir, { fresh: false, maxIterations: 5 });
     expect(plan.firstIterationResumedPriorSteps).toBe(true);
     expect(plan.iterationStepSessions).toEqual([]);
@@ -76,7 +76,7 @@ describe("computeNonTtyResumePlan", () => {
     scratch = repoDir;
     writeFileSync(
       join(configDir, ".looper-run.json"),
-      JSON.stringify({ iteration: 2, stepIndex: 1, stepName: "review", sessionID: "ses_old", updatedAt: "2025-01-01T00:00:00.000Z" }),
+      JSON.stringify({ iteration: 2, stepIndex: 1, stepName: "Review", sessionID: "ses_old", updatedAt: "2025-01-01T00:00:00.000Z" }),
     );
 
     // When the current resume planner reads it.
@@ -84,7 +84,7 @@ describe("computeNonTtyResumePlan", () => {
 
     // Then it preserves the old in-flight session without requiring newer fields.
     expect(plan.firstStartStepIndex).toBe(1);
-    expect(plan.firstIterationResume).toEqual({ sessionID: "ses_old", stepName: "review" });
+    expect(plan.firstIterationResume).toEqual({ sessionID: "ses_old", stepName: "Review" });
     expect(plan.iterationStepSessions).toEqual([]);
   });
 
@@ -221,7 +221,7 @@ describe("runNonTtyIterations resume wiring", () => {
     // When one non-TTY iteration runs.
     try {
       await runNonTtyIterations({
-        options: { attach: false, command: { kind: "run" }, configDir, fresh: false, maxIterations: 1, start: true, waitProvided: false, waitDuration: 0 },
+        options: { attach: false, command: { kind: "run" }, configDir, fresh: false, resetStories: false, maxIterations: 1, start: true, waitProvided: false, waitDuration: 0 },
         repoDir,
         configDir,
         client,
@@ -246,8 +246,8 @@ describe("runNonTtyIterations resume wiring", () => {
       writeRunState({
         iteration: 1,
         stepIndex: 1,
-        stepName: "review",
-        stepSessions: [{ stepIndex: 0, stepName: "build", sessionID: "ses_build_prior" }],
+        stepName: "Review",
+        stepSessions: [{ stepIndex: 0, stepName: "Build", sessionID: "ses_build_prior" }],
       });
 
       const { client, promptTexts } = makeClient({
@@ -271,7 +271,7 @@ describe("runNonTtyIterations resume wiring", () => {
       const priorExitCode = process.exitCode ?? 0;
       try {
         await runNonTtyIterations({
-          options: { attach: false, command: { kind: "run" }, configDir, fresh: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
+          options: { attach: false, command: { kind: "run" }, configDir, fresh: false, resetStories: false, maxIterations: 2, start: true, waitProvided: false, waitDuration: 0 },
           repoDir,
           configDir,
           client,

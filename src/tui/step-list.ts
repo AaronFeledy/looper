@@ -1,3 +1,4 @@
+import { displayStepAt } from "../lib/state.ts";
 import {
   BoxRenderable,
   LayoutEvents,
@@ -92,8 +93,8 @@ function stepDuration(step: { status: StepStatus; startedAt?: number; finishedAt
 }
 
 function stepRowContent(step: LoopStep, frame: string): string {
-  const right = step.statusMessage ?? (continuationIndicatorText(step) || stepDuration(step));
-  const icon = step.restartReason === "timeout" ? "◷" : step.restartReason === "manual" ? "↻" : stepListStatusIcon(step.status, frame);
+  const right = step.restartReason === "timeout" ? "Timed out" : step.statusMessage ?? (continuationIndicatorText(step) || stepDuration(step));
+  const icon = step.restartReason === "timeout" ? "✗" : step.restartReason === "manual" ? "↻" : stepListStatusIcon(step.status, frame);
   const label = `${icon} ${step.name}`;
   return formatRow(label, right);
 }
@@ -122,7 +123,7 @@ const COLOR_WAITING = "#f9e2af";
 const COLOR_FAILED = "#f38ba8";
 const COLOR_SKIPPED = "#f9e2af";
 const COLOR_RESTART_MANUAL = "#cba6f7";
-const COLOR_RESTART_TIMEOUT = "#f9e2af";
+const COLOR_RESTART_TIMEOUT = COLOR_FAILED;
 const COLOR_BACKGROUND_BUSY = "#94e2d5";
 const COLOR_BACKGROUND_IDLE = "#6c7086";
 
@@ -146,8 +147,8 @@ function stepRowColor(step: LoopStep): string {
 }
 
 function historyStepRowContent(step: HistoryStepSnapshot, frame: string): string {
-  const right = stepDuration(step);
-  const icon = step.restartReason === "timeout" ? "◷" : step.restartReason === "manual" ? "↻" : stepListStatusIcon(step.status, frame);
+  const right = step.restartReason === "timeout" ? "Timed out" : stepDuration(step);
+  const icon = step.restartReason === "timeout" ? "✗" : step.restartReason === "manual" ? "↻" : stepListStatusIcon(step.status, frame);
   return formatRow(`${icon} ${step.name}`, right);
 }
 
@@ -325,7 +326,7 @@ export function createStepList(renderer: CliRenderer, state: LoopState): BoxRend
         renderable.attributes = appearance.bold ? TextAttributes.BOLD : TextAttributes.NONE;
         return;
       }
-      const step = state.steps[row.stepIndex];
+      const step = displayStepAt(state, row.stepIndex);
       if (!step) return;
       const isSelected = isRowSelected(state, row);
       if (isSelected) selectedIndex = index;

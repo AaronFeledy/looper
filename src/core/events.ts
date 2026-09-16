@@ -22,8 +22,8 @@ export type LooperEvent =
   // calls to the SAME tool, which name/order matching renders incorrectly
   // (lost inputs, output attached to the wrong card).
   | { readonly kind: "tool.started"; readonly tool: string; readonly callID?: string; readonly input: Record<string, unknown> }
-  | { readonly kind: "tool.done"; readonly tool: string; readonly callID?: string; readonly output: string; readonly retainedOutputPath?: string }
-  | { readonly kind: "tool.failed"; readonly tool: string; readonly callID?: string; readonly error: string }
+  | { readonly kind: "tool.done"; readonly tool: string; readonly callID?: string; readonly output: string; readonly input?: Record<string, unknown>; readonly retainedOutputPath?: string }
+  | { readonly kind: "tool.failed"; readonly tool: string; readonly callID?: string; readonly error: string; readonly input?: Record<string, unknown> }
   | { readonly kind: "session.error"; readonly message: string }
   | { readonly kind: "retry"; readonly attempt: number; readonly message: string }
   | { readonly kind: "debug.event"; readonly eventType: string; readonly sessionID?: string }

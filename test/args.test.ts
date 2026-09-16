@@ -27,6 +27,33 @@ describe("parseArgs resume flags", () => {
     expect(opts.start).toBe(true);
   });
 
+  test("--reset-stories defaults to false", () => {
+    expect(parseArgs([]).resetStories).toBe(false);
+    expect(parseArgs(["--fresh"]).resetStories).toBe(false);
+  });
+
+  test("--reset-stories with --fresh is accepted", () => {
+    const opts = parseArgs(["--fresh", "--reset-stories"]);
+    expect(opts.fresh).toBe(true);
+    expect(opts.resetStories).toBe(true);
+  });
+
+  test("--reset-stories without --fresh is rejected", () => {
+    expect(() => parseArgs(["--reset-stories"])).toThrow(/--reset-stories.*--fresh/);
+  });
+
+  test("--help documents --reset-stories", () => {
+    let thrown: unknown;
+    try {
+      parseArgs(["--help"]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(HelpRequested);
+    expect((thrown as HelpRequested).message).toContain("--reset-stories");
+    expect((thrown as HelpRequested).message).toMatch(/only valid with --fresh|--fresh.*--reset-stories/i);
+  });
+
   test("--continue is a deprecated alias of --start (starts, not fresh)", () => {
     const opts = parseArgs(["--continue"]);
     expect(opts.start).toBe(true);
@@ -108,6 +135,32 @@ describe("parseArgs signal command", () => {
     expect(opts.command).toEqual({ kind: "signal", signal: { kind: "story-phase", phase: "reviewed" } });
   });
 
+  test("parses story phase with optional reason", () => {
+    const opts = parseArgs(["signal", "story-phase", "building", "--reason", "defect", "--story", "US-1"]);
+    expect(opts.command).toEqual({
+      kind: "signal",
+      signal: { kind: "story-phase", phase: "building", story: "US-1", reason: "defect" },
+    });
+  });
+
+  test("parses blocked with reason and optional story", () => {
+    expect(parseArgs(["signal", "blocked", "--reason", "stuck"]).command).toEqual({
+      kind: "signal",
+      signal: { kind: "blocked", reason: "stuck" },
+    });
+    expect(parseArgs(["signal", "blocked", "--reason", "stuck", "--story", "US-9"]).command).toEqual({
+      kind: "signal",
+      signal: { kind: "blocked", reason: "stuck", story: "US-9" },
+    });
+  });
+
+  test("parses no-op with reason", () => {
+    expect(parseArgs(["signal", "no-op", "--reason", "nothing"]).command).toEqual({
+      kind: "signal",
+      signal: { kind: "no-op", reason: "nothing" },
+    });
+  });
+
   test("accepts --config-dir before signal", () => {
     const opts = parseArgs(["--config-dir", ".local/looper", "signal", "stop", "--reason", "done"]);
     expect(opts.configDir).toBe(".local/looper");
@@ -124,6 +177,8 @@ describe("parseArgs signal command", () => {
     ["missing signal kind", ["signal"]],
     ["unknown signal kind", ["signal", "bogus"]],
     ["missing reason", ["signal", "stop"]],
+    ["missing blocked reason", ["signal", "blocked"]],
+    ["missing no-op reason", ["signal", "no-op"]],
     ["empty reason", ["signal", "stop", "--reason="]],
     ["missing story phase", ["signal", "story-phase"]],
     ["invalid story phase", ["signal", "story-phase", "shipping"]],
@@ -133,6 +188,7 @@ describe("parseArgs signal command", () => {
     ["numeric loop positional", ["signal", "stop", "5", "--reason", "done"]],
     ["start loop flag", ["signal", "stop", "--start", "--reason", "done"]],
     ["fresh loop flag", ["signal", "stop", "--fresh", "--reason", "done"]],
+    ["reset-stories loop flag", ["signal", "stop", "--reset-stories", "--reason", "done"]],
     ["wait loop flag", ["signal", "stop", "--wait", "--reason", "done"]],
     ["attach loop flag", ["signal", "stop", "--attach", "--reason", "done"]],
   ])("rejects %s", (_label, argv) => {

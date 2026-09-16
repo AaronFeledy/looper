@@ -106,7 +106,7 @@ function makeIdleResumeClient(repoDir: string): IdleResumeStub {
       },
       status: async () => {
         statusCalls += 1;
-        return { data: { ses_old: { type: statusCalls === 1 || promptCompleted ? "idle" : "busy" } } };
+        return { data: { ses_old: { type: prompted.length === 0 || promptCompleted ? "idle" : "busy" } } };
       },
       messages: async () => {
         releasePrompt?.();

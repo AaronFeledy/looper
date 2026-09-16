@@ -30,7 +30,7 @@ export function buildPrdPanelLines(status: PrdStatus, gain: number = 0, maxWidth
       return [{ content: truncateDisplay(`✗ ${status.message}`, maxWidth), fg: COLOR_ERROR }];
     case "ok": {
       const left = `${status.total - status.remaining}/${status.total}`;
-      const baseRight = status.remaining === 0 ? "all passing" : `${status.remaining} left`;
+      const baseRight = status.remaining === 0 ? `all ${status.terminal ?? "merged"}` : `${status.remaining} left`;
       const baseFg = status.remaining === 0 ? COLOR_PASS : COLOR_NORMAL;
       if (visibleGain >= 2) {
         return [{ content: formatRow(left, `${baseRight} ⚠+${visibleGain}`, maxWidth), fg: COLOR_ERROR }];

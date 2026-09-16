@@ -4,15 +4,15 @@ import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
 import { DEFAULT_STEP_TIMEOUT_MS, failureRetryJitterRatio, failureRetryMinRemainingMs, gateScriptTimeoutMs, inheritedRenameDelayMs, stopSessionConfirmTimeoutMs } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
-import { derivePrdPaths, readPrd } from "../lib/prd.ts";
-import { appendGateSkipToProgress, resolveProgressFilePath } from "../lib/prd-progress.ts";
+import { countPrd, derivePrdPaths, prdIndexPath, readPrdStories } from "../lib/prd.ts";
+import { appendBlockedStepToProgress, appendGateSkipToProgress, resolveProgressFilePath } from "../lib/prd-progress.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
 import { applyFailureRetryJitter, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
 import { createStepAttemptState, decideAfterFailurePolicy, decideAfterPriorEvaluation, decideAfterPriorHealth, type PriorHealthDecision } from "../core/step-attempt.ts";
 import type { StoryStatePort, TitleService } from "./engine-ports.ts";
 import { TitleCoordinator, titleModeFor } from "./title-coordinator.ts";
-import { createStoryBranchMismatchMonitor, storyBranchMismatchLogLine, storyBranchMismatchPrompt } from "./story-branch-nudge.ts";
+import { createStoryBranchMismatchMonitor, decideStoryBranchMismatch, storyBranchMismatchLogLine, storyBranchMismatchPrompt, type StoryBranchMismatch } from "./story-branch-nudge.ts";
 import { readBranchFromHead, resolveGitHeadPath } from "../watchers/branch.ts";
 import { fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
 export { FALLBACK_BASE_BRANCHES, MAINLINE_BRANCH_NAMES, isMainlineRef, commitsAheadOfRef, normalizeGitStatusCode, parseNumstatZ, parseNameStatusZ, branchDeltaChangedFiles, resolveBranchDelta, fetchBranchDelta, fetchPromptVcsDelta } from "../watchers/branch-delta.ts";
@@ -34,23 +34,26 @@ import {
   type StepRunResult,
   type SessionHealthState,
 } from "../lib/runner.ts";
-import { createStepRow, failStepRow, finalizeStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
+import { createStepRow, failStepRow, insertFailureRetryAttempt, insertRestartAttempt, notify, pushAgentLine, pushStepOutputLine, resetStepRowToPending, setStepLooperMessageIDs, setStepPromptText, type LoopState, type LoopStep, type StepRestartReason } from "../lib/state.ts";
 import { stopAfterIterationFileExists, stopFileExists } from "../lib/state-files.ts";
 import { extractAssistantModel, extractAssistantText, generateWorkDescription, humanizeBranchName, setSessionTitle } from "../lib/title.ts";
 import { currentGitBranch, DEFAULT_STORY_ID_PATTERN, storyIdFromBranch } from "../lib/story-id.ts";
+import { comparePhase, type StoryPhase } from "../lib/story-state-files.ts";
+import { readSignalsSince, type SignalLogRecord } from "../lib/signal-log.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
 import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
 import {
   decideRouting,
   insertAdjudicationRow,
-  readPrdPasses,
   recordStepTransitions,
-  snapshotPrd,
+  snapshotPhases,
   withAdjudicationReason,
   type AdjudicationRuntime,
 } from "./adjudication-routing.ts";
 import { evaluateGate, runGateScript } from "./step-gate.ts";
 import { remainingStepBudgetMs, type RunControl, type RunControlView } from "./run-control.ts";
+import { decideStepOutcome, lowerPhases, type OutcomeSignalKind } from "./step-outcome.ts";
+import { createStoryPhaseResolver, selectNextStory, type StoryPhaseResolver } from "./story-phases.ts";
 
 const titleService: TitleService = {
   humanizeBranchName,
@@ -89,6 +92,23 @@ export function promptText(step: Step): string {
   return parts.join("");
 }
 
+function currentGitHead(repoDir: string): string | undefined {
+  try {
+    const result = Bun.spawnSync(["git", "rev-parse", "HEAD"], {
+      cwd: repoDir,
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 5_000,
+    });
+    if (result.exitCode !== 0) return undefined;
+    const head = result.stdout.toString().trim();
+    return head.length > 0 ? head : undefined;
+  } catch {
+    // no-excuse-ok: catch -- HEAD movement is a best-effort phase-reset signal
+    return undefined;
+  }
+}
+
 function syncStepsUiState(
   state: LoopState,
   cfgSteps: Step[],
@@ -123,7 +143,7 @@ function markRemainingSkipped(state: LoopState, fromIndex: number): void {
   notify();
 }
 
-export type StepCompletionKind = "done" | "gate-skip" | "runtime-skip";
+export type StepCompletionKind = "done" | "gate-skip" | "runtime-skip" | "blocked";
 
 export type RunIterationHooks = {
   onStepBegin?: (info: { step: Step; index: number; totalSteps: number; iteration: number; title?: string }) => void;
@@ -176,6 +196,7 @@ export type RunIterationOptions = {
   prdDir?: string;
   storyIdPattern?: string;
   storyState?: StoryStatePort;
+  storyResolver?: StoryPhaseResolver;
   adjudication?: AdjudicationRuntime;
   /**
    * Total configured iteration budget for the "iteration N of M" line in the
@@ -256,6 +277,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     prdDir,
     storyIdPattern,
     storyState: providedStoryState,
+    storyResolver,
     adjudication,
     maxIterations,
     contextPolicy: globalContextPolicy,
@@ -272,7 +294,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   // Exactly one entry is pushed per logical step, only once its retry/restart
   // loop has fully resolved, so a step's own attempts never show up here as a
   // distinct prior step.
-  const completedLogicalSteps: { stepIndex: number; name: string; status: StepResult; sessionID?: string }[] = [];
+  const completedLogicalSteps: { stepIndex: number; name: string; status: string; sessionID?: string }[] = [];
   if (resumedStepSessions !== undefined) {
     const seeded = [...resumedStepSessions].filter((entry) => entry.stepIndex < startStepIndex).sort((a, b) => a.stepIndex - b.stepIndex);
     for (const entry of seeded) {
@@ -299,6 +321,14 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     pushStepOutputLine(state, stepIdx, line);
     notify();
   };
+  const phaseResolver = storyResolver ?? (prdDir === undefined
+    ? undefined
+    : createStoryPhaseResolver({
+        repoDir,
+        prdIndex: prdIndexPath(prdDir),
+        storyState,
+        ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+      }));
 
   const logRecoveryBoundary = (stepIdx: number, action: "retry" | "restart" | "skip", sessionID: string | undefined, messageID: string | undefined): void => {
     if (recoverySnapshots === false) return;
@@ -412,23 +442,34 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       step.gate !== undefined ||
       stepContextPolicy.story ||
       step.setsPhase !== undefined ||
+      step.expects !== undefined ||
       (adjudication !== undefined && prdDir !== undefined)
     );
     const branch = needsStoryFacts ? await currentGitBranch(repoDir) : undefined;
-    const storyId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern);
-    const passesByStory = !adjudicating && prdDir !== undefined && (step.gate !== undefined || stepContextPolicy.story)
-      ? readPrdPasses(prdDir)
+    const storySnapshot = !adjudicating && needsStoryFacts ? phaseResolver?.snapshot() : undefined;
+    const prdStories = storySnapshot?.stories ?? (!adjudicating && prdDir !== undefined && needsStoryFacts
+      ? readPrdStories(prdIndexPath(prdDir))
+      : undefined);
+    const storyIds = prdStories?.map((story) => story.id);
+    const branchStoryId = branch === undefined ? undefined : storyIdFromBranch(branch, storyIdPattern, storyIds);
+    const selectedNext = storySnapshot === undefined ? undefined : selectNextStory(storySnapshot, branchStoryId);
+    if (selectedNext?.reason !== undefined) logStepLine(currentStepIndex, `[looper] ${selectedNext.reason}`);
+    const configuredBranchStoryId = branchStoryId !== undefined && prdStories?.some(({ id }) => id === branchStoryId)
+      ? branchStoryId
       : undefined;
-    const passes = storyId === undefined ? undefined : passesByStory?.[storyId];
-    const phase = storyId === undefined || (!stepContextPolicy.story && step.gate === undefined && step.setsPhase === undefined)
+    const storyId = prdDir === undefined
+      ? branchStoryId
+      : configuredBranchStoryId ?? selectedNext?.story.id;
+    const phase = storyId === undefined || (!stepContextPolicy.story && step.gate === undefined && step.setsPhase === undefined && step.expects === undefined)
       ? undefined
-      : storyState.readPhase(storyId);
+      : storySnapshot?.phases[storyId] ?? storyState.readPhase(storyId);
     const finalizeLogicalStep = (input: {
       readonly status: StepResult;
       readonly completionKind: StepCompletionKind;
       readonly nextIndex: number;
       readonly rowIndex: number;
       readonly recordPriorStep: boolean;
+      readonly priorStatus?: string;
     }): void => {
       hooks?.onStepFinish?.({
         step,
@@ -446,7 +487,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         completedLogicalSteps.push({
           stepIndex: index,
           name: step.name,
-          status: input.status,
+          status: input.priorStatus ?? input.status,
           ...(finishedSessionID !== undefined ? { sessionID: finishedSessionID } : {}),
         });
       }
@@ -471,10 +512,10 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     if (!adjudicating && step.gate !== undefined) {
       const declarativeGate = {
         ...(step.gate.branch !== undefined ? { branch: step.gate.branch } : {}),
-        ...(step.gate.prdPasses !== undefined ? { prdPasses: step.gate.prdPasses } : {}),
         ...(step.gate.phase !== undefined ? { phase: step.gate.phase } : {}),
+        ...(step.gate.phaseBelow !== undefined ? { phaseBelow: step.gate.phaseBelow } : {}),
       };
-      let gateDecision = evaluateGate({ gate: declarativeGate, branch, storyId, passes, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN });
+      let gateDecision = evaluateGate({ gate: declarativeGate, branch, branchStoryId: branchStoryId ?? null, storyId, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN });
       if (gateDecision.pass && step.gate.script !== undefined) {
         const adjudicationCompletions = adjudication?.store.readCompletions() ?? [];
         const lastAdjudication = adjudicationCompletions[adjudicationCompletions.length - 1];
@@ -491,7 +532,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             } : {}),
             timeoutMs: gateScriptTimeoutMs(),
           });
-        gateDecision = evaluateGate({ gate: step.gate, branch, storyId, passes, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN, scriptResult });
+        gateDecision = evaluateGate({ gate: step.gate, branch, branchStoryId: branchStoryId ?? null, storyId, phase, storyIdPattern: storyIdPattern ?? DEFAULT_STORY_ID_PATTERN, scriptResult });
       }
       if (!gateDecision.pass) {
         const resumedSessionID = pendingResume?.sessionID;
@@ -530,7 +571,23 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     }
 
     if (!adjudicating) hooks?.onStepBegin?.({ step, index, totalSteps: steps.length, iteration, ...(workDescription !== undefined ? { title: workDescription } : {}) });
-    const prdBefore = snapshotPrd(adjudication, prdDir) ?? (prdDir === undefined ? undefined : readPrdPasses(prdDir));
+    // Phase history still diffs around the adjudicate step (detect is off;
+    // recording is not). Resolve PRD story ids even while adjudicating so a
+    // mid-step phase write is still appended, preserving always-on history.
+    const phaseStoryIds: string[] = (() => {
+      if (adjudication === undefined) return [];
+      if (prdDir !== undefined) {
+        const fromPrd = readPrdStories(prdIndexPath(prdDir))?.map((story) => story.id);
+        if (fromPrd !== undefined) return fromPrd;
+      }
+      return storyIds !== undefined ? [...storyIds] : storyId !== undefined ? [storyId] : [];
+    })();
+    const phasesBefore =
+      adjudication !== undefined ? snapshotPhases(storyState.readPhase, phaseStoryIds) : undefined;
+    let signalPhasesBefore = phasesBefore;
+    const stepWindowStartedAt = Date.now();
+    const headAtStepStart = step.expects === undefined ? undefined : currentGitHead(repoDir);
+    const phasesAtStepStart = storySnapshot?.phases;
     const stepSessionMetadata = looperRunID === undefined
       ? undefined
       : {
@@ -674,6 +731,47 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     let result: StepRunResult;
     let pendingResult: StepRunResult | undefined;
     const attempt = createStepAttemptState();
+    let outcomeReminderSent = false;
+    let outcomeReminderPending = false;
+    let blockedReason: string | undefined;
+    let completedStoryId = storyId;
+    let completedStorySnapshot = storySnapshot;
+    let expectsPhaseSatisfied = step.expects === undefined;
+    let phaseResetApplied = false;
+    // A step that expects phase P and lands new commits makes any STORED phase
+    // at or above P stale: the story was re-worked, so it drops to the phase just
+    // below P and this step must re-prove P with a signal. Runs BEFORE the
+    // outcome decision so a stale phase can never satisfy `expects`.
+    // An explicit `story-phase` signal for the story during this step is the
+    // agent's own re-proof and is never overridden by the reset.
+    const applyCommitPhaseReset = (storyId: string | undefined, signals: readonly SignalLogRecord[]): void => {
+      if (step.expects === undefined || storyId === undefined || headAtStepStart === undefined || phaseResetApplied) return;
+      if (signals.some((record) => record.kind === "story-phase" && (record.storyId === undefined || record.storyId === storyId))) return;
+      const headAtStepEnd = currentGitHead(repoDir);
+      if (headAtStepEnd === undefined || headAtStepEnd === headAtStepStart) return;
+      const storedBeforeReset = storyState.readPhase(storyId);
+      if (storedBeforeReset === undefined || comparePhase(storedBeforeReset, step.expects) < 0) return;
+      const resetTo = lowerPhases(step.expects).at(-1);
+      if (resetTo === undefined) return;
+      storyState.writePhase(storyId, resetTo);
+      phaseResetApplied = true;
+      if (signalPhasesBefore !== undefined) signalPhasesBefore = { ...signalPhasesBefore, [storyId]: resetTo };
+      logStepLine(currentStepIndex, `[looper] story ${storyId}: phase reset to ${resetTo} (new commits during ${step.name})`);
+      if (adjudication !== undefined) {
+        recordStepTransitions({
+          adjudication,
+          before: { [storyId]: storedBeforeReset },
+          after: { [storyId]: resetTo },
+          iteration,
+          stepName: step.name,
+          detect: false,
+          source: "engine",
+        });
+      }
+    };
+    const onGateTimeout = (info: { readonly permission?: string; readonly kind: "permission" | "question" }): void => {
+      attempt.engineBlockReason = `permission gate timed out: ${info.permission ?? info.kind}`;
+    };
     if (recoveryNudgePending) {
       recoveryNudgePending = false;
       attempt.recoveryNudgeActive = true;
@@ -703,6 +801,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           gatePausedAt = undefined;
         }
       },
+      onGateTimeout,
     });
     requestBrokerOwner = brokerOwner;
     const stopStepSession = async (sessionID: string | undefined, stepIdx: number, timeoutMs?: number): Promise<boolean> => {
@@ -867,10 +966,21 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         const fromHead = readBranchFromHead(stepHeadPath);
         if (fromHead !== null) return fromHead;
       }
-      return state.branch.length > 0 ? state.branch : undefined;
+      return undefined;
     };
+    const readStoryIds = (): string[] | undefined => {
+      if (prdDir === undefined) return undefined;
+      const stories = readPrdStories(prdIndexPath(prdDir));
+      return stories === undefined ? undefined : stories.map((story) => story.id);
+    };
+    const initialStepBranch = await currentGitBranch(repoDir);
+    // A resumed failed repair must still be checked even though the branch
+    // switch happened before this process/iteration invocation.
+    const initialBranchForRepair = resume?.sessionID !== undefined && index === startStepIndex ? undefined : initialStepBranch ?? readStepBranch();
+    let branchRepair: StoryBranchMismatch | undefined;
     mismatchMonitor = createStoryBranchMismatchMonitor({
-      initialBranch: readStepBranch(),
+      initialBranch: initialBranchForRepair,
+      getStoryIds: readStoryIds,
       getBranch: readStepBranch,
       pattern: resolvedStoryIdPattern,
       onMismatch: (mismatch) => logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch)),
@@ -889,19 +999,25 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         // session (recovery nudge, background continuation, orphaned-background
         // nudge) already have the original prompt in history.
         if (attempt.resumeSessionID === undefined) {
-          const promptNeedsStoryFacts = !adjudicating && stepContextPolicy.story;
+          const promptNeedsStoryFacts = !adjudicating && (stepContextPolicy.story || stepContextPolicy.prd);
           const promptBranch = promptNeedsStoryFacts ? await currentGitBranch(repoDir) : undefined;
-          const promptStoryId = promptBranch === undefined ? undefined : storyIdFromBranch(promptBranch, storyIdPattern);
-          const promptPassesByStory = promptNeedsStoryFacts && prdDir !== undefined ? readPrdPasses(prdDir) : undefined;
-          const promptPasses = promptStoryId === undefined ? undefined : promptPassesByStory?.[promptStoryId];
-          const promptPhase = promptStoryId === undefined ? undefined : storyState.readPhase(promptStoryId);
-          const freshStoryFacts: ContextInput["story"] = promptBranch === undefined
+          const promptSnapshot = promptNeedsStoryFacts ? phaseResolver?.snapshot() : undefined;
+          const promptStories = promptSnapshot?.stories ?? (promptNeedsStoryFacts && prdDir !== undefined ? readPrdStories(prdIndexPath(prdDir)) : undefined);
+          const promptStoryIds = promptStories?.map((story) => story.id);
+          const promptBranchStoryId = promptBranch === undefined ? undefined : storyIdFromBranch(promptBranch, storyIdPattern, promptStoryIds);
+          const promptNext = promptSnapshot === undefined ? undefined : selectNextStory(promptSnapshot, promptBranchStoryId);
+          const promptPhase = promptBranchStoryId === undefined ? undefined : promptSnapshot?.phases[promptBranchStoryId] ?? storyState.readPhase(promptBranchStoryId);
+          const freshStoryFacts: ContextInput["story"] = !stepContextPolicy.story
             ? undefined
             : {
-                branch: promptBranch,
-                ...(promptStoryId !== undefined ? { storyId: promptStoryId } : {}),
-                ...(promptPasses !== undefined ? { passes: promptPasses } : {}),
+                ...(promptBranch !== undefined ? { branch: promptBranch } : {}),
+                branchRule: `${prdDir === undefined ? "" : "Exact PRD story ID followed by '-' and a description; otherwise "}pattern ${resolvedStoryIdPattern}, capture group 1 = story ID. Preserve the full story ID when creating or renaming branches.`,
+                ...(promptBranchStoryId !== undefined ? { storyId: promptBranchStoryId } : {}),
                 ...(promptPhase !== undefined ? { phase: promptPhase } : {}),
+                ...(promptNext !== undefined
+                  ? { next: { id: promptNext.story.id, ...(promptNext.story.title !== undefined ? { title: promptNext.story.title } : {}) } }
+                  : {}),
+                ...(step.expects !== undefined ? { expects: step.expects } : {}),
               };
           const priorSteps: PriorStepInfo[] = completedLogicalSteps.map((entry) => ({
             name: entry.name,
@@ -911,8 +1027,17 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           const vcs = stepContextPolicy.vcsDelta
             ? await fetchPromptVcsDelta(client, repoDir, state.branch || undefined, (line) => logStepLine(currentStepIndex, line))
             : undefined;
-          const prdResult = stepContextPolicy.prd && prdDir !== undefined ? readPrd(prdDir) : undefined;
-          const prd = prdResult?.kind === "ok" ? { remaining: prdResult.remaining, total: prdResult.total } : undefined;
+          const prdCounts = stepContextPolicy.prd && promptSnapshot !== undefined ? countPrd(promptSnapshot) : undefined;
+          const prd = prdCounts === undefined || promptSnapshot === undefined
+            ? undefined
+            : {
+                ...prdCounts,
+                terminal: promptSnapshot.terminal,
+                phases: promptSnapshot.stories.flatMap((story) => {
+                  const storyPhase = promptSnapshot.phases[story.id] ?? "building";
+                  return comparePhase(storyPhase, promptSnapshot.terminal) < 0 ? [{ id: story.id, phase: storyPhase }] : [];
+                }),
+              };
           const contextInput: ContextInput = {
             now: new Date(),
             repoDir,
@@ -944,6 +1069,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
           ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
           requestBrokerOwner,
+          onGateTimeout,
           onSessionBound: ({ sessionID, messageID, promptText: sentPromptText, looperMessageIDs }) => {
             if (adjudicating) {
               adjudication?.store.writeSession({ sessionID, messageID, ...(consumedRequest !== null ? { request: consumedRequest } : {}) });
@@ -1078,6 +1204,12 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           continue;
         }
 
+        if (waitResult === "timeout" && branchRepair !== undefined) {
+          result = { status: "failed", sessionID: waitSessionID, errorMessage: "branch repair exhausted the remaining step time budget waiting for background work" };
+          attempt.lastErrorMessage = result.errorMessage;
+          failStepRow(state, currentStepIndex, "failed");
+          break;
+        }
         if (waitResult === "timeout") {
           const previousStepIndex = currentStepIndex;
           if (!(await stopStepSession(waitSessionID, previousStepIndex))) {
@@ -1108,6 +1240,16 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         notify();
       }
 
+      if (branchRepair !== undefined && result.status === "restart" && result.restartReason === "timeout") {
+        result = { ...result, status: "failed", errorMessage: "branch repair exhausted the remaining step time budget" };
+        failStepRow(state, currentStepIndex, "failed");
+      }
+      if (outcomeReminderPending && result.status === "failed") {
+        outcomeReminderPending = false;
+        attempt.suppressFailureRetry = true;
+        attempt.suppressReason = "outcome reminder failed";
+        attempt.lastErrorMessage = result.errorMessage ?? "outcome reminder failed";
+      }
       if (result.status === "restart" && !control.quitting && !stopFileExists()) {
         const reason = result.restartReason ?? requestedRestartReason ?? "manual";
         const priorSessionID = result.sessionID ?? state.steps[currentStepIndex]?.sessionID;
@@ -1126,6 +1268,105 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         attempt.resumeSessionID = undefined;
         attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
         continue;
+      }
+
+      if (!adjudicating && result.status === "done" && !control.quitting && !stopFileExists()) {
+        const currentBranch = await currentGitBranch(repoDir);
+        const postStepSnapshot = phaseResolver?.snapshot();
+        const storyIds = postStepSnapshot?.stories.map(({ id }) => id) ?? readStoryIds();
+        const postBranchStoryId = currentBranch === undefined ? undefined : storyIdFromBranch(currentBranch, resolvedStoryIdPattern, storyIds);
+        const configuredPostBranchStoryId = postBranchStoryId !== undefined && postStepSnapshot?.stories.some(({ id }) => id === postBranchStoryId)
+          ? postBranchStoryId
+          : undefined;
+        completedStorySnapshot = postStepSnapshot ?? completedStorySnapshot;
+        completedStoryId = configuredPostBranchStoryId ?? selectedNext?.story.id ?? completedStoryId;
+        if (branchRepair !== undefined) {
+          // A regex-only id that is not in the PRD is not a repair: outcome/setsPhase
+          // would otherwise evaluate against selectedNext (a different story).
+          const repairedStoryId = postStepSnapshot !== undefined ? configuredPostBranchStoryId : postBranchStoryId;
+          if (repairedStoryId === undefined || (branchRepair.expectedStoryId !== undefined && repairedStoryId !== branchRepair.expectedStoryId)) {
+            const message = `branch repair unresolved: current branch '${currentBranch ?? "unknown"}' must resolve to ${branchRepair.expectedStoryId ?? "a configured PRD story ID"}; ${step.name} cannot advance`;
+            result = { ...result, status: "failed", errorMessage: message };
+            attempt.lastErrorMessage = message;
+            failStepRow(state, currentStepIndex, "failed");
+            logStepLine(currentStepIndex, `[looper] ${message}`);
+            break;
+          }
+          logStepLine(currentStepIndex, `[looper] branch repair verified: '${currentBranch}' resolves to ${repairedStoryId}`);
+        } else {
+          const mismatch = decideStoryBranchMismatch({ initialBranch: initialBranchForRepair, currentBranch, pattern: resolvedStoryIdPattern, storyIds });
+          if (mismatch !== undefined && result.sessionID !== undefined) {
+            branchRepair = mismatch;
+            logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch));
+            attempt.resumeSessionID = result.sessionID;
+            attempt.resumePrompt = storyBranchMismatchPrompt(mismatch);
+            continue;
+          }
+        }
+      }
+      if (!adjudicating && result.status === "done" && step.expects !== undefined) {
+        outcomeReminderPending = false;
+        const signals = readSignalsSince(configDir, stepWindowStartedAt).filter(
+          (record): record is SignalLogRecord & { readonly kind: OutcomeSignalKind } =>
+            record.kind === "blocked" || record.kind === "no-op" || record.kind === "story-phase" || record.kind === "adjudicate",
+        );
+        applyCommitPhaseReset(completedStoryId, signals);
+        if (phaseResetApplied) completedStorySnapshot = phaseResolver?.snapshot() ?? completedStorySnapshot;
+        const phaseAfter = completedStoryId === undefined
+          ? "building"
+          : completedStorySnapshot?.phases[completedStoryId] ?? storyState.readPhase(completedStoryId) ?? "building";
+        const phaseAtStart = completedStoryId === undefined
+          ? "building"
+          : phasesAtStepStart?.[completedStoryId] ?? "building";
+        const outcome = decideStepOutcome({
+          expects: step.expects,
+          phaseAtStart,
+          phaseAfter,
+          signals,
+          ...(completedStoryId !== undefined ? { storyId: completedStoryId } : {}),
+          reminderSent: outcomeReminderSent,
+          ...(attempt.engineBlockReason !== undefined ? { engineBlockReason: attempt.engineBlockReason } : {}),
+          remainingBudgetMs: remainingBudget(),
+          stepName: step.name,
+        });
+        expectsPhaseSatisfied = comparePhase(phaseAfter, step.expects) >= 0;
+        if (outcome.kind === "remind") {
+          if (result.sessionID === undefined) {
+            const reason = "outcome reminder unavailable: completed step has no session";
+            result = { status: "failed", errorMessage: reason };
+            attempt.suppressFailureRetry = true;
+            attempt.suppressReason = reason;
+            attempt.lastErrorMessage = reason;
+            failStepRow(state, currentStepIndex, "failed");
+            break;
+          }
+          outcomeReminderSent = true;
+          outcomeReminderPending = true;
+          attempt.resumeSessionID = result.sessionID;
+          attempt.resumePrompt = outcome.prompt;
+          continue;
+        }
+        if (outcome.kind === "blocked") {
+          blockedReason = outcome.reason;
+          result = { status: "skipped", ...(result.sessionID !== undefined ? { sessionID: result.sessionID } : {}) };
+          failStepRow(state, currentStepIndex, "skipped", { statusMessage: `blocked: ${blockedReason}` });
+          logStepLine(currentStepIndex, `[looper] ${step.name} blocked: ${blockedReason}`);
+        } else if (outcome.kind === "failed") {
+          result = { status: "failed", ...(result.sessionID !== undefined ? { sessionID: result.sessionID } : {}), errorMessage: outcome.reason };
+          attempt.suppressFailureRetry = true;
+          attempt.suppressReason = outcome.reason;
+          attempt.lastErrorMessage = outcome.reason;
+          failStepRow(state, currentStepIndex, "failed");
+        } else if (outcome.note !== undefined) {
+          logStepLine(currentStepIndex, `[looper] ${step.name} outcome: ${outcome.note}`);
+        }
+      }
+      // A repair gets one turn within the existing step budget. Its failure
+      // must not be hidden by the preceding successful implementation turn.
+      if (branchRepair !== undefined && result.status === "failed") {
+        attempt.lastErrorMessage = `branch repair failed: ${result.errorMessage ?? attempt.lastErrorMessage ?? "no result"}`;
+        logStepLine(currentStepIndex, `[looper] ${attempt.lastErrorMessage}`);
+        break;
       }
 
       if (result.status === "failed") {
@@ -1305,86 +1546,55 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       break;
     }
 
-    if (!adjudicating && result.status === "done" && result.sessionID !== undefined) {
-      const mismatch = mismatchMonitor.mismatch();
-      if (mismatch !== undefined) {
-        logStepLine(currentStepIndex, storyBranchMismatchLogLine(mismatch));
-        let reminder: StepRunResult;
-        try {
-        reminder = await runOpenCodeStep({
-          ctx,
-          stepIndex: currentStepIndex,
-          prompt: storyBranchMismatchPrompt(mismatch),
-          client,
-          repoDir,
-          step,
-          sessionID: result.sessionID,
-          timeoutMsOverride: 30_000,
-          ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
-          ...(questionPolicy !== undefined ? { questionPolicy } : {}),
-          ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
-          ...(stepSessionMetadata !== undefined ? { sessionMetadata: stepSessionMetadata } : {}),
-          requestBrokerOwner,
-          ...(titleCoordinator
-            ? { onFirstAssistantContent: titleCoordinator.onFirstResponse }
-            : usingInheritedTitle
-              ? { onFirstAssistantContent: onInheritedFirstResponse }
-              : {}),
-        });
-        } finally {
-          control.clearStepRequests();
-        }
-        if (reminder.status !== "done") {
-          logStepLine(
-            currentStepIndex,
-            `[looper] story-branch rename reminder ${reminder.status}${reminder.errorMessage !== undefined ? `: ${reminder.errorMessage}` : ""}; keeping the finished step`,
-          );
-          finalizeStepRow(state, currentStepIndex, "done");
-        }
-      }
-    }
-    mismatchMonitor.stop();
-
-    const finalBranch = needsStoryFacts ? await currentGitBranch(repoDir) : undefined;
-    const finalStoryId = finalBranch === undefined ? undefined : storyIdFromBranch(finalBranch, storyIdPattern);
-    const prdAfter = snapshotPrd(adjudication, prdDir) ?? (prdDir === undefined ? undefined : readPrdPasses(prdDir));
+    const phasesAfter =
+      adjudication !== undefined ? snapshotPhases(storyState.readPhase, phaseStoryIds) : undefined;
     if (adjudication !== undefined) {
       recordStepTransitions({
         adjudication,
-        before: prdBefore,
-        after: prdAfter,
+        before: signalPhasesBefore,
+        after: phasesAfter,
         iteration,
         stepName: step.name,
         detect: !adjudicating,
+        source: "signal",
       });
     }
-
-    const passesFlippedToFalse = finalStoryId !== undefined && prdBefore?.[finalStoryId] === true && prdAfter?.[finalStoryId] === false;
     try {
-      if (result.status === "done" && step.setsPhase !== undefined && finalStoryId === undefined && (storyId !== undefined || finalBranch === undefined)) {
+      // setsPhase is monotonic only; demotions come from signals / engine reset.
+      if (result.status === "done" && step.setsPhase !== undefined && completedStoryId === undefined && storyId !== undefined) {
         throw new StepFailureError("final story identity is unavailable; refusing to advance story phase");
       }
-      if (result.status === "done" && step.setsPhase !== undefined && finalStoryId !== undefined && !passesFlippedToFalse) {
-        // Compare-and-advance in one transaction: reading the phase here and
-        // writing it after would race `looper signal story-phase` and could
-        // regress a phase that signal advanced in between.
-        storyState.advancePhaseMonotonic(finalStoryId, step.setsPhase);
-      }
-      if (passesFlippedToFalse && finalStoryId !== undefined) {
-        storyState.writePhase(finalStoryId, "building");
-        logStepLine(currentStepIndex, `[looper] auto-demoted ${finalStoryId} story phase to building after passes flipped true to false`);
+      if (
+        result.status === "done" &&
+        step.setsPhase !== undefined &&
+        completedStoryId !== undefined &&
+        expectsPhaseSatisfied &&
+        !phaseResetApplied
+      ) {
+        // Compare-and-advance in one transaction: a caller-side read/compare/write
+        // races `looper signal story-phase` and could regress a phase the signal
+        // advanced in between.
+        storyState.advancePhaseMonotonic(completedStoryId, step.setsPhase);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const sessionID = state.steps[currentStepIndex]?.sessionID;
       failStepRow(state, currentStepIndex, "failed");
-      logStepLine(currentStepIndex, `[looper] story phase write failed for ${finalStoryId ?? "current branch"}: ${message}`);
+      logStepLine(currentStepIndex, `[looper] story phase write failed for ${completedStoryId ?? "current branch"}: ${message}`);
       titleCoordinator?.cancel();
       cancelInheritedTitleTimer();
       throw new StepFailureError(
-        `could not persist story phase for ${finalStoryId ?? "current branch"}: ${message}`,
+        `could not persist story phase for ${completedStoryId ?? "current branch"}: ${message}`,
         { stepName: step.name, ...(sessionID !== undefined ? { sessionID } : {}) },
       );
+    }
+    if (blockedReason !== undefined && prdPaths !== undefined) {
+      const appended = appendBlockedStepToProgress({
+        progressPath: resolveProgressFilePath(prdPaths.progress, repoDir),
+        stepName: step.name,
+        reason: blockedReason,
+      });
+      if (!appended.appended) logStepLine(currentStepIndex, `[looper] failed to append blocked step to progress: ${appended.error}`);
     }
 
     const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
@@ -1494,10 +1704,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     const routed = routing.kind !== "continue";
     finalizeLogicalStep({
       status: result.status,
-      completionKind: result.status === "done" ? "done" : "runtime-skip",
+      completionKind: blockedReason !== undefined ? "blocked" : result.status === "done" ? "done" : "runtime-skip",
       nextIndex: routed ? steps.length : index + 1,
       rowIndex: currentStepIndex,
       recordPriorStep: true,
+      ...(blockedReason !== undefined ? { priorStatus: `blocked (${blockedReason})` } : {}),
     });
     } finally {
       titleActive = false;

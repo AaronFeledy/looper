@@ -4,10 +4,11 @@ export function displayWidth(value: string): number {
   return Bun.stringWidth(value);
 }
 
-export function truncateDisplay(value: string, maxWidth: number): string {
+export function truncateDisplay(value: string, maxWidth: number, ellipsis = "…"): string {
   if (maxWidth <= 0) return "";
   if (displayWidth(value) <= maxWidth) return value;
-  const ellipsisWidth = displayWidth("…");
+  const ellipsisWidth = displayWidth(ellipsis);
+  if (maxWidth < ellipsisWidth) return ".".repeat(Math.floor(maxWidth));
   const targetWidth = Math.max(0, maxWidth - ellipsisWidth);
   let result = "";
   for (const char of value) {
@@ -15,7 +16,7 @@ export function truncateDisplay(value: string, maxWidth: number): string {
     if (displayWidth(next) > targetWidth) break;
     result = next;
   }
-  return `${result}…`;
+  return `${result}${ellipsis}`;
 }
 
 /**
