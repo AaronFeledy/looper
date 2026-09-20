@@ -1,18 +1,6 @@
 import { comparePhase, type StoryPhase } from "../lib/story-state-files.ts";
 import { readPrdStories, type PrdStory } from "../lib/prd.ts";
 import { storyFetchTimeoutMs } from "../config/tunables.ts";
-import {
-  DEFAULT_STORY_PHASE_GIT_TIMEOUT_MS,
-  deriveStoryPhases,
-  fetchOriginMain,
-  type DeriveStoryPhases,
-} from "./story-phase-git.ts";
-
-export {
-  deriveStoryPhases,
-  type DeriveStoryPhases,
-  type DeriveStoryPhasesInput,
-} from "./story-phase-git.ts";
 
 const DEFAULT_TERMINAL_PHASE: StoryPhase = "merged";
 const DEFAULT_MAIN_BRANCH = "main";
@@ -23,34 +11,43 @@ export type StoryPhaseSnapshot = {
   readonly terminal: StoryPhase;
 };
 
-export type StoryStateReaderWriter = {
+export type StoryStateReader = {
   readonly readPhase: (storyId: string) => StoryPhase | undefined;
-  readonly writePhase: (storyId: string, phase: StoryPhase) => void;
 };
 
 export type StoryPhaseResolver = {
   /**
-   * Sync: read stories + stored phases + fresh derived git phases, persist upgrades,
-   * return effective max(stored, derived). undefined when prd.json is unreadable.
+   * Sync: read stories + stored phases. undefined when prd.json is unreadable.
+   *
+   * Phase is ASSERTED by `looper signal story-phase` (enforced per step by
+   * `expects:`), never inferred. Looper used to also derive `published`/`merged`
+   * from git ref topology and persist any derived>stored upgrade, but refs are a
+   * lossy projection of workflow history -- branch-at-main's-tip means "just
+   * created" OR "ff-merged" OR "abandoned"; not-an-ancestor means "unmerged" OR
+   * "squash-merged" -- so that inversion produced false negatives (a squash-merged
+   * story stuck at `published` forever) AND false positives (an empty branch
+   * recorded `merged` with zero commits, which the monotonic write made
+   * permanent). Both wedged the loop until a human intervened. The stall detector
+   * is the backstop for a story whose signal never arrives.
    */
   readonly snapshot: () => StoryPhaseSnapshot | undefined;
-  /** Best-effort `git fetch origin <mainBranch>`. Never throws. Does not derive. */
+  /**
+   * Best-effort `git fetch origin <mainBranch>`. Never throws. Keeps origin/main
+   * fresh for gate scripts and signal preconditions; derives nothing itself.
+   */
   readonly fetchMain: () => Promise<void>;
 };
 
 export type CreateStoryPhaseResolverInput = {
   readonly repoDir: string;
   readonly prdIndex: string;
-  readonly storyState: StoryStateReaderWriter;
+  readonly storyState: StoryStateReader;
   readonly mainBranch?: string;
   readonly storyIdPattern?: string;
   readonly terminalPhase?: StoryPhase;
-  readonly log?: (line: string) => void;
-  readonly derive?: DeriveStoryPhases;
   /** `LOOPER_STORY_FETCH_TIMEOUT_MS`; default 15000; `0` disables fetch. */
   readonly storyFetchTimeoutMs?: number;
   readonly readStories?: (indexPath: string) => PrdStory[] | undefined;
-  readonly gitTimeoutMs?: number;
 };
 
 function maxPhase(a: StoryPhase, b: StoryPhase): StoryPhase {
@@ -146,46 +143,32 @@ export function createStoryPhaseResolver(input: CreateStoryPhaseResolverInput): 
   const mainBranch = input.mainBranch ?? DEFAULT_MAIN_BRANCH;
   const terminal = input.terminalPhase ?? DEFAULT_TERMINAL_PHASE;
   const readStories = input.readStories ?? readPrdStories;
-  const derive = input.derive ?? deriveStoryPhases;
   const fetchTimeoutMs = resolveFetchTimeoutMs(input.storyFetchTimeoutMs);
-  const gitTimeoutMs = input.gitTimeoutMs ?? DEFAULT_STORY_PHASE_GIT_TIMEOUT_MS;
-  const log = input.log ?? (() => {});
 
   const snapshot = (): StoryPhaseSnapshot | undefined => {
     const stories = readStories(input.prdIndex);
     if (stories === undefined) return undefined;
 
-    let derived: Readonly<Record<string, StoryPhase>> = {};
-    try {
-      derived = derive({
-        repoDir: input.repoDir,
-        storyIds: stories.map((story) => story.id),
-        mainBranch,
-        ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
-        gitTimeoutMs,
-      });
-    } catch {
-      // no-excuse-ok: catch -- derive must never throw out of the resolver
-      derived = {};
-    }
-
     const phases: Record<string, StoryPhase> = {};
     for (const story of stories) {
-      const stored = input.storyState.readPhase(story.id) ?? "building";
-      const derivedPhase = derived[story.id];
-      if (derivedPhase !== undefined && comparePhase(derivedPhase, stored) > 0) {
-        input.storyState.writePhase(story.id, derivedPhase);
-        log(`[looper] story ${story.id}: phase ${derivedPhase} (derived from git)`);
-        phases[story.id] = derivedPhase;
-      } else {
-        phases[story.id] = derivedPhase === undefined ? stored : maxPhase(stored, derivedPhase);
-      }
+      phases[story.id] = input.storyState.readPhase(story.id) ?? "building";
     }
     return { stories, phases, terminal };
   };
 
   const fetchMain = async (): Promise<void> => {
-    await fetchOriginMain(input.repoDir, mainBranch, fetchTimeoutMs);
+    if (fetchTimeoutMs <= 0) return;
+    try {
+      const child = Bun.spawn(["git", "fetch", "origin", mainBranch], {
+        cwd: input.repoDir,
+        stdout: "ignore",
+        stderr: "ignore",
+        timeout: fetchTimeoutMs,
+      });
+      await child.exited;
+    } catch {
+      // no-excuse-ok: catch -- keeping origin/main fresh is best-effort only
+    }
   };
 
   return { snapshot, fetchMain };

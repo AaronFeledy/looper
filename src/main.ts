@@ -82,6 +82,7 @@ import type { PrdWatcher } from "./watchers/prd.ts";
 import { createAdjudicationStore } from "./persistence/adjudication-store.ts";
 import { createAdjudicationConfig } from "./engine/adjudication-routing.ts";
 import { createStoryStateStore } from "./persistence/story-state-store.ts";
+import { createStepAttemptStore } from "./persistence/step-attempt-store.ts";
 import { clearPermissionAudit } from "./opencode/permission-audit.ts";
 import { handleSignal } from "./lib/signal.ts";
 import { clearSignalLog } from "./lib/signal-log.ts";
@@ -200,6 +201,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
   const storyStateStore = createStoryStateStore({ configDir });
+  const stepAttemptStore = createStepAttemptStore({ configDir });
   const steps = loadSteps(configDir);
   if (options.start) runStateStore.clearStopFiles();
   if (options.start && options.fresh) {
@@ -211,6 +213,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
     if (options.resetStories) storyStateStore.clear();
     clearSignalLog(configDir);
     clearPermissionAudit(configDir);
+    stepAttemptStore.clear();
   }
   let looperRunID = options.fresh ? createLooperRunID() : runStateStore.read()?.looperRunID ?? createLooperRunID();
 
@@ -456,7 +459,6 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
           mainBranch: runtimeConfig.mainBranch,
           terminalPhase: runtimeConfig.terminalPhase,
           ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
-          log: (line) => pushAgentLine(state, line),
         });
     state.activityContext = { repoDir, prdDir: runtimeConfig.prdDir };
     const attachUrl = resolveAttachUrl(options, runtimeConfig);
@@ -614,6 +616,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       if (options.resetStories) storyStateStore.clear();
       clearSignalLog(configDir);
       clearPermissionAudit(configDir);
+      stepAttemptStore.clear();
       startIteration = 1;
       firstIterationStartStepIndex = 0;
       firstIterationResume = undefined;
@@ -676,6 +679,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
         if (options.resetStories) storyStateStore.clear();
         clearSignalLog(configDir);
         clearPermissionAudit(configDir);
+        stepAttemptStore.clear();
       }
       if (!state.started) {
         const plan = computeResumePlan(loadSteps(configDir));
@@ -945,6 +949,7 @@ async function main(): Promise<number> {
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
       ...(runtimeConfig.prdFlipThreshold !== undefined ? { prdFlipThreshold: runtimeConfig.prdFlipThreshold } : {}),
+      ...(runtimeConfig.stepAttemptMax !== undefined ? { stepAttemptMax: runtimeConfig.stepAttemptMax } : {}),
       ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
       mainBranch: runtimeConfig.mainBranch,
       terminalPhase: runtimeConfig.terminalPhase,

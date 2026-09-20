@@ -5,7 +5,6 @@ import { join } from "node:path";
 
 import {
   createStoryPhaseResolver,
-  deriveStoryPhases,
   isPrdComplete,
   selectNextStory,
   type StoryPhaseSnapshot,
@@ -147,197 +146,82 @@ describe("isPrdComplete", () => {
 });
 
 describe("createStoryPhaseResolver", () => {
-  test("snapshot is undefined when prd is unreadable", () => {
-    const stored = new Map<string, StoryPhase>();
-    const resolver = createStoryPhaseResolver({
+  function resolverFor(stored: Map<string, StoryPhase>, prdIndex: string) {
+    return createStoryPhaseResolver({
       repoDir: scratch("looper-phase-repo-"),
-      prdIndex: join(scratch("looper-phase-prd-"), "missing.json"),
-      storyState: {
-        readPhase: (id) => stored.get(id),
-        writePhase: (id, phase) => {
-          stored.set(id, phase);
-        },
-      },
-      derive: () => ({}),
+      prdIndex,
+      storyState: { readPhase: (id) => stored.get(id) },
       storyFetchTimeoutMs: 0,
     });
+  }
 
+  test("snapshot is undefined when prd is unreadable", () => {
+    const resolver = resolverFor(new Map(), join(scratch("looper-phase-prd-"), "missing.json"));
     expect(resolver.snapshot()).toBeUndefined();
   });
 
-  test("snapshot derives fresh, uses max(stored, derived), and persists upgrades", () => {
+  test("snapshot reports stored phases and defaults the rest to building", () => {
     const prdDir = scratch("looper-phase-prd-");
     writeFileSync(
       prdIndexPath(prdDir),
-      JSON.stringify({
-        userStories: [
-          { id: "US-1", title: "one" },
-          { id: "US-2", title: "two" },
-        ],
-      }),
+      JSON.stringify({ userStories: [{ id: "US-1", title: "one" }, { id: "US-2", title: "two" }] }),
     );
     const stored = new Map<string, StoryPhase>([["US-1", "implemented"]]);
-    const logs: string[] = [];
-    let deriveCalls = 0;
+
+    const snap = resolverFor(stored, prdIndexPath(prdDir)).snapshot();
+
+    expect(snap?.phases["US-1"]).toBe("implemented");
+    expect(snap?.phases["US-2"]).toBe("building");
+  });
+
+  test("snapshot never writes: phase is asserted by signals, never inferred", () => {
+    // The whole failure class this removed: a guess about git topology used to be
+    // persisted into the authoritative store, so one wrong guess was permanent.
+    // An empty story branch was recorded `merged` with zero commits and gated off
+    // every step that could have finished the story.
+    const prdDir = scratch("looper-phase-prd-");
+    writeFileSync(prdIndexPath(prdDir), JSON.stringify({ userStories: [{ id: "US-1", title: "one" }] }));
+    const stored = new Map<string, StoryPhase>([["US-1", "building"]]);
+    const writes: string[] = [];
 
     const resolver = createStoryPhaseResolver({
       repoDir: scratch("looper-phase-repo-"),
       prdIndex: prdIndexPath(prdDir),
       storyState: {
-        readPhase: (id) => stored.get(id),
-        writePhase: (id, phase) => {
-          stored.set(id, phase);
-        },
-      },
-      derive: () => {
-        deriveCalls += 1;
-        return { "US-1": "merged", "US-2": "published" };
-      },
+        readPhase: (id: string) => stored.get(id),
+        // Present but must never be called; the resolver only needs readPhase.
+        writePhase: (id: string, phase: StoryPhase) => void writes.push(`${id}=${phase}`),
+      } as never,
       storyFetchTimeoutMs: 0,
-      log: (line) => logs.push(line),
     });
 
-    const first = resolver.snapshot();
-    expect(deriveCalls).toBe(1);
-    expect(first?.phases["US-1"]).toBe("merged");
-    expect(first?.phases["US-2"]).toBe("published");
-    expect(stored.get("US-1")).toBe("merged");
-    expect(stored.get("US-2")).toBe("published");
-    expect(logs).toEqual([
-      "[looper] story US-1: phase merged (derived from git)",
-      "[looper] story US-2: phase published (derived from git)",
-    ]);
-
-    // Each snapshot re-derives (no cache).
     resolver.snapshot();
-    expect(deriveCalls).toBe(2);
+    resolver.snapshot();
 
-    // Derived lower than stored must not regress.
-    const resolver2 = createStoryPhaseResolver({
-      repoDir: scratch("looper-phase-repo-"),
-      prdIndex: prdIndexPath(prdDir),
-      storyState: {
-        readPhase: (id) => stored.get(id),
-        writePhase: (id, phase) => {
-          stored.set(id, phase);
-        },
-      },
-      derive: () => ({ "US-1": "building" }),
-      storyFetchTimeoutMs: 0,
-    });
-    const snap2 = resolver2.snapshot();
-    expect(snap2?.phases["US-1"]).toBe("merged");
-    expect(stored.get("US-1")).toBe("merged");
+    expect(writes).toEqual([]);
+    expect(stored.get("US-1")).toBe("building");
   });
 
-  test("fetchMain with timeout 0 skips fetch and does not derive", async () => {
+  test("fetchMain with timeout 0 is a no-op and never throws", async () => {
     const prdDir = scratch("looper-phase-prd-");
     writeFileSync(prdIndexPath(prdDir), JSON.stringify({ userStories: [{ id: "US-9", title: "n" }] }));
-    let deriveCalls = 0;
-    const stored = new Map<string, StoryPhase>();
-    const resolver = createStoryPhaseResolver({
-      repoDir: scratch("looper-phase-repo-"),
-      prdIndex: prdIndexPath(prdDir),
-      storyState: {
-        readPhase: (id) => stored.get(id),
-        writePhase: (id, phase) => {
-          stored.set(id, phase);
-        },
-      },
-      derive: () => {
-        deriveCalls += 1;
-        return { "US-9": "published" };
-      },
-      storyFetchTimeoutMs: 0,
-    });
+    const resolver = resolverFor(new Map([["US-9", "published"]]), prdIndexPath(prdDir));
 
     await resolver.fetchMain();
-    expect(deriveCalls).toBe(0);
-    // snapshot still derives on demand
+
     expect(resolver.snapshot()?.phases["US-9"]).toBe("published");
-    expect(deriveCalls).toBe(1);
-  });
-});
-
-describe("deriveStoryPhases (real git)", () => {
-  function git(cwd: string, args: readonly string[]): void {
-    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
-    if (result.exitCode !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${result.stderr.toString()}`);
-    }
-  }
-
-  test("marks remote story branches published and merged ancestors as merged", () => {
-    // Given a temporary bare origin and a working clone with story branches.
-    const root = scratch("looper-derive-git-");
-    const origin = join(root, "origin.git");
-    const work = join(root, "work");
-    mkdirSync(origin);
-    git(origin, ["init", "--bare"]);
-    // Default branch name for new repos may be master; force main.
-    git(origin, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-
-    mkdirSync(work);
-    git(work, ["init"]);
-    git(work, ["config", "user.email", "looper@example.com"]);
-    git(work, ["config", "user.name", "Looper Test"]);
-    git(work, ["checkout", "-b", "main"]);
-    writeFileSync(join(work, "README"), "main\n");
-    git(work, ["add", "README"]);
-    git(work, ["commit", "-m", "init"]);
-    git(work, ["remote", "add", "origin", origin]);
-    git(work, ["push", "-u", "origin", "main"]);
-
-    // US-MERGED: branch created from main, merged back into main, pushed.
-    git(work, ["checkout", "-b", "us-merged-feature"]);
-    writeFileSync(join(work, "merged.txt"), "m\n");
-    git(work, ["add", "merged.txt"]);
-    git(work, ["commit", "-m", "merged work"]);
-    git(work, ["checkout", "main"]);
-    git(work, ["merge", "--no-ff", "us-merged-feature", "-m", "merge us-merged"]);
-    git(work, ["push", "origin", "main"]);
-    git(work, ["push", "origin", "us-merged-feature"]);
-
-    // US-PUB: branch pushed to origin but not merged into main.
-    git(work, ["checkout", "-b", "us-pub-feature"]);
-    writeFileSync(join(work, "pub.txt"), "p\n");
-    git(work, ["add", "pub.txt"]);
-    git(work, ["commit", "-m", "published work"]);
-    git(work, ["push", "-u", "origin", "us-pub-feature"]);
-
-    // US-LOCAL: local-only branch, not on origin → no derived phase.
-    git(work, ["checkout", "-b", "us-local-feature"]);
-    writeFileSync(join(work, "local.txt"), "l\n");
-    git(work, ["add", "local.txt"]);
-    git(work, ["commit", "-m", "local work"]);
-
-    git(work, ["checkout", "main"]);
-    git(work, ["fetch", "origin"]);
-
-    const storyIds = ["US-MERGED", "US-PUB", "US-LOCAL", "US-NONE"];
-
-    // When phases are derived from git (sync).
-    const derived = deriveStoryPhases({
-      repoDir: work,
-      storyIds,
-      mainBranch: "main",
-      storyIdPattern: "^([a-z]+-[a-z0-9]+)-",
-    });
-
-    // Then merge-base ancestry yields merged; remote-only yields published; local-only/none absent.
-    expect(derived["US-MERGED"]).toBe("merged");
-    expect(derived["US-PUB"]).toBe("published");
-    expect(derived["US-LOCAL"]).toBeUndefined();
-    expect(derived["US-NONE"]).toBeUndefined();
   });
 
-  test("returns empty map on git failure without throwing", () => {
-    const notARepo = scratch("looper-derive-nongit-");
-    const derived = deriveStoryPhases({
-      repoDir: notARepo,
-      storyIds: ["US-1"],
-      mainBranch: "main",
+  test("fetchMain against a non-repo never throws", async () => {
+    const prdDir = scratch("looper-phase-prd-");
+    writeFileSync(prdIndexPath(prdDir), JSON.stringify({ userStories: [{ id: "US-9", title: "n" }] }));
+    const resolver = createStoryPhaseResolver({
+      repoDir: scratch("looper-phase-nonrepo-"),
+      prdIndex: prdIndexPath(prdDir),
+      storyState: { readPhase: () => undefined },
+      storyFetchTimeoutMs: 1000,
     });
-    expect(derived).toEqual({});
+
+    expect(await resolver.fetchMain().then(() => "ok")).toBe("ok");
   });
 });

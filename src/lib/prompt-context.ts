@@ -1,5 +1,6 @@
 import type { StoryPhase } from "./story-state-files.ts";
 import type { PrdPaths } from "./prd.ts";
+import { legalOutcomeCommands } from "../engine/step-outcome.ts";
 
 export type ContextPolicy = {
   readonly datetime: boolean;
@@ -212,7 +213,14 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
           ...(story.expects !== undefined
             ? [
                 `  expects: ${story.expects}`,
-                `  outcome: run one of these as a shell command (do not print it as your reply): looper signal story-phase ${story.expects} | looper signal story-phase <lower> --reason "<defect>" | looper signal blocked --reason "<why>" | looper signal no-op --reason "<why>"`,
+                // Engine-generated, never hand-copied into a step prompt: the legal
+                // set depends on `expects`, so a prose copy drifts and can advertise
+                // a move the engine rejects.
+                "  outcome: end this step by running EXACTLY ONE of these as a shell command (never print it as your reply; the engine only records a signal if the process actually runs):",
+                ...legalOutcomeCommands({
+                  expects: story.expects,
+                  ...(story.storyId !== undefined ? { storyId: story.storyId } : {}),
+                }).map(({ command, when }) => `    - ${command}\n      ${when}`),
               ]
             : []),
         ].join("\n")

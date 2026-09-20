@@ -390,7 +390,7 @@ describe("looper signal", () => {
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
   });
 
-  test("merged rejects when story branch is not an ancestor of origin/main", async () => {
+  test("merged is accepted whatever the refs look like (topology is not evidence)", async () => {
     const fixture = createScratch();
     scratch = fixture.repoDir;
     writeMinimalConfig(fixture.configDir);
@@ -413,8 +413,11 @@ describe("looper signal", () => {
       "--config-dir",
       fixture.configDir,
     ]);
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain("cannot claim merged");
+    // Ref topology cannot answer "did this merge?": a squash-merged branch is
+    // never an ancestor of main, so the old check rejected TRUE claims and left
+    // a merged story unreachable by the loop AND by this escape hatch. Babysit
+    // signals immediately after `gh pr merge` returns 0, so it is the authority.
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
   });
 
   test("merged accepts when story tip is ancestor of origin/main", async () => {
@@ -450,6 +453,43 @@ describe("looper signal", () => {
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
   });
 
+  test("merged accepts after a squash merge (tip is not an ancestor)", async () => {
+    // The production failure: the PR was squash-merged, so the branch tip can
+    // never be an ancestor of origin/main. The agent died before signalling,
+    // and this manual escape hatch used to reject the claim too, leaving the
+    // story permanently stranded at published.
+    const fixture = createScratch();
+    scratch = fixture.repoDir;
+    writeMinimalConfig(fixture.configDir);
+
+    const { originDir } = await initRepoWithOrigin(fixture.repoDir);
+    extraScratch = originDir;
+
+    await git(fixture.repoDir, ["checkout", "-q", "-b", "us-300-feature"]);
+    writeFileSync(join(fixture.repoDir, "a.ts"), "1\n");
+    await git(fixture.repoDir, ["add", "a.ts"]);
+    await git(fixture.repoDir, ["commit", "-q", "-m", "feature"]);
+    await git(fixture.repoDir, ["push", "-q", "-u", "origin", "us-300-feature"]);
+
+    // Squash merge, branch deliberately left behind (gh --delete-branch failed).
+    await git(fixture.repoDir, ["checkout", "-q", "main"]);
+    await git(fixture.repoDir, ["merge", "-q", "--squash", "us-300-feature"]);
+    await git(fixture.repoDir, ["commit", "-q", "-m", "feat: feature (#1)"]);
+    await git(fixture.repoDir, ["push", "-q", "origin", "main"]);
+    await git(fixture.repoDir, ["fetch", "-q", "origin"]);
+
+    const result = await runCli(fixture.repoDir, [
+      "signal",
+      "story-phase",
+      "merged",
+      "--story",
+      "US-300",
+      "--config-dir",
+      fixture.configDir,
+    ]);
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+  });
+
   test("merged accepts when no story branch exists (cannot disprove)", async () => {
     const fixture = createScratch();
     scratch = fixture.repoDir;
@@ -466,7 +506,7 @@ describe("looper signal", () => {
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
   });
 
-  test("story-phase refuses to regress below a derived published phase", async () => {
+  test("story-phase can be demoted: nothing is inferred from refs", async () => {
     const fixture = createScratch();
     scratch = fixture.repoDir;
     writeMinimalConfig(fixture.configDir);
@@ -480,7 +520,9 @@ describe("looper signal", () => {
     await git(fixture.repoDir, ["commit", "-q", "-m", "work"]);
     await git(fixture.repoDir, ["push", "-q", "-u", "origin", "us-500-feature"]);
 
-    // Derived phase is published; demoting to building must fail
+    // A pushed branch used to derive `published` and veto this demotion. Phase is
+    // now only ever what was asserted, so an operator (or an agent that found the
+    // work incomplete) can always hand a story back.
     const result = await runCli(fixture.repoDir, [
       "signal",
       "story-phase",
@@ -492,10 +534,9 @@ describe("looper signal", () => {
       "--config-dir",
       fixture.configDir,
     ]);
-    expect(result.exitCode).toBe(2);
-    expect(result.stderr).toContain("derived phase");
-    expect(result.stderr).toContain("published");
-    expect(existsSync(join(fixture.configDir, ".looper-story-state.json"))).toBe(false);
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+    const state = JSON.parse(readFileSync(join(fixture.configDir, ".looper-story-state.json"), "utf8"));
+    expect(state.stories["US-500"].phase).toBe("building");
   });
 
 
@@ -528,31 +569,6 @@ describe("looper signal", () => {
       fixture.configDir,
     ]);
     expect(result).toMatchObject({ exitCode: 0, stderr: "" });
-  });
-
-  test("merged honors LOOPER_STORY_FETCH_TIMEOUT_MS=0 (skips fetch, still checks ancestry)", async () => {
-    const fixture = createScratch();
-    scratch = fixture.repoDir;
-    writeMinimalConfig(fixture.configDir);
-
-    const { originDir } = await initRepoWithOrigin(fixture.repoDir);
-    extraScratch = originDir;
-
-    await git(fixture.repoDir, ["checkout", "-q", "-b", "us-300-feature"]);
-    writeFileSync(join(fixture.repoDir, "a.ts"), "1\n");
-    await git(fixture.repoDir, ["add", "a.ts"]);
-    await git(fixture.repoDir, ["commit", "-q", "-m", "unmerged"]);
-    await git(fixture.repoDir, ["push", "-q", "-u", "origin", "us-300-feature"]);
-
-    const child = Bun.spawn(["bun", MAIN_ENTRY, "signal", "story-phase", "merged", "--story", "US-300", "--config-dir", fixture.configDir], {
-      cwd: fixture.repoDir,
-      env: { ...process.env, LOOPER_REPO_DIR: fixture.repoDir, LOOPER_STORY_FETCH_TIMEOUT_MS: "0" },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [exitCode, stderr] = await Promise.all([child.exited, child.stderr.text()]);
-    expect(exitCode).toBe(2);
-    expect(stderr).toContain("cannot claim merged");
   });
 
   test("readSignalsSince sees CLI-written records", async () => {

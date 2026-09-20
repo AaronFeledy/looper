@@ -218,6 +218,7 @@ describe("runIteration fail-path characterization", () => {
       "LOOPER_FAILURE_RETRY_MAX_DELAY_MS",
       "LOOPER_FAILURE_RETRY_MIN_REMAINING_MS",
       "LOOPER_FAILURE_RETRY_JITTER",
+      "LOOPER_TIMEOUT_RESTART_MAX",
     ]) {
       savedEnv.set(key, process.env[key]);
     }
@@ -274,6 +275,59 @@ describe("runIteration fail-path characterization", () => {
     expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual([]);
     expect(harness.calls).toContain("abort:ses_old");
   });
+
+  test("a step that burns its whole budget is restarted with a FULL fresh one, not halted", async () => {
+    // The step timeout is a watchdog: a hung or wheel-spinning step is killed
+    // and restarted with a fresh budget. Before this, a deadline abort fell into
+    // the failure-retry policy, which can never retry it -- the deadline only
+    // fires once the budget is spent -- so the run halted with "retry budget
+    // exhausted: SDK request interrupted", a retry loop that never ran.
+    const input = setupScratch();
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "5000";
+    process.env.LOOPER_TIMEOUT_RESTART_MAX = "2";
+    // Budget below the retry floor (so it reads as exhausted) but non-zero, so
+    // prompts still dispatch. Record the stepStartTime the engine measures from.
+    const starts: number[] = [];
+    spyOn(budgets, "remainingStepBudgetMs").mockImplementation((_budgetMs, stepStartTime) => {
+      starts.push(stepStartTime);
+      return 3_000;
+    });
+    const harness = makeHarness({
+      sessionIDs: ["ses_1", "ses_2", "ses_3"],
+      prompt: async () => { throw new Error("SDK request interrupted"); },
+    });
+
+    // When the step never manages to finish inside its budget.
+    const error = await captureFailure(execute(input, harness));
+
+    // Then it was restarted with a fresh session each time, up to the cap...
+    expect(harness.calls.filter((call) => call.startsWith("prompt:"))).toEqual(["prompt:ses_1", "prompt:ses_2", "prompt:ses_3"]);
+    expectExactLog(input.state, "[looper] Build timed out after 60m (SDK request interrupted) \u2014 restarting with a full budget (restart 1/2)");
+    expectExactLog(input.state, "[looper] Build timed out after 60m (SDK request interrupted) \u2014 restarting with a full budget (restart 2/2)");
+    // ...and each restart moved stepStartTime forward, which IS the fresh budget.
+    expect(new Set(starts).size).toBeGreaterThan(1);
+    // Only after the cap does the run stop, naming the timeout rather than a
+    // retry loop that never ran.
+    expect(error.message).toContain("Build");
+    expect(input.state.steps.at(-1)?.status).toBe("failed");
+  }, 15_000);
+
+  test("timeout restarts are capped so a permanently hung step cannot spin forever", async () => {
+    // The stall detector only observes at ITERATION boundaries, so a step that
+    // restarts forever never lets it run. The cap is the only backstop.
+    const input = setupScratch();
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "5000";
+    process.env.LOOPER_TIMEOUT_RESTART_MAX = "0";
+    spyOn(budgets, "remainingStepBudgetMs").mockReturnValue(3_000);
+    const harness = makeHarness({ prompt: async () => { throw new Error("SDK request interrupted"); } });
+
+    // When restarts are disabled entirely.
+    await captureFailure(execute(input, harness));
+
+    // Then the step is not restarted at all and the old terminal path applies.
+    expect(harness.calls.filter((call) => call.startsWith("prompt:"))).toEqual(["prompt:ses_1"]);
+    expect(input.state.agentLines.some((line) => line.includes("restarting with a full budget"))).toBe(false);
+  }, 15_000);
 
   test("exhausts the retry budget when the backoff sleep consumes the minimum runtime", async () => {
     // Given enough budget before backoff but only the minimum after it.

@@ -95,6 +95,7 @@ refetched from opencode on demand; history is kept in memory for the current run
     ├── .looper-adjudicate-session.json  # in-flight adjudicator session, reconciled on resume
     ├── .looper-phase-history.json # per-story phase transition log (+ adjudicated watermark); cleared only on --fresh
     ├── .looper-signals.jsonl      # append-only log of every `looper signal`; cleared only on --fresh
+    ├── .looper-step-attempts.json # consecutive non-advancing outcomes per (story, step); cleared only on --fresh
     ├── .looper-permission-log.jsonl # private decision audit (0600); cleared only on --fresh
     ├── .looper-story-state.json    # per-story phase (StoryPhase); cleared only on --fresh --reset-stories
     └── .looper-state-lock.sqlite   # machine-local mutex; gitignored, recreates on next write
@@ -319,7 +320,8 @@ immediately instead of running one more lap.
 If a story keeps getting demoted (a `looper signal story-phase` that moves it to a lower phase, `prdFlipThreshold`
 times, default 2), that's two steps enforcing contradictory readings of the PRD contract: one keeps promoting,
 the other keeps handing back. Looper detects this and routes to a dedicated adjudicate step with authority to
-amend the PRD contract itself, instead of looping the same two steps forever. Only signal-sourced demotions
+amend the PRD contract itself, instead of looping the same two steps forever. The attempt ledger routes here too,
+when one step reports `stepAttemptMax` consecutive non-advancing outcomes for the same story. Only signal-sourced demotions
 count; the engine's own phase reset on new commits (see "Outcome contract") never does.
 
 Configure it with an optional top-level `adjudicate:` block, using the same fields as a `steps:` entry:
@@ -407,19 +409,41 @@ the branch during its turn), else the selected `next` story. After the turn comp
    story was reworked, so the step has to re-prove the phase. An explicit signal during the step is the agent's
    own re-proof and is never overridden; derived phases are unaffected.
 2. **Decision.** Effective phase at or past `expects`: `done`. Otherwise the signals since step start for that
-   story decide: `blocked` ends the step as blocked; `no-op` and `adjudicate` end it as `done` (reason logged);
-   a `story-phase` to a phase lower than where the story started (a hand-back) ends it as `done`.
+   story decide, **by what they say, not by how far the phase moved**: `blocked` ends the step as blocked;
+   `no-op` and `adjudicate` end it as a no-op (reason logged); a `story-phase` to any phase *below `expects`*
+   is a **hand-back** — the agent saying "I attempted this and did not get there", with the defect named.
+   A hand-back is measured against `expects`, not against the phase the story started at, so a step whose
+   `expects` sits one rung above the entry phase (Build at `building`, Push at `verified`) can hand back by
+   re-asserting the phase it started at. That is the only hand-back those steps can express.
 3. **No signal.** If a permission prompt timed out during the step, or less than
    `LOOPER_OUTCOME_REMINDER_MIN_MS` (default 60000) remains in the step budget, the step is blocked with that
-   reason and no reminder is sent. Otherwise looper sends one same-session reminder listing the four acceptable
-   signals and asking the agent to signal and stop, then re-evaluates. A second silent turn fails the step with
-   `step ended without an outcome signal`, with no automatic retry; the next iteration runs the step again because
-   the phase did not advance.
+   reason and no reminder is sent. Otherwise looper sends one same-session reminder listing the exact commands
+   it will accept and asking the agent to signal and stop, then re-evaluates. A second silent turn blocks the
+   step with `step ended without an outcome signal after a reminder`; the run continues, and the next iteration
+   runs the step again because the phase did not advance.
+
+Looper generates the legal outcome commands for each `expects:` step from the ladder itself and injects them as
+`story.outcome` in the `<looper-context>` block, and the reminder in step 3 is built by the same function. **Do not
+restate the legal exits in a step prompt** — a hand-maintained list drifts from the engine and can instruct the
+agent to make a move the engine rejects.
 
 A **blocked** step is not a failure. Its row shows `blocked: <reason>`, the resume pointer advances like a
 completion, later steps in the iteration see `<step>=blocked (<reason>)` in their prior-steps context, and when
 `prd:` is configured the line `[looper] <step> blocked: <reason>` is appended to `prd.progress`. Gates keep the
-downstream steps closed until the phase actually moves.
+downstream steps closed until the phase actually moves. A **hand-back** is a completed step: its row shows
+`handed back at <phase>`, prior steps see `handed back at <phase> (<reason>)`, and it gets its own `prd.progress`
+entry.
+
+#### Attempt ledger
+
+A hand-back and a blocked step both leave the story where it was, so a step that keeps failing honestly would
+otherwise loop forever: oscillation detection only counts phase *changes*, and the stall detector resets on any
+material commit. Looper therefore counts **consecutive non-advancing outcomes per (story, step)** in
+`.looper-step-attempts.json`. A genuine advance clears the streak; a `no-op` never counts. At `stepAttemptMax`
+(`LOOPER_STEP_ATTEMPT_MAX`, else `stepAttemptMax:` in `looper.yaml`, else `3`; `0` disables) looper escalates
+through the normal adjudication route — running the `adjudicate:` step if one is configured, otherwise stopping
+the run with a reason naming the step, the story, the attempt count, and the last reason given. The ledger is
+cleared by `--fresh`.
 
 ### Signals
 
@@ -521,6 +545,7 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_STORY_FETCH_TIMEOUT_MS` &mdash; timeout for the per-iteration `git fetch origin <mainBranch>` behind derived phases (default: `15000`; `0` disables the fetch)
 - `LOOPER_OUTCOME_REMINDER_MIN_MS` &mdash; minimum remaining step budget for an `expects:` reminder turn; below it the step is blocked instead (default: `60000`)
 - `LOOPER_PRD_FLIP_THRESHOLD` &mdash; signal-sourced demotions of one story before adjudication routes (default: `2`)
+- `LOOPER_STEP_ATTEMPT_MAX` &mdash; consecutive non-advancing outcomes (hand-back or blocked) one step may report for the same story before escalating (default: `3`; `0` disables)
 - `LOOPER_PERMISSION_GATE_MAX_MS` &mdash; maximum attended wait for each permission/question ask (default: `1800000`; must be at least `1`)
 - `LOOPER_PERMISSION_TEARDOWN_MS` &mdash; total deadline for stopping a session and resolving its open requests (default: `5000`)
 - `LOOPER_PERMISSION_BELL` &mdash; TTY alert for newly gated permission/question requests (`1` by default; set `0` to disable)

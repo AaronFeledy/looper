@@ -1,9 +1,7 @@
 import { UsageError } from "./args.ts";
 import { materialPathsExist, prdDirRelative } from "./material-paths.ts";
 import { DEFAULT_STORY_ID_PATTERN, storyIdFromBranch } from "./story-id.ts";
-import { comparePhase, type StoryPhase } from "./story-state-files.ts";
-import { deriveStoryPhases } from "../engine/story-phases.ts";
-import { storyFetchTimeoutMs } from "../config/tunables.ts";
+import { type StoryPhase } from "./story-state-files.ts";
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -119,84 +117,32 @@ async function assertPublishedPrecondition(
   }
 }
 
-/**
- * `merged`: best-effort fetch, then a story branch tip must be an ancestor of
- * origin/<mainBranch>. No branch found → accept (cannot disprove). Found and
- * not ancestor → reject.
- */
-async function assertMergedPrecondition(
-  repoDir: string,
-  storyId: string,
-  runtime: StoryPhaseClaimRuntime,
-): Promise<void> {
-  // Best-effort fetch (same spirit as createStoryPhaseResolver.fetchMain).
-  // LOOPER_STORY_FETCH_TIMEOUT_MS including 0 is honored (0 skips fetch).
-  const fetchMs = storyFetchTimeoutMs();
-  if (fetchMs > 0) {
-    await gitStdout(repoDir, ["fetch", "origin", runtime.mainBranch], fetchMs);
-  }
-
-  const { localOrRemote } = await listStoryRefs(repoDir, storyId, runtime.storyIdPattern, runtime.storyIds);
-  if (localOrRemote.length === 0) return; // cannot disprove
-
-  const mainRef = `origin/${runtime.mainBranch}`;
-  for (const tip of localOrRemote) {
-    const result = await gitStdout(repoDir, ["merge-base", "--is-ancestor", tip, mainRef]);
-    if (result !== undefined) return; // tip is ancestor → merged
-  }
-  throw new UsageError(
-    `cannot claim merged for ${storyId}: story branch tip is not an ancestor of ${mainRef}; merge (or re-fetch) first`,
-  );
-}
-
-async function assertDerivedNonRegression(
-  repoDir: string,
-  storyId: string,
-  requested: StoryPhase,
-  runtime: StoryPhaseClaimRuntime,
-): Promise<void> {
-  let derived: Readonly<Record<string, StoryPhase>> = {};
-  try {
-    derived = deriveStoryPhases({
-      repoDir,
-      storyIds: runtime.storyIds !== undefined && runtime.storyIds.length > 0 ? runtime.storyIds : [storyId],
-      mainBranch: runtime.mainBranch,
-      ...(runtime.storyIdPattern !== undefined ? { storyIdPattern: runtime.storyIdPattern } : {}),
-    });
-  } catch {
-    // no-excuse-ok: catch -- derive failure is fail-open (no derived ceiling)
-    return;
-  }
-  const floor = derived[storyId];
-  if (floor === undefined) return;
-  if (comparePhase(requested, floor) < 0) {
-    throw new UsageError(
-      `cannot set phase to ${requested} for ${storyId}: derived phase from git is ${floor} (will not regress below derived)`,
-    );
-  }
-}
-
 export async function assertStoryPhasePreconditions(
   repoDir: string,
   storyId: string,
   phase: StoryPhase,
   runtime: StoryPhaseClaimRuntime,
 ): Promise<void> {
-  await assertDerivedNonRegression(repoDir, storyId, phase, runtime);
-
+  // Only EXISTENCE checks live here. `implemented` asks "is there a commit?" and
+  // `published` asks "is there a remote branch?" -- both are facts a ref either
+  // has or does not have. There is deliberately no `merged` check: every test
+  // for it reconstructs history from ref topology, which is lossy, and a lossy
+  // validator rejects TRUE claims (a squash-merged story could not be signalled
+  // merged at all, by the loop or by hand). Babysit calls this immediately after
+  // `gh pr merge` returns 0, so it is the authority; second-guessing it with
+  // worse information only ever loses. `building`/`reviewed`/`verified` are
+  // loop-internal and were always taken on trust.
   switch (phase) {
     case "building":
     case "reviewed":
     case "verified":
+    case "merged":
       return;
     case "implemented":
       await assertImplementedPrecondition(repoDir, runtime.mainBranch, runtime.prdDir);
       return;
     case "published":
       await assertPublishedPrecondition(repoDir, storyId, runtime);
-      return;
-    case "merged":
-      await assertMergedPrecondition(repoDir, storyId, runtime);
       return;
   }
 }

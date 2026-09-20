@@ -25,7 +25,7 @@ test("CI progress includes unfinished checks even after another check fails", ()
   const status = fixture().github;
   expect(ciIsRunning(status)).toBe(true);
   if (status.kind !== "pr") throw new Error("missing PR");
-  expect(ciCounts(status.pr)).toBe("◷2 ✓3 ✗1 ~1");
+  expect(ciCounts(status.pr)).toBe("◷ 2 ✓ 3 ✗ 1 ~ 1");
   status.pr.ciPending = 0;
   expect(ciIsRunning(status)).toBe(false);
   expect(ciBorderColor(0, false)).not.toBe(ciBorderColor(700, false));
@@ -39,7 +39,7 @@ for (const classic of [false, true]) test(`${classic ? "classic" : "constellatio
   setup.renderer.root.add(view);
   try {
     await setup.flush();
-    expect(setup.captureCharFrame()).toContain("◷2 ✓3 ✗1 ~1");
+    expect(setup.captureCharFrame()).toContain("◷ 2 ✓ 3 ✗ 1 ~ 1");
     if (!classic) expect(setup.captureCharFrame()).toContain("8 files");
     const card = classic ? view : view.findDescendantById("constellation-context-1")!;
     const color = () => {

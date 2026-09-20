@@ -16,7 +16,7 @@ export function constellationDockPanels(state: LoopState): DockPanel[] {
   const pr = github.kind === "pr" ? github.pr : undefined;
   const checking = !!pr && (pr.ciPending > 0 || pr.ciOverall === "pending");
   const completed = todos.filter(todo => todo.status === "completed").length;
-  const counts = pr ? "◷" + pr.ciPending + " ✓" + pr.ciPassing + " ✗" + pr.ciFailing + (pr.ciNeutral ? " ~" + pr.ciNeutral : "") : "";
+  const counts = pr ? "◷ " + pr.ciPending + " ✓ " + pr.ciPassing + " ✗ " + pr.ciFailing + (pr.ciNeutral ? " ~ " + pr.ciNeutral : "") : "";
   return [
     {
       id: "changes",

@@ -75,7 +75,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
   canvas.add(wires);
   const loopMarker = new TextRenderable(renderer, {
     id: "constellation-loop-marker", position: "absolute", height: 3, zIndex: 3,
-    fg: "#91d9df", bg: BG, selectable: false, wrapMode: "none", content: "", visible: false,
+    fg: MUTED, bg: BG, selectable: false, wrapMode: "none", content: "", visible: false,
   });
   canvas.add(loopMarker);
   field.add(canvas);
@@ -216,7 +216,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
         loopMarker.top = item.y - (bounds?.y ?? 0) + (region?.scroll.scrollTop ?? 0);
         loopMarker.width = item.width;
         const center = (text: string) => " ".repeat(Math.max(0, Math.floor((item.width - displayWidth(text)) / 2))) + text;
-        loopMarker.content = center("──── ↻ ────") + "\n" + center(`ITERATION ${item.iteration}`);
+        loopMarker.content = "\n" + center("──── ↻ ────") + "\n" + center(`ITERATION ${item.iteration}`);
       }
       legend.content = `↑↓ agents  ·  tab subagents  ·  o inspect  ·  i plan  ·  m ${motion ? "still" : "animate"}  ·  wheel scroll column  ·  g run  ·  p pause`;
       const ids = new Set(scene.bubbles.map((item) => item.node.id));
@@ -293,7 +293,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
         card.box.bottomTitle = !compact && node.badge ? ` ${node.badge} ` : undefined;
         card.box.bottomTitleAlignment = "right";
         const nameColor = mixColor([140, 155, 170], [225, 238, 239], prominence);
-        const glyphColor: RGB = node.status === "skipped" ? [249, 226, 175] : attention ? bright : isMoving(node) ? mixColor([102, 110, 121], bright, ring.glow) : nameColor;
+        const glyphColor: RGB = node.status === "skipped" ? [249, 226, 175] : attention ? bright : isMoving(node) ? mixColor([74, 82, 93], mixColor(bright, [255, 255, 255], 0.35), ring.glow) : nameColor;
         const countSuffix = compact && node.completedCount ? ` ${node.expanded ? "▾" : "▸"}${node.completedCount}` : "";
         const titleWidth = item.width - (compact ? 2 : 4);
         const durationSuffix = !compact && completedElapsed ? ` ${completedElapsed}` : "";
@@ -302,7 +302,8 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
         const name = title + (durationSuffix
           ? " ".repeat(Math.max(0, titleWidth - displayWidth(title) - displayWidth(durationSuffix))) + durationSuffix : "");
         card.countOffset = countSuffix ? displayWidth(name) - displayWidth(countSuffix) + 1 : undefined;
-        card.name.content = ansiToStyledText(`${colorEscape(glyphColor)}${isMoving(node) && ring.bold ? "\x1b[1m" : "\x1b[22m"}${name.slice(0, 1)}\x1b[22m${colorEscape(nameColor)}${live && !node.parentID ? "\x1b[1m" : ""}${name.slice(1)}\x1b[0m`);
+        // Repaint the spacer with the glyph so font overhang shares its color and weight.
+        card.name.content = ansiToStyledText(`${colorEscape(glyphColor)}${isMoving(node) && ring.bold ? "\x1b[1m" : "\x1b[22m"}${name.slice(0, 2)}\x1b[22m${colorEscape(nameColor)}${live && !node.parentID ? "\x1b[1m" : ""}${name.slice(2)}\x1b[0m`);
         card.name.fg = hexColor(nameColor);
         card.name.attributes = TextAttributes.NONE;
         const summary = truncateDisplay(node.summary, item.width - 4);

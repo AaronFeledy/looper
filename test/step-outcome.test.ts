@@ -26,13 +26,11 @@ function base(overrides: Partial<DecideStepOutcomeInput> = {}): DecideStepOutcom
 
 const EXACT_REMINDER = [
   `Your turn ended without running a looper signal for US-618E.`,
-  `Use your bash/shell tool to run exactly one of these commands now. Do not write the command as assistant text; the engine only records a signal if the process actually runs.`,
-  `looper signal story-phase verified`,
-  `(only if this step's checklist fully passed and any fixes are committed)`,
-  `looper signal story-phase <lower phase> --reason "<defect>"`,
-  `(hand the story back)`,
-  `looper signal blocked --reason "<what stopped you>"`,
-  `looper signal no-op --reason "<why there was nothing to do>"`,
+  `Run exactly one of these with your bash/shell tool now. Do not write the command as assistant text; the engine only records a signal if the process actually runs.`,
+  `looper signal story-phase verified\n  (this step's work is complete and committed: US-618E is now at verified)`,
+  `looper signal story-phase <building|implemented|reviewed> --reason "<defect>"\n  (attempted, but US-618E did not reach verified; name the defect so the next pass can fix it)`,
+  `looper signal blocked --reason "<what stopped you>"\n  (you could not proceed at all (environment, permissions, missing input))`,
+  `looper signal no-op --reason "<why>"\n  (there was legitimately nothing for this step to do)`,
   `Do not start new work. Run the command, then stop.`,
 ].join("\n");
 
@@ -53,23 +51,42 @@ describe("decideStepOutcome", () => {
     expect(decision).toEqual({ kind: "blocked", reason: "permission denied" });
   });
 
-  test("returns done from a no-op signal with note", () => {
+  test("returns noop from a no-op signal with note", () => {
     const signals: SignalRecord[] = [{ kind: "no-op", reason: "already done upstream", at: 1 }];
     const decision = decideStepOutcome(base({ signals }));
-    expect(decision).toEqual({ kind: "done", note: "already done upstream" });
+    expect(decision).toEqual({ kind: "noop", note: "already done upstream" });
   });
 
-  test("returns done from a demotion story-phase signal", () => {
+  test("returns handback from a demotion story-phase signal", () => {
     const signals: SignalRecord[] = [
       { kind: "story-phase", phase: "building", reason: "tests failed", at: 1 },
     ];
     const decision = decideStepOutcome(
       base({ phaseAtStart: "reviewed", phaseAfter: "building", signals }),
     );
-    expect(decision).toEqual({ kind: "done", note: "tests failed" });
+    expect(decision).toEqual({ kind: "handback", reason: "tests failed", phase: "building" });
   });
 
-  test("ignores a non-demotion story-phase signal and continues", () => {
+  // The regression this whole classifier exists for: a story already at the floor
+  // phase cannot be demoted, so a Build/Push style step (expects one rung above the
+  // entry phase) can only hand back by RE-ASSERTING the phase it started at.
+  test("returns handback from a same-phase story-phase signal at the floor", () => {
+    const signals: SignalRecord[] = [
+      { kind: "story-phase", phase: "building", reason: "suite still red", at: 1 },
+    ];
+    const decision = decideStepOutcome(
+      base({
+        expects: "implemented",
+        phaseAtStart: "building",
+        phaseAfter: "building",
+        signals,
+        reminderSent: true,
+      }),
+    );
+    expect(decision).toEqual({ kind: "handback", reason: "suite still red", phase: "building" });
+  });
+
+  test("returns handback for a partial advance below expects", () => {
     const signals: SignalRecord[] = [{ kind: "story-phase", phase: "reviewed", at: 1 }];
     const decision = decideStepOutcome(
       base({
@@ -80,13 +97,17 @@ describe("decideStepOutcome", () => {
         reminderSent: false,
       }),
     );
-    expect(decision).toEqual({ kind: "remind", prompt: EXACT_REMINDER });
+    expect(decision).toEqual({
+      kind: "handback",
+      reason: "handed back at reviewed without a stated reason",
+      phase: "reviewed",
+    });
   });
 
-  test("returns done from an adjudicate signal", () => {
+  test("returns noop from an adjudicate signal", () => {
     const signals: SignalRecord[] = [{ kind: "adjudicate", reason: "oscillation", at: 1 }];
     const decision = decideStepOutcome(base({ signals }));
-    expect(decision).toEqual({ kind: "done", note: "oscillation" });
+    expect(decision).toEqual({ kind: "noop", note: "oscillation" });
   });
 
   test("returns blocked from engineBlockReason without reminder", () => {
@@ -111,11 +132,13 @@ describe("decideStepOutcome", () => {
     expect(decision).toEqual({ kind: "remind", prompt: EXACT_REMINDER });
   });
 
-  test("returns failed after reminder already sent", () => {
+  // Silence is unreadable, not catastrophic: blocking skips the step and keeps the
+  // run alive so the attempt ledger -- not a single mute turn -- decides when to stop.
+  test("returns blocked after reminder already sent", () => {
     const decision = decideStepOutcome(base({ reminderSent: true }));
     expect(decision).toEqual({
-      kind: "failed",
-      reason: "step ended without an outcome signal",
+      kind: "blocked",
+      reason: "step ended without an outcome signal after a reminder",
     });
   });
 
@@ -131,7 +154,7 @@ describe("decideStepOutcome", () => {
       { kind: "no-op", reason: "storyless applies", at: 2 },
     ];
     const decision = decideStepOutcome(base({ signals, storyId: "US-618E" }));
-    expect(decision).toEqual({ kind: "done", note: "storyless applies" });
+    expect(decision).toEqual({ kind: "noop", note: "storyless applies" });
   });
 
   test("ignores other-story signals when no matching or storyless signal exists", () => {

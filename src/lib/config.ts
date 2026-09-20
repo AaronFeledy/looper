@@ -109,6 +109,7 @@ type RawConfig = {
   context?: unknown;
   prd?: unknown;
   prdFlipThreshold?: unknown;
+  stepAttemptMax?: unknown;
   storyIdPattern?: unknown;
   terminalPhase?: unknown;
   mainBranch?: unknown;
@@ -143,6 +144,8 @@ export type RuntimeConfig = {
   contextPolicy?: ContextPolicyOverride;
   prdDir?: string;
   prdFlipThreshold?: number;
+  /** Consecutive non-advancing attempts per (story, step) before escalation. `0` disables. */
+  stepAttemptMax?: number;
   storyIdPattern?: string;
   /** Phase at or past which a story is considered complete for termination/selection. Default: merged. */
   terminalPhase: StoryPhase;
@@ -639,6 +642,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     }
   }
   const prdFlipThreshold = optionalPositiveIntegerValue(rawConfig.prdFlipThreshold, "prdFlipThreshold");
+  const stepAttemptMax = optionalNonNegativeIntegerValue(rawConfig.stepAttemptMax, "stepAttemptMax");
   const storyIdPattern = optionalNonEmptyStringValue(rawConfig.storyIdPattern, "storyIdPattern");
   const terminalPhase =
     rawConfig.terminalPhase === undefined
@@ -657,6 +661,7 @@ export function loadRuntimeConfig(configDir: string, repoDir: string = process.c
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(prdFlipThreshold !== undefined ? { prdFlipThreshold } : {}),
+    ...(stepAttemptMax !== undefined ? { stepAttemptMax } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     terminalPhase,
     mainBranch,

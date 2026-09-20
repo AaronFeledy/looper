@@ -11,6 +11,8 @@ export type StepAttemptState = {
   suppressReason: string | undefined;
   allowTerminalSessionToContinue: boolean;
   failureRetryCount: number;
+  /** Timeout-watchdog restarts of this step; bounded by `timeoutRestartMax()`. */
+  timeoutRestartCount: number;
   reattachCount: number;
   backgroundResumeCount: number;
   orphanNudgeCount: number;
@@ -46,6 +48,7 @@ export function createStepAttemptState(): StepAttemptState {
     suppressReason: undefined,
     allowTerminalSessionToContinue: false,
     failureRetryCount: 0,
+    timeoutRestartCount: 0,
     reattachCount: 0,
     backgroundResumeCount: 0,
     orphanNudgeCount: 0,

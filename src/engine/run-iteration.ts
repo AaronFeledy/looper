@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 
 import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 
-import { DEFAULT_STEP_TIMEOUT_MS, failureRetryJitterRatio, failureRetryMinRemainingMs, gateScriptTimeoutMs, inheritedRenameDelayMs, stopSessionConfirmTimeoutMs } from "../config/tunables.ts";
+import { DEFAULT_STEP_TIMEOUT_MS, failureRetryJitterRatio, failureRetryMinRemainingMs, gateScriptTimeoutMs, inheritedRenameDelayMs, stepAttemptMax, stopSessionConfirmTimeoutMs, timeoutRestartMax } from "../config/tunables.ts";
 import { loadSteps, resolveContextPolicy, type ContextPolicy, type LoadedStep, type PermissionPolicy, type QuestionPolicy, type RecoverySnapshotsConfig, type TitleGenConfig } from "../lib/config.ts";
 import { countPrd, derivePrdPaths, prdIndexPath, readPrdStories } from "../lib/prd.ts";
-import { appendBlockedStepToProgress, appendGateSkipToProgress, resolveProgressFilePath } from "../lib/prd-progress.ts";
+import { appendBlockedStepToProgress, appendGateSkipToProgress, appendHandbackStepToProgress, resolveProgressFilePath } from "../lib/prd-progress.ts";
 import { cleanRestartPrompt, failureRetryPrompt, recoveryNudgePrompt, backgroundContinuationPrompt, orphanedBackgroundNudgePrompt, textEndsWithNewline } from "../core/prompt-builders.ts";
 import { decideResume, type ResumeWorkState } from "../core/resume-policy.ts";
 import { applyFailureRetryJitter, MAX_REATTACH_PER_STEP, nextActionForBackgroundResume, nextActionForOrphanedBackgroundNudge } from "../core/retry-policy.ts";
@@ -41,6 +41,8 @@ import { currentGitBranch, DEFAULT_STORY_ID_PATTERN, storyIdFromBranch } from ".
 import { comparePhase, type StoryPhase } from "../lib/story-state-files.ts";
 import { readSignalsSince, type SignalLogRecord } from "../lib/signal-log.ts";
 import { createStoryStateStore } from "../persistence/story-state-store.ts";
+import { createStepAttemptStore, type StepAttemptStore } from "../persistence/step-attempt-store.ts";
+import type { StepAttemptKind } from "../lib/step-attempt-files.ts";
 import { loopStateRunStepContext } from "../lib/loop-state-reporter.ts";
 import {
   decideRouting,
@@ -196,6 +198,10 @@ export type RunIterationOptions = {
   prdDir?: string;
   storyIdPattern?: string;
   storyState?: StoryStatePort;
+  /** Consecutive non-advancing attempts per (story, step). Defaults to the configDir-backed store. */
+  stepAttempts?: StepAttemptStore;
+  /** `stepAttemptMax` from looper.yaml; env `LOOPER_STEP_ATTEMPT_MAX` overrides. `0` disables escalation. */
+  stepAttemptMax?: number;
   storyResolver?: StoryPhaseResolver;
   adjudication?: AdjudicationRuntime;
   /**
@@ -242,6 +248,18 @@ async function sleepInterruptible(control: RunControlView, totalMs: number): Pro
   }
 }
 
+/**
+ * Stop reason when a step is out of budget for good. Names the timeout as the
+ * cause instead of reporting "retry budget exhausted", which reads as a retry
+ * loop that in the timeout case never ran at all.
+ */
+export function stepBudgetStopReason(stepName: string, errReason: string, timeoutRestarts: number): string {
+  if (timeoutRestarts > 0) {
+    return `${stepName} timed out ${timeoutRestarts + 1} times (${timeoutRestarts} watchdog restart${timeoutRestarts === 1 ? "" : "s"}); last error: ${errReason}`;
+  }
+  return `${stepName} failed after retry budget exhausted: ${errReason}`;
+}
+
 export class StepFailureError extends Error {
   readonly stepName?: string;
   readonly sessionID?: string;
@@ -277,6 +295,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     prdDir,
     storyIdPattern,
     storyState: providedStoryState,
+    stepAttempts: providedStepAttempts,
+    stepAttemptMax: stepAttemptMaxConfig,
     storyResolver,
     adjudication,
     maxIterations,
@@ -309,6 +329,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
   let pendingAdjudicateStep: LoadedStep | undefined;
   let initialRoutingChecked = false;
   const storyState = providedStoryState ?? createStoryStateStore({ configDir });
+  const stepAttempts = providedStepAttempts ?? createStepAttemptStore({ configDir });
 
   /**
    * Confirm a server session is actually stopped before we create a fresh one
@@ -734,6 +755,8 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
     let outcomeReminderSent = false;
     let outcomeReminderPending = false;
     let blockedReason: string | undefined;
+    let handbackReason: string | undefined;
+    let handbackPhase: StoryPhase | undefined;
     let completedStoryId = storyId;
     let completedStorySnapshot = storySnapshot;
     let expectsPhaseSatisfied = step.expects === undefined;
@@ -1351,12 +1374,19 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           result = { status: "skipped", ...(result.sessionID !== undefined ? { sessionID: result.sessionID } : {}) };
           failStepRow(state, currentStepIndex, "skipped", { statusMessage: `blocked: ${blockedReason}` });
           logStepLine(currentStepIndex, `[looper] ${step.name} blocked: ${blockedReason}`);
-        } else if (outcome.kind === "failed") {
-          result = { status: "failed", ...(result.sessionID !== undefined ? { sessionID: result.sessionID } : {}), errorMessage: outcome.reason };
-          attempt.suppressFailureRetry = true;
-          attempt.suppressReason = outcome.reason;
-          attempt.lastErrorMessage = outcome.reason;
-          failStepRow(state, currentStepIndex, "failed");
+        } else if (outcome.kind === "handback") {
+          // The step ran and reported honestly; the story simply did not advance.
+          // Flow-wise that is a COMPLETED step -- the pointer advances and later
+          // gates keep the story out until it is re-worked -- so this is not a
+          // failure. The attempt ledger below is what stops it repeating forever.
+          handbackReason = outcome.reason;
+          handbackPhase = outcome.phase;
+          const handbackRow = state.steps[currentStepIndex];
+          if (handbackRow !== undefined) handbackRow.statusMessage = `handed back at ${outcome.phase}`;
+          logStepLine(
+            currentStepIndex,
+            `[looper] ${step.name} handed ${completedStoryId ?? "the story"} back at ${outcome.phase}: ${handbackReason}`,
+          );
         } else if (outcome.note !== undefined) {
           logStepLine(currentStepIndex, `[looper] ${step.name} outcome: ${outcome.note}`);
         }
@@ -1372,6 +1402,54 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       if (result.status === "failed") {
         const errReason = attempt.lastErrorMessage ?? "unknown error (no message reported)";
         const stopRequested = control.quitting || stopFileExists();
+
+        // The step timeout is a WATCHDOG, not a total budget: a step that hung
+        // or spun its wheels for its whole budget is stopped and restarted with
+        // a FULL fresh one, exactly like the background-wait timeout path above
+        // (which already does `stepStartTime = Date.now()`).
+        //
+        // Without this, a deadline abort fell through to the failure-retry
+        // policy, which can NEVER retry it: the deadline only fires once the
+        // budget is spent, so `remainingBudget()` is 0 by construction and
+        // `nextActionForFailure` always answered "retry budget exhausted" and
+        // halted the entire run. Observed as `Babysit failed after retry budget
+        // exhausted: SDK request interrupted` -- a report of a retry loop that
+        // structurally could not run even once.
+        //
+        // Capped, unlike the background-wait path, because the stall detector
+        // only observes at ITERATION boundaries: a step that restarts forever
+        // never finishes its iteration, so nothing else would ever catch it.
+        const timeoutRestartsAllowed = timeoutRestartMax();
+        if (
+          !stopRequested &&
+          timeoutRestartsAllowed > 0 &&
+          attempt.timeoutRestartCount < timeoutRestartsAllowed &&
+          remainingBudget() <= failureRetryMinRemainingMs()
+        ) {
+          const timedOutStepIndex = currentStepIndex;
+          const timedOutSessionID = state.steps[timedOutStepIndex]?.sessionID;
+          if (timedOutSessionID !== undefined && !(await stopStepSession(timedOutSessionID, timedOutStepIndex))) {
+            result = failAfterUnconfirmedStop(timedOutSessionID, timedOutStepIndex, "starting a timeout restart session");
+            break;
+          }
+          attempt.timeoutRestartCount += 1;
+          const restartTag = `${attempt.timeoutRestartCount}/${timeoutRestartsAllowed}`;
+          const timeoutLine = `[looper] ${step.name} timed out after ${Math.round(budgetMs / 60000)}m (${errReason}) \u2014 restarting with a full budget (restart ${restartTag})`;
+          pushAgentLine(state, timeoutLine);
+          pushStepOutputLine(state, timedOutStepIndex, timeoutLine);
+          currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
+          stepIndexForTitle = currentStepIndex;
+          // The fresh budget. This is what makes the timeout a watchdog.
+          stepStartTime = Date.now();
+          attempt.resumeSessionID = undefined;
+          attempt.resumePrompt = cleanRestartPrompt(promptText(step), "timeout");
+          attempt.lastErrorMessage = undefined;
+          attempt.failureRetryCount = 0;
+          resetStepRowToPending(state, currentStepIndex);
+          notify();
+          continue;
+        }
+
         let remainingBudgetMs = remainingBudget();
         let failureDecision = decideAfterFailurePolicy(attempt, { stopRequested, remainingBudgetMs });
 
@@ -1382,7 +1460,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           pushAgentLine(state, line);
           pushStepOutputLine(state, currentStepIndex, line);
           if (skipReason === "retry budget exhausted") {
-            writeStop?.(`${step.name} failed after retry budget exhausted: ${errReason}`);
+            writeStop?.(stepBudgetStopReason(step.name, errReason, attempt.timeoutRestartCount));
           }
           notify();
           break;
@@ -1496,7 +1574,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           pushAgentLine(state, line);
           pushStepOutputLine(state, currentStepIndex, line);
           if (skipReason === "retry budget exhausted") {
-            writeStop?.(`${step.name} failed after retry budget exhausted: ${errReason}`);
+            writeStop?.(stepBudgetStopReason(step.name, errReason, attempt.timeoutRestartCount));
           }
           notify();
           break;
@@ -1559,6 +1637,45 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         source: "signal",
       });
     }
+    // Attempt ledger: consecutive NON-ADVANCING outcomes per (story, step).
+    //
+    // Both safety nets that predate this -- oscillation detection and the stall
+    // detector -- key on state CHANGING: `diffPhases` drops same-phase writes, and
+    // the stall detector resets on any material commit. A step that honestly
+    // reports "attempted, did not get there" every iteration while still editing
+    // files is therefore invisible to both, and would loop until max_iterations.
+    // This ledger is the missing counter: it measures attempts, not motion.
+    if (!adjudicating && step.expects !== undefined && completedStoryId !== undefined) {
+      const nonAdvance: { readonly kind: StepAttemptKind; readonly reason: string } | undefined =
+        blockedReason !== undefined
+          ? { kind: "blocked", reason: blockedReason }
+          : handbackReason !== undefined
+            ? { kind: "handback", reason: handbackReason }
+            : undefined;
+      if (nonAdvance === undefined) {
+        // Only a genuine advance clears the streak; a skipped/failed step leaves it.
+        if (result.status === "done" && expectsPhaseSatisfied) {
+          stepAttempts.clearStep(completedStoryId, step.name);
+        }
+      } else {
+        const attempts = stepAttempts.recordNonAdvance({
+          storyId: completedStoryId,
+          stepName: step.name,
+          kind: nonAdvance.kind,
+          reason: nonAdvance.reason,
+        });
+        const maxAttempts = stepAttemptMax(stepAttemptMaxConfig);
+        if (maxAttempts > 0 && attempts >= maxAttempts && adjudication !== undefined && !adjudication.store.markerExists()) {
+          // Reuse the adjudication route wholesale: with an `adjudicate:` step
+          // configured this runs the adjudicator, and without one `decideRouting`
+          // already turns a marker into a stop with this reason.
+          const escalation = `${step.name} did not advance ${completedStoryId} to ${step.expects} in ${attempts} consecutive attempts; last ${nonAdvance.kind}: ${nonAdvance.reason}`;
+          adjudication.store.writeMarker(escalation);
+          logStepLine(currentStepIndex, `[looper] ${escalation} — escalating`);
+        }
+      }
+    }
+
     try {
       // setsPhase is monotonic only; demotions come from signals / engine reset.
       if (result.status === "done" && step.setsPhase !== undefined && completedStoryId === undefined && storyId !== undefined) {
@@ -1595,6 +1712,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         reason: blockedReason,
       });
       if (!appended.appended) logStepLine(currentStepIndex, `[looper] failed to append blocked step to progress: ${appended.error}`);
+    }
+    if (handbackReason !== undefined && handbackPhase !== undefined && prdPaths !== undefined) {
+      const appended = appendHandbackStepToProgress({
+        progressPath: resolveProgressFilePath(prdPaths.progress, repoDir),
+        stepName: step.name,
+        phase: handbackPhase,
+        reason: handbackReason,
+      });
+      if (!appended.appended) logStepLine(currentStepIndex, `[looper] failed to append hand-back to progress: ${appended.error}`);
     }
 
     const routing = adjudicating ? { kind: "continue" as const } : decideRouting(adjudication);
@@ -1708,7 +1834,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       nextIndex: routed ? steps.length : index + 1,
       rowIndex: currentStepIndex,
       recordPriorStep: true,
-      ...(blockedReason !== undefined ? { priorStatus: `blocked (${blockedReason})` } : {}),
+      ...(blockedReason !== undefined
+        ? { priorStatus: `blocked (${blockedReason})` }
+        : handbackReason !== undefined
+          ? { priorStatus: `handed back at ${handbackPhase} (${handbackReason})` }
+          : {}),
     });
     } finally {
       titleActive = false;

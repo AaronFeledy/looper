@@ -18,7 +18,7 @@ export type OutcomeSignalRecord = SignalRecord;
 
 export type DecideStepOutcomeInput = {
   readonly expects: StoryPhase;
-  /** Effective/stored phase recorded at step start (for demotion detection). */
+  /** Effective/stored phase recorded at step start (for hand-back wording). */
   readonly phaseAtStart: StoryPhase;
   /** Effective phase after the step attempt. */
   readonly phaseAfter: StoryPhase;
@@ -35,13 +35,20 @@ export type DecideStepOutcomeInput = {
   readonly stepName: string;
 };
 
+/**
+ * A step's disposition, decided from what the agent SAID (its signals), never
+ * from how far the phase map moved. `done` is the only advancing outcome;
+ * `handback` and `blocked` are explicit non-advancing outcomes that the attempt
+ * ledger counts; `noop` means there was legitimately nothing to do.
+ */
 export type StepOutcomeDecision =
   | { readonly kind: "done"; readonly note?: string }
+  | { readonly kind: "handback"; readonly reason: string; readonly phase: StoryPhase }
+  | { readonly kind: "noop"; readonly note?: string }
   | { readonly kind: "blocked"; readonly reason: string }
-  | { readonly kind: "remind"; readonly prompt: string }
-  | { readonly kind: "failed"; readonly reason: string };
+  | { readonly kind: "remind"; readonly prompt: string };
 
-/** Phases strictly below `expects` (for demotion / hand-back wording). */
+/** Phases strictly below `expects` (the legal hand-back targets). */
 export function lowerPhases(expects: StoryPhase): readonly StoryPhase[] {
   const idx = STORY_PHASE_ORDER.indexOf(expects);
   if (idx <= 0) return [];
@@ -69,16 +76,78 @@ export function filterSignalsForStory(
   });
 }
 
+export type OutcomeCommand = {
+  readonly command: string;
+  readonly when: string;
+};
+
+/**
+ * The exact, complete set of outcome commands that are legal for this step.
+ *
+ * This is the ONE source of truth: it feeds both the `<looper-context>` block the
+ * agent reads up front and the reminder prompt it gets when its turn ends silently.
+ * Step prompts must NOT restate it -- a hand-maintained copy drifts, and a prompt
+ * that advertises an illegal move (e.g. "hand back to a lower phase" for a story
+ * already at `building`) sets the agent up to comply and then be failed for it.
+ */
+export function legalOutcomeCommands(input: {
+  readonly expects: StoryPhase;
+  readonly storyId?: string;
+}): readonly OutcomeCommand[] {
+  const story = input.storyId ?? "this story";
+  const handbackTargets = lowerPhases(input.expects);
+  const handbackArg =
+    handbackTargets.length === 0
+      ? undefined
+      : handbackTargets.length === 1
+        ? handbackTargets[0]
+        : `<${handbackTargets.join("|")}>`;
+  return [
+    {
+      command: `looper signal story-phase ${input.expects}`,
+      when: `this step's work is complete and committed: ${story} is now at ${input.expects}`,
+    },
+    ...(handbackArg === undefined
+      ? []
+      : [
+          {
+            command: `looper signal story-phase ${handbackArg} --reason "<defect>"`,
+            when: `attempted, but ${story} did not reach ${input.expects}; name the defect so the next pass can fix it`,
+          },
+        ]),
+    {
+      command: `looper signal blocked --reason "<what stopped you>"`,
+      when: "you could not proceed at all (environment, permissions, missing input)",
+    },
+    {
+      command: `looper signal no-op --reason "<why>"`,
+      when: "there was legitimately nothing for this step to do",
+    },
+  ];
+}
+
 /**
  * Pure post-attempt outcome decision for steps with `expects: <StoryPhase>`.
  * Call after the attempt loop yields `done`, before `setsPhase`.
  *
+ * Classification is by SIGNAL CONTENT, not by phase delta. A story-phase signal
+ * below `expects` is the agent explicitly saying "I did not get there", which is a
+ * real outcome even when it re-asserts the phase the story already had -- the
+ * common case for a step whose `expects` sits one rung above the entry phase
+ * (Build at `building`, Push at `verified`), where no demotion is even expressible.
+ * Deriving the outcome from a phase delta instead is the same lossy inversion that
+ * `story-phases.ts` documents and deletes for git refs: state is a projection of
+ * what happened, so reading intent back out of it loses exactly the cases that
+ * matter.
+ *
  * Rules (in order):
- * 1. phaseAfter ≥ expects → done
- * 2. matching signal: blocked → blocked; no-op → done; demotion story-phase → done; adjudicate → done
- * 3. engineBlockReason or remainingBudgetMs < reminderMinMs → blocked (no reminder)
- * 4. !reminderSent → remind with exact prompt
- * 5. otherwise → failed
+ * 1. phaseAfter >= expects -> done
+ * 2. matching signal: blocked -> blocked; no-op/adjudicate -> noop;
+ *    story-phase below expects -> handback
+ * 3. engineBlockReason or remainingBudgetMs < reminderMinMs -> blocked (no reminder)
+ * 4. !reminderSent -> remind with the exact legal command list
+ * 5. otherwise -> blocked (silence is unreadable, not fatal: the attempt ledger
+ *    escalates a step that keeps failing, so one mute turn must not kill the run)
  */
 export function decideStepOutcome(input: DecideStepOutcomeInput): StepOutcomeDecision {
   if (comparePhase(input.phaseAfter, input.expects) >= 0) {
@@ -91,15 +160,23 @@ export function decideStepOutcome(input: DecideStepOutcomeInput): StepOutcomeDec
       case "blocked":
         return { kind: "blocked", reason: signal.reason ?? "blocked" };
       case "no-op":
-        return { kind: "done", note: signal.reason };
+        return { kind: "noop", ...(signal.reason !== undefined ? { note: signal.reason } : {}) };
       case "story-phase": {
-        if (signal.phase !== undefined && comparePhase(signal.phase, input.phaseAtStart) < 0) {
-          return { kind: "done", note: signal.reason };
+        // Any asserted phase below `expects` is an explicit hand-back, including one
+        // equal to the phase the story started at. A claim at or above `expects` is
+        // already handled by rule 1 via phaseAfter.
+        if (signal.phase !== undefined && comparePhase(signal.phase, input.expects) < 0) {
+          return {
+            kind: "handback",
+            reason: signal.reason ?? `handed back at ${signal.phase} without a stated reason`,
+            phase: signal.phase,
+          };
         }
         break;
       }
       case "adjudicate":
-        return { kind: "done", note: signal.reason };
+        // Adjudication is itself the escalation; never counted as a failed attempt.
+        return { kind: "noop", ...(signal.reason !== undefined ? { note: signal.reason } : {}) };
       default: {
         const _exhaustive: never = signal.kind;
         return _exhaustive;
@@ -120,39 +197,36 @@ export function decideStepOutcome(input: DecideStepOutcomeInput): StepOutcomeDec
   }
 
   if (!input.reminderSent) {
-    const storyId = input.storyId ?? "the current story";
     return {
       kind: "remind",
       prompt: stepOutcomeReminderPrompt({
         stepName: input.stepName,
         expects: input.expects,
-        storyId,
+        ...(input.storyId !== undefined ? { storyId: input.storyId } : {}),
       }),
     };
   }
 
   return {
-    kind: "failed",
-    reason: "step ended without an outcome signal",
+    kind: "blocked",
+    reason: "step ended without an outcome signal after a reminder",
   };
 }
 
 export function stepOutcomeReminderPrompt(input: {
   readonly stepName: string;
   readonly expects: StoryPhase;
-  readonly storyId: string;
+  readonly storyId?: string;
 }): string {
-  const expects = input.expects;
-  const storyId = input.storyId;
+  const story = input.storyId ?? "the current story";
+  const commands = legalOutcomeCommands({
+    expects: input.expects,
+    ...(input.storyId !== undefined ? { storyId: input.storyId } : {}),
+  });
   return [
-    `Your turn ended without running a looper signal for ${storyId}.`,
-    `Use your bash/shell tool to run exactly one of these commands now. Do not write the command as assistant text; the engine only records a signal if the process actually runs.`,
-    `looper signal story-phase ${expects}`,
-    `(only if this step's checklist fully passed and any fixes are committed)`,
-    `looper signal story-phase <lower phase> --reason "<defect>"`,
-    `(hand the story back)`,
-    `looper signal blocked --reason "<what stopped you>"`,
-    `looper signal no-op --reason "<why there was nothing to do>"`,
+    `Your turn ended without running a looper signal for ${story}.`,
+    `Run exactly one of these with your bash/shell tool now. Do not write the command as assistant text; the engine only records a signal if the process actually runs.`,
+    ...commands.map(({ command, when }) => `${command}\n  (${when})`),
     `Do not start new work. Run the command, then stop.`,
   ].join("\n");
 }

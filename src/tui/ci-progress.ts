@@ -6,7 +6,7 @@ export function ciIsRunning(status: GithubStatus): boolean {
 }
 
 export function ciCounts(pr: GithubPr): string {
-  return `◷${pr.ciPending} ✓${pr.ciPassing} ✗${pr.ciFailing}${pr.ciNeutral ? ` ~${pr.ciNeutral}` : ""}`;
+  return `◷ ${pr.ciPending} ✓ ${pr.ciPassing} ✗ ${pr.ciFailing}${pr.ciNeutral ? ` ~ ${pr.ciNeutral}` : ""}`;
 }
 
 /** Slow dim-to-bright border pulse; reduced motion keeps the warm highlight. */

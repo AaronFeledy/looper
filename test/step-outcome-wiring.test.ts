@@ -10,6 +10,7 @@ import { appendSignal } from "../src/lib/signal-log.ts";
 import { createLoopState } from "../src/lib/state.ts";
 import { initStatePaths } from "../src/lib/state-files.ts";
 import { createAdjudicationStore } from "../src/persistence/adjudication-store.ts";
+import { createStepAttemptStore } from "../src/persistence/step-attempt-store.ts";
 import { createStoryStateStore } from "../src/persistence/story-state-store.ts";
 
 type Scratch = { readonly repoDir: string; readonly configDir: string; readonly prdDir: string };
@@ -149,17 +150,88 @@ describe("runIteration outcome wiring", () => {
     expect(state.steps[0]?.statusMessage).toBe("blocked: CI unavailable");
   }, 30_000);
 
-  test("fails without retry when the reminder also emits no outcome", async () => {
+  test("blocks without killing the run when the reminder also emits no outcome", async () => {
     // Given an expecting step that never signals an outcome.
     const scratch = setup();
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Verify"] });
+    const completions: string[] = [];
     const stub = clientFor(scratch.repoDir, () => {});
 
     // When both the original turn and its one reminder complete unsignaled.
-    const error = await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Verify"] }), iteration: 1, client: stub.client, ...scratch }).then<unknown>(() => undefined, (caught) => caught);
+    const error = await runIteration({ state, iteration: 1, client: stub.client, ...scratch, hooks: { onStepFinish: ({ completionKind }) => completions.push(completionKind) } }).then<unknown>(() => undefined, (caught) => caught);
 
-    // Then the step fails closed after exactly two turns.
-    expect(error).toBeInstanceOf(StepFailureError);
+    // Then the step blocks after exactly two turns and the run survives: silence is
+    // unreadable, not fatal, and the attempt ledger owns escalation from here.
+    expect(error).toBeUndefined();
     expect(stub.prompts).toHaveLength(2);
+    expect(completions).toEqual(["blocked"]);
+    expect(state.steps[0]?.statusMessage).toBe("blocked: step ended without an outcome signal after a reminder");
+  }, 30_000);
+
+  test("accepts a same-phase hand-back from a story already at the floor phase", async () => {
+    // Given a Build-shaped step: `expects` one rung above the story's entry phase,
+    // so the only hand-back it can express re-asserts the phase it started at.
+    const scratch = setup("implemented");
+    const state = createLoopState({ maxIterations: 1, stepNames: ["Verify"] });
+    const completions: string[] = [];
+    const stub = clientFor(scratch.repoDir, () =>
+      appendSignal(scratch.configDir, { kind: "story-phase", storyId: "US-1", phase: "building", reason: "suite still red" }),
+    );
+
+    // When the step hands the story back at `building`.
+    await runIteration({ state, iteration: 1, client: stub.client, ...scratch, hooks: { onStepFinish: ({ completionKind }) => completions.push(completionKind) } });
+
+    // Then it is a completed step with no reminder and no failure.
+    expect(stub.prompts).toHaveLength(1);
+    expect(completions).toEqual(["done"]);
+    expect(state.steps[0]?.statusMessage).toBe("handed back at building");
+  }, 30_000);
+
+  test("escalates to adjudication once a step exhausts its attempt budget", async () => {
+    // Given a story whose step has already handed back up to the configured limit.
+    const scratch = setup("implemented");
+    const attempts = createStepAttemptStore({ configDir: scratch.configDir });
+    attempts.recordNonAdvance({ storyId: "US-1", stepName: "Verify", kind: "handback", reason: "first" });
+    attempts.recordNonAdvance({ storyId: "US-1", stepName: "Verify", kind: "handback", reason: "second" });
+    const adjudication = createAdjudicationStore({ configDir: scratch.configDir });
+    const stops: string[] = [];
+    const stub = clientFor(scratch.repoDir, () =>
+      appendSignal(scratch.configDir, { kind: "story-phase", storyId: "US-1", phase: "building", reason: "still red" }),
+    );
+
+    // When the third consecutive hand-back lands.
+    await runIteration({
+      state: createLoopState({ maxIterations: 1, stepNames: ["Verify"] }),
+      iteration: 1,
+      client: stub.client,
+      ...scratch,
+      stepAttemptMax: 3,
+      adjudication: { store: adjudication, threshold: 2, writeStop: (reason) => stops.push(reason) },
+    });
+
+    // Then the run escalates through the existing adjudication route: with no
+    // `adjudicate:` step configured, decideRouting turns the marker into a stop.
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toContain("3 consecutive attempts");
+    expect(stops[0]).toContain("still red");
+  }, 30_000);
+
+  test("clears the attempt streak when the step finally advances the story", async () => {
+    // Given a step carrying a prior hand-back streak.
+    const scratch = setup("implemented");
+    const attempts = createStepAttemptStore({ configDir: scratch.configDir });
+    attempts.recordNonAdvance({ storyId: "US-1", stepName: "Verify", kind: "handback", reason: "first" });
+    const storyState = createStoryStateStore({ configDir: scratch.configDir });
+    const stub = clientFor(scratch.repoDir, () => {
+      storyState.writePhase("US-1", "implemented");
+      appendSignal(scratch.configDir, { kind: "story-phase", storyId: "US-1", phase: "implemented" });
+    });
+
+    // When the step reaches `expects`.
+    await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Verify"] }), iteration: 1, client: stub.client, ...scratch, storyState });
+
+    // Then the streak resets, so an unrelated later failure starts from zero.
+    expect(attempts.read("US-1", "Verify")).toBeUndefined();
   }, 30_000);
 
   test("turns a permission gate timeout into blocked without sending a reminder", async () => {
@@ -191,12 +263,12 @@ describe("runIteration outcome wiring", () => {
     // When the expecting step completes after HEAD advances without any outcome signal.
     const error = await runIteration({ state: createLoopState({ maxIterations: 1, stepNames: ["Verify"] }), iteration: 1, client: stub.client, ...scratch, storyState }).then<unknown>(() => undefined, (caught) => caught);
 
-    // Then the stale phase is reset below `expects` BEFORE the outcome decision,
-    // so it cannot satisfy it: the step is reminded once and then fails closed.
+    // Then the stale phase is reset below `expects` BEFORE the outcome decision, so
+    // it cannot satisfy it: the step is reminded once and then blocks (not fails).
     expect(storyState.readPhase("US-1")).toBe("implemented");
     expect(stub.prompts).toHaveLength(2);
     expect(stub.prompts[1]).toContain("ended without running a looper signal");
-    expect(error).toBeInstanceOf(StepFailureError);
+    expect(error).toBeUndefined();
   }, 30_000);
 
   test("records a commit-driven phase reset only as an engine transition", async () => {

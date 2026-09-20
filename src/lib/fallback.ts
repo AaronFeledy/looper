@@ -22,6 +22,7 @@ import { createAdjudicationStore, type AdjudicationStore } from "../persistence/
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
+import { createStepAttemptStore } from "../persistence/step-attempt-store.ts";
 import { clearPermissionAudit } from "../opencode/permission-audit.ts";
 import { createRunControl, type RunControl } from "../engine/run-control.ts";
 import { installProcessSignals } from "../tui/process-lifecycle.ts";
@@ -44,6 +45,7 @@ export type FallbackOptions = {
   useSessionIdle?: boolean;
   prdDir?: string;
   prdFlipThreshold?: number;
+  stepAttemptMax?: number;
   storyIdPattern?: string;
   mainBranch?: string;
   terminalPhase?: StoryPhase;
@@ -74,6 +76,7 @@ export async function runNonTty({
   useSessionIdle,
   prdDir,
   prdFlipThreshold: configuredPrdFlipThreshold,
+  stepAttemptMax,
   storyIdPattern,
   mainBranch,
   terminalPhase,
@@ -105,6 +108,7 @@ export async function runNonTty({
     if (options.resetStories) storyStateStore.clear();
     clearSignalLog(configDir);
     clearPermissionAudit(configDir);
+    createStepAttemptStore({ configDir }).clear();
   }
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
@@ -146,6 +150,7 @@ export async function runNonTty({
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(configuredPrdFlipThreshold !== undefined ? { configuredPrdFlipThreshold } : {}),
+    ...(stepAttemptMax !== undefined ? { stepAttemptMax } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
     ...(mainBranch !== undefined ? { mainBranch } : {}),
     ...(terminalPhase !== undefined ? { terminalPhase } : {}),
@@ -213,6 +218,7 @@ export async function runNonTtyIterations({
   useSessionIdle,
   prdDir,
   configuredPrdFlipThreshold,
+  stepAttemptMax,
   storyIdPattern,
   mainBranch,
   terminalPhase,
@@ -234,6 +240,7 @@ export async function runNonTtyIterations({
   useSessionIdle?: boolean;
   prdDir?: string;
   configuredPrdFlipThreshold?: number;
+  stepAttemptMax?: number;
   storyIdPattern?: string;
   mainBranch?: string;
   terminalPhase?: StoryPhase;
@@ -264,7 +271,6 @@ export async function runNonTtyIterations({
         ...(mainBranch !== undefined ? { mainBranch } : {}),
         ...(terminalPhase !== undefined ? { terminalPhase } : {}),
         ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
-        log: (line) => process.stdout.write(`${line}\n`),
       });
   try {
     const result = await runEngine<LoopState, typeof client>({
@@ -293,6 +299,7 @@ export async function runNonTtyIterations({
     ...(useSessionIdle !== undefined ? { useSessionIdle } : {}),
     ...(prdDir !== undefined ? { prdDir } : {}),
     ...(storyIdPattern !== undefined ? { storyIdPattern } : {}),
+    ...(stepAttemptMax !== undefined ? { stepAttemptMax } : {}),
     adjudication,
     stall: { iterations: stallIterationLimit(stall?.iterations), adjudications: stallAdjudicationLimit(stall?.adjudications) },
     ...(contextPolicy !== undefined ? { contextPolicy } : {}),

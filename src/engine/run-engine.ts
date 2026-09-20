@@ -56,6 +56,8 @@ export type RunEngineInput<S, Client> = RunEngineOptions & {
   readonly useSessionIdle?: boolean;
   readonly prdDir?: string;
   readonly storyIdPattern?: string;
+  /** looper.yaml `stepAttemptMax`; forwarded to runIteration's attempt ledger. */
+  readonly stepAttemptMax?: number;
   readonly storyState?: StoryStatePort;
   readonly storyResolver?: StoryPhaseResolver;
   readonly adjudication?: AdjudicationConfig;
@@ -322,6 +324,7 @@ export async function runEngine<S, Client>(input: RunEngineInput<S, Client>): Pr
         ...(input.useSessionIdle !== undefined ? { useSessionIdle: input.useSessionIdle } : {}),
         ...(input.prdDir !== undefined ? { prdDir: input.prdDir } : {}),
         ...(input.storyIdPattern !== undefined ? { storyIdPattern: input.storyIdPattern } : {}),
+        ...(input.stepAttemptMax !== undefined ? { stepAttemptMax: input.stepAttemptMax } : {}),
         ...(input.storyState !== undefined ? { storyState: input.storyState } : {}),
         ...(input.storyResolver !== undefined ? { storyResolver: input.storyResolver } : {}),
         ...(input.adjudication !== undefined
