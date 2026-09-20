@@ -264,6 +264,30 @@ describe("runIteration fail-path characterization", () => {
     expectExactLog(input.state, `[looper] Build failed: ${reason} — not retrying: retry suppressed (${reason})`);
   });
 
+  test("(a2) a spent budget cannot turn a fail-closed suppression into a timeout restart", async () => {
+    // Same fail-closed case as (a), but with the step budget already spent.
+    // The timeout watchdog runs BEFORE the failure-retry policy, so without an
+    // explicit suppression check it would grant a FULL fresh budget -- a
+    // stronger retry than the policy it just bypassed -- to the exact paths
+    // that decided this step must not be attempted again.
+    const input = setupScratch();
+    process.env.LOOPER_FAILURE_RETRY_MIN_REMAINING_MS = "5000";
+    process.env.LOOPER_TIMEOUT_RESTART_MAX = "3";
+    spyOn(budgets, "remainingStepBudgetMs").mockReturnValue(3_000);
+    const harness = makeHarness({ status: async () => ({ ses_old: { type: "busy" } }) });
+
+    // When the unconfirmed-stop path fails closed with no budget left.
+    const error = await captureFailure(execute(input, harness, { sessionID: "ses_old", stepName: "Other" }));
+
+    // Then the suppression still wins: no restart, no new session, same verdict.
+    const reason = "could not confirm session ses_old stopped; not restarting after resume to avoid overlapping opencode generations";
+    expect(error.message).toBe(`Build failed after 0 retries: ${reason}`);
+    expect(harness.calls.filter((call) => call.startsWith("create:"))).toEqual([]);
+    expect(input.state.agentLines.some((line) => line.includes("restarting with a full budget"))).toBe(false);
+    expect(input.state.steps.map((row) => row.status)).toEqual(["failed"]);
+    expectExactLog(input.state, `[looper] Build failed: ${reason} — not retrying: retry suppressed (${reason})`);
+  }, 15_000);
+
   test("manual restart refuses a new generation when the failed session cannot be stopped", async () => {
     // Given a terminal failure whose server-side generation is still busy.
     const input = setupScratch();

@@ -780,6 +780,7 @@ async function runTui(options: ReturnType<typeof parseArgs>): Promise<number> {
       ...(runtimeConfig.questionPolicy !== undefined ? { questionPolicy: runtimeConfig.questionPolicy } : {}),
       ...(runtimeConfig.contextPolicy !== undefined ? { contextPolicy: runtimeConfig.contextPolicy } : {}),
       ...(runtimeConfig.prdDir !== undefined ? { prdDir: runtimeConfig.prdDir } : {}),
+      ...(runtimeConfig.stepAttemptMax !== undefined ? { stepAttemptMax: runtimeConfig.stepAttemptMax } : {}),
       ...(runtimeConfig.storyIdPattern !== undefined ? { storyIdPattern: runtimeConfig.storyIdPattern } : {}),
       adjudication: createAdjudicationConfig({
         configDir,

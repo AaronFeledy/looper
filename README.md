@@ -568,6 +568,7 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_FAILURE_RETRY_MAX_DELAY_MS` &mdash; cap on that delay (default: `300000`)
 - `LOOPER_FAILURE_RETRY_MIN_REMAINING_MS` &mdash; stop retrying when remaining step timeout is at or below this (default: `5000`)
 - `LOOPER_FAILURE_RETRY_JITTER` &mdash; delay jitter ratio 0–1 (default: `0.2`; `0` disables)
+- `LOOPER_TIMEOUT_RESTART_MAX` &mdash; times one step may be restarted with a fresh budget by its own timeout watchdog before the run halts (default: `3`; `0` disables). Fail-closed paths that suppress retry are never restarted, whatever the budget.
 
 ## Experimental agent UI
 

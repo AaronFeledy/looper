@@ -1419,9 +1419,18 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         // Capped, unlike the background-wait path, because the stall detector
         // only observes at ITERATION boundaries: a step that restarts forever
         // never finishes its iteration, so nothing else would ever catch it.
+        //
+        // `suppressFailureRetry` still wins. A full-budget restart is a RETRY,
+        // and a stronger one than the failure-retry policy would ever grant, so
+        // it must not sneak past the fail-closed paths that set the flag
+        // (unconfirmed stop, abnormal background-wait outcome, orphan/reattach
+        // limits, a failed outcome reminder). Those all mean "do not start
+        // another attempt of this step"; without this check, any of them
+        // landing with a spent budget would restart the whole step instead.
         const timeoutRestartsAllowed = timeoutRestartMax();
         if (
           !stopRequested &&
+          !attempt.suppressFailureRetry &&
           timeoutRestartsAllowed > 0 &&
           attempt.timeoutRestartCount < timeoutRestartsAllowed &&
           remainingBudget() <= failureRetryMinRemainingMs()
