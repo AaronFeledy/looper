@@ -460,6 +460,47 @@ describe("buildLooperContext", () => {
   });
 });
 
+describe("engine-generated outcome commands", () => {
+  // The legal set is derived from `expects`, so it must come from the engine.
+  // A prompt-side copy drifts and can advertise a move the engine rejects --
+  // exactly how a floor-phase story ("hand back to a lower phase" with no lower
+  // phase to reach) used to be failed for complying with its own instructions.
+  test("names the real hand-back target for a story at the floor phase", () => {
+    const block = buildLooperContext(
+      ALL_ON,
+      baseInput({ story: { branch: "us-649-x", storyId: "US-649", phase: "building", expects: "implemented" } }),
+    );
+    expect(block).toContain("expects: implemented");
+    expect(block).toContain("looper signal story-phase implemented");
+    expect(block).toContain('looper signal story-phase building --reason "<defect>"');
+    expect(block).not.toContain("<lower>");
+  });
+
+  test("enumerates every legal hand-back phase when several exist", () => {
+    const block = buildLooperContext(
+      ALL_ON,
+      baseInput({ story: { branch: "us-1-x", storyId: "US-1", phase: "reviewed", expects: "verified" } }),
+    );
+    expect(block).toContain('looper signal story-phase <building|implemented|reviewed> --reason "<defect>"');
+  });
+
+  test("outcome commands name the selected story even on main", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({ story: {
+      branch: "main", next: { id: "US-649" }, expects: "implemented",
+    } }));
+    expect(block).toContain("looper signal story-phase implemented --story 'US-649'");
+  });
+
+  test("omits the outcome block entirely for a step without expects", () => {
+    const block = buildLooperContext(
+      ALL_ON,
+      baseInput({ story: { branch: "us-1-x", storyId: "US-1", phase: "reviewed" } }),
+    );
+    expect(block).not.toContain("outcome:");
+    expect(block).not.toContain("looper signal");
+  });
+});
+
 describe("withLooperContext", () => {
   test("returns the prompt unchanged when block is empty", () => {
     expect(withLooperContext("", "hello world")).toBe("hello world");

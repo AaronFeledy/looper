@@ -1,4 +1,4 @@
-import type { BackgroundAgent, LoopState, StepStatus } from "./state.ts";
+import type { BackgroundAgent, LoopState } from "./state.ts";
 import {
   completeGroupKey,
   createBackgroundAgent,
@@ -16,15 +16,6 @@ type ProjectedAgent = {
   readonly activity: "busy" | "idle";
   readonly startedAt: number;
 };
-
-const RETAINS_MISSING_AGENTS = {
-  pending: true,
-  running: true,
-  waiting: true,
-  done: false,
-  failed: false,
-  skipped: false,
-} as const satisfies Record<StepStatus, boolean>;
 
 function updateAgentMetadata(existing: BackgroundAgent, incoming: ProjectedAgent): boolean {
   let changed = false;
@@ -87,21 +78,21 @@ export function syncStepAgentTree(state: LoopState, stepIndex: number, agents: P
     merged.push(current);
   }
 
-  if (RETAINS_MISSING_AGENTS[step.status] || state.constellation) {
-    for (const current of step.backgroundAgents) {
-      if (incomingIDs.has(current.sessionID)) continue;
-      // Deleted/dropped sessions must not keep spinning: force idle + stamp
-      // finishedAt so the row collapses into Complete and duration freezes.
-      if (current.activity !== "idle") {
-        current.activity = "idle";
-        current.finishedAt ??= Date.now();
-        changed = true;
-      } else if (current.finishedAt === undefined) {
-        current.finishedAt = Date.now();
-        changed = true;
-      }
-      merged.push(current);
+  // Missing sessions stay in the tree as idle satellites (the completed step
+  // trail snapshots them), regardless of the step's status.
+  for (const current of step.backgroundAgents) {
+    if (incomingIDs.has(current.sessionID)) continue;
+    // Deleted/dropped sessions must not keep spinning: force idle + stamp
+    // finishedAt so the row collapses into Complete and duration freezes.
+    if (current.activity !== "idle") {
+      current.activity = "idle";
+      current.finishedAt ??= Date.now();
+      changed = true;
+    } else if (current.finishedAt === undefined) {
+      current.finishedAt = Date.now();
+      changed = true;
     }
+    merged.push(current);
   }
 
   if (!changed && merged.length === step.backgroundAgents.length) {

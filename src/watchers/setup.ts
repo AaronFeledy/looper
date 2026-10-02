@@ -43,10 +43,8 @@ export async function startGithubWatcher(opts: {
   readonly repoDir: string;
   readonly getBranch: () => string;
   readonly emit: (event: GithubWatcherEvent) => void;
-  readonly onEnabled: () => void;
 }): Promise<GithubWatcher | undefined> {
   if (!(await detectGithubRepo(opts.repoDir))) return undefined;
-  opts.onEnabled();
   return watchGithubPr({
     repoDir: opts.repoDir,
     getBranch: opts.getBranch,
@@ -72,11 +70,9 @@ export function startBranchDiffWatcher(opts: {
 export function startPrdWatcher(opts: {
   readonly prdDir: string | undefined;
   readonly emit: (event: PrdWatcherEvent) => void;
-  readonly onEnabled: () => void;
   readonly storyResolver?: StoryPhaseResolver;
 }): PrdWatcher | undefined {
   if (opts.prdDir === undefined) return undefined;
-  opts.onEnabled();
   const resolver = opts.storyResolver;
   return watchPrd({
     prdDir: opts.prdDir,

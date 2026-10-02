@@ -15,7 +15,7 @@ export function selectedInspectorTarget(state: LoopState): { step: LoopStep; ste
 }
 
 export function openAgentInspector(state: LoopState, tab: InspectorTab = "output"): void {
-  if (!state.constellation || state.historyView !== null) return;
+  if (state.historyView !== null) return;
   const target = selectedInspectorTarget(state);
   if (target) {
     state.selectedStepIndex = target.stepIndex;
@@ -31,20 +31,18 @@ export function openAgentInspector(state: LoopState, tab: InspectorTab = "output
 }
 
 export function closeAgentInspector(state: LoopState): void {
-  if (!state.constellation) return;
   state.constellation.detailsOpen = false;
   state.focusedPane = "steps";
   notify();
 }
 
 export function selectInspectorTab(state: LoopState, tab: InspectorTab): void {
-  if (!state.constellation) return;
   state.constellation.inspectorTab = tab;
   state.constellation.inspectorScroll = 0;
   notify();
 }
 
 export function cycleInspectorTab(state: LoopState, delta: number): void {
-  const current = INSPECTOR_TABS.indexOf(state.constellation?.inspectorTab ?? "output");
+  const current = INSPECTOR_TABS.indexOf(state.constellation.inspectorTab ?? "output");
   selectInspectorTab(state, INSPECTOR_TABS[(current + delta + INSPECTOR_TABS.length) % INSPECTOR_TABS.length]!);
 }

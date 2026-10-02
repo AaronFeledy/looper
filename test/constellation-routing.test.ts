@@ -3,12 +3,12 @@ import { createBackgroundAgent, createLoopState } from "../src/lib/state.ts";
 import { constellationAgents, layoutConstellation, type ConstellationScene } from "../src/presentation/tui/constellation.ts";
 import { routeConstellationLinks, type Point, type WireCache } from "../src/presentation/tui/constellation-routing.ts";
 
-function family(parents: number[]) {
+function family(parents: readonly number[], idle: readonly number[] = []) {
   const state = createLoopState({maxIterations: 1, stepNames: ["Cleanup"]});
   state.steps[0]!.status = "running";
   state.steps[0]!.sessionID = "ses_root";
   state.steps[0]!.backgroundAgents = parents.map((parent, i) => createBackgroundAgent(`ses_child${i}`, 0,
-    {agent: "Sisyphus-Junior", activity: "busy", parentSessionID: parent < 0 ? "ses_root" : `ses_child${parent}`}));
+    {agent: "Sisyphus-Junior", activity: idle.includes(i) ? "idle" : "busy", parentSessionID: parent < 0 ? "ses_root" : `ses_child${parent}`}));
   return constellationAgents(state);
 }
 const key = (p: Point) => `${p.x}:${p.y}`;
@@ -31,6 +31,9 @@ function assertClear(scene: ConstellationScene) {
         expect(point.y).toBeGreaterThanOrEqual(previous.y);
       }
     }
+    // Every link drops into its card from directly above.
+    const [beforeEnd, end] = route.points.slice(-2);
+    if (beforeEnd) expect(beforeEnd.x).toBe(end!.x);
   }
   return routes;
 }
@@ -86,4 +89,18 @@ test("cached wires update when activity or compact state changes without moving 
   expect(routeConstellationLinks(scene, cache)[0]!.active).toBe(false);
   scene.bubbles[1]!.compact = true;
   expect(routeConstellationLinks(scene, cache)).toHaveLength(0);
+});
+
+test("folded grandchildren make taller cards without breaking sibling taps", () => {
+  // Five siblings that each fold two finished sub agents (5-row cards).
+  const folded = [-1, -1, -1, -1, -1, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4];
+  // Two folded siblings plus one sibling with a working nested family.
+  const mixed = [-1, -1, -1, 0, 0, 1, 1, 2, 2, 2];
+  for (const [parents, idle] of [[folded, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]], [mixed, [3, 4, 5, 6]]] as const) {
+    for (const width of [80, 106, 139, 160, 240]) {
+      const scene = layoutConstellation(family(parents, idle), width);
+      expect(scene.bubbles.some(box => box.height === 5 && box.node.parentID)).toBe(true);
+      assertClear(scene);
+    }
+  }
 });

@@ -11,6 +11,7 @@ import {
 
 const OPENCODE_DIR = join(import.meta.dir, "../src/opencode");
 const ENGINE_DIR = join(import.meta.dir, "../src/engine");
+const MAIN_FILE = join(import.meta.dir, "../src/main.ts");
 
 /** Catches the LoopState identifier */
 const LOOP_STATE_RE = /\bLoopState\b/;
@@ -90,6 +91,28 @@ function collectControlFlagOffenses(): Offense[] {
   return offenses;
 }
 
+/** Every `runtimeConfig.<key>` reference in a chunk of source. */
+function runtimeConfigKeys(source: string): string[] {
+  return [...source.matchAll(/runtimeConfig\.(\w+)/g)].map((match) => match[1]!);
+}
+
+/** The brace-balanced object literal passed to `<marker>{ ... }`. */
+function callArgumentBlock(source: string, marker: string): string {
+  const start = source.indexOf(marker);
+  if (start === -1) throw new Error(`call site not found: ${marker}`);
+  const open = source.indexOf("{", start);
+  if (open === -1) throw new Error(`no object argument for: ${marker}`);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, i + 1);
+    }
+  }
+  throw new Error(`unbalanced object argument for: ${marker}`);
+}
+
 describe("architecture guards", () => {
   test("src/opencode must not import state.ts, reference LoopState, or import agent-tree-state.ts", () => {
     // A scan that silently found no files would pass vacuously.
@@ -102,6 +125,30 @@ describe("architecture guards", () => {
     expect(listSourceFiles(ENGINE_DIR)).toContain(join(ENGINE_DIR, "run-control.ts"));
     const offenses = collectControlFlagOffenses();
     expect(offenses.map((o) => o.message)).toEqual([]);
+  });
+
+  test("every runtimeConfig key the non-TTY path forwards is also consumed by the TTY path", () => {
+    // main.ts has two entry paths -- runNonTty and runEngine -- reading the same
+    // loadRuntimeConfig result. A new looper.yaml setting wired into only one of
+    // them is silently ignored in the other mode, with no type error: both call
+    // sites spread optional keys, so a missing one is indistinguishable from
+    // "not configured". Observed with `stepAttemptMax`, which reached the
+    // non-TTY runner but was dropped for every interactive run.
+    //
+    // The TTY side is checked as "referenced anywhere outside the runNonTty
+    // call", not "present in the runEngine literal", because several keys are
+    // legitimately consumed earlier in that path instead of forwarded
+    // (mainBranch/terminalPhase build the story resolver, validateResources
+    // gates a preflight).
+    const source = readFileSync(MAIN_FILE, "utf8");
+    const nonTtyBlock = callArgumentBlock(source, "await runNonTty(");
+    // A block that failed to parse would pass vacuously.
+    expect(nonTtyBlock).toContain("runtimeConfig.");
+    const outsideNonTty = source.replace(nonTtyBlock, "");
+    const dropped = [...new Set(runtimeConfigKeys(nonTtyBlock))]
+      .filter((key) => !runtimeConfigKeys(outsideNonTty).includes(key))
+      .sort();
+    expect(dropped).toEqual([]);
   });
 });
 

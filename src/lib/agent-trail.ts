@@ -118,14 +118,15 @@ export function startAgentTrailPersistence(configDir: string, getState: () => Lo
     })().finally(() => { recovery = undefined; });
     return recovery;
   };
-  const clear = () => {
+  const resetMemory = () => {
     recoveryController.abort(); recoveryController = new AbortController();
-    store.clear(); entries = []; dirty = false; writeError = undefined;
+    entries = []; dirty = false; writeError = undefined;
     const state = getState();
     if (state) { state.retainedSteps = []; state.history = []; state.historyView = null; }
   };
+  const clear = () => { store.clear(); resetMemory(); };
   // Hydrate before subscribing so restored metadata is available on the first paint.
   capture();
   const unsubscribe = subscribe(capture);
-  return { capture, clear, recoverTimes, stop() { recoveryController.abort(); unsubscribe(); capture(); } };
+  return { capture, clear, resetMemory, recoverTimes, stop() { recoveryController.abort(); unsubscribe(); capture(); } };
 }

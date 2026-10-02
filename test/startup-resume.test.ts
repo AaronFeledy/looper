@@ -7,7 +7,6 @@ import { bootResumeStatus } from "../src/presentation/tui/resume-status.ts";
 import { createTestRenderer } from "@opentui/core/testing";
 import { BoxRenderable } from "@opentui/core";
 import { createResumeBanner } from "../src/tui/resume-banner.ts";
-import { createStepList } from "../src/tui/step-list.ts";
 import { createConstellationView } from "../src/tui/constellation.ts";
 
 afterEach(cancelPendingNotify);
@@ -128,13 +127,13 @@ test("selecting or inspecting the checkpoint preserves every resume field; other
   expect(resumePlanForSelection(saved, 2)).toMatchObject({ firstIterationStartStepIndex: 2, resumed: true, firstIterationResume: undefined, firstIterationTitle: saved.firstIterationTitle });
 });
 
-for (const constellation of [false, true]) test(`${constellation ? "Constellation" : "classic"} UI shows the live saved step without a manual reattachment interface`, async () => {
+test("the UI shows the live saved step without a manual reattachment interface", async () => {
   const { state } = await inspect();
-  if (constellation) state.constellation = { reducedMotion: true, detailsOpen: false };
+  state.constellation.reducedMotion = true;
   const setup = await createTestRenderer({ width: 140, height: 34 });
   const root = new BoxRenderable(setup.renderer, { width: "100%", height: "100%", flexDirection: "column" });
   root.add(createResumeBanner(setup.renderer, state));
-  root.add(constellation ? createConstellationView(setup.renderer, state) : createStepList(setup.renderer, state));
+  root.add(createConstellationView(setup.renderer, state));
   setup.renderer.root.add(root);
   try {
     await setup.flush();
@@ -143,7 +142,7 @@ for (const constellation of [false, true]) test(`${constellation ? "Constellatio
     expect(frame).not.toContain("reattach");
     expect(frame).not.toContain("press g");
     expect(frame).toContain("review");
-    if (constellation) expect(frame).toContain("WORKING NOW");
+    expect(frame).toContain("WORKING NOW");
   } finally { setup.renderer.destroy(); }
 });
 

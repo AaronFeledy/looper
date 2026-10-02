@@ -68,7 +68,7 @@ describe("flattenRows", () => {
 });
 
 describe("syncStepBackgroundAgents", () => {
-  test("preserves existing buffers and clears selection for removed agents", () => {
+  test("preserves existing buffers and retires agents missing from an empty snapshot", () => {
     const s = state(["build"]);
     syncStepBackgroundAgents(s, 0, [{ sessionID: "ses_a", startedAt: 1 }]);
     pushBackgroundAgentLines(s, 0, "ses_a", ["line one", "line two"]);
@@ -81,8 +81,9 @@ describe("syncStepBackgroundAgents", () => {
     expect(s.steps[0]?.backgroundAgents[0]?.agent).toBe("explore");
 
     syncStepBackgroundAgents(s, 0, []);
-    expect(s.steps[0]?.backgroundAgents).toEqual([]);
-    expect(s.selectedBackgroundSessionID).toBeNull();
+    expect(s.steps[0]?.backgroundAgents).toMatchObject([{ sessionID: "ses_a", activity: "idle", outputLines: ["line one", "line two"] }]);
+    expect(s.steps[0]?.backgroundAgents[0]?.finishedAt).toBeDefined();
+    expect(s.selectedBackgroundSessionID).toBe("ses_a");
   });
 
   test("replaces stale rows with the current registry snapshot", () => {

@@ -10,7 +10,7 @@ export function stepActivitySummary(step: LoopStep, request?: PendingRequest, co
   if (request) return requestSummary(request);
   if (step.statusMessage) return compactActivity(step.statusMessage);
   switch (step.status) {
-    case "waiting": return "Waiting for delegated work";
+    case "waiting": return step.continuation ? `Waiting: ${compactActivity(step.continuation.reason)}` : "Waiting for delegated work";
     case "pending": return "Awaiting turn";
     case "done": return "Work complete";
     case "skipped": return "Skipped";

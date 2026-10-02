@@ -120,3 +120,32 @@ test("native dock pulses changes on a quiet stage and clearing the diff dims imm
     expect(color()).toEqual(dim);
   } finally { setup.renderer.destroy(); }
 });
+
+test("PR capsule names merge conflicts and Bugbot state; Stories capsule shows the iteration gain", () => {
+  const state = fixture();
+  state.github = {kind: "pr", pr: {
+    number: 7, title: "Example", url: "https://example.com/pr/7", state: "OPEN", isDraft: false,
+    mergeable: "conflicting", ciOverall: "passing", ciPending: 0, ciPassing: 3, ciFailing: 0, ciNeutral: 0, ciTotal: 3,
+    bugbot: {state: "issues", unresolved: 2},
+  }};
+  expect(constellationDockPanels(state)[1]!.content).toBe("PR #7 · passing · conflicts · bugbot 2 unresolved");
+  state.github.pr.mergeable = "mergeable";
+  state.github.pr.bugbot = {state: "pending"};
+  expect(constellationDockPanels(state)[1]!.content).toBe("PR #7 · passing · bugbot running");
+  state.github.pr.bugbot = {state: "clean"};
+  state.github.pr.ciPending = 1;
+  expect(constellationDockPanels(state)[1]!.content).toBe("PR #7 · CI ◷ 1 ✓ 3 ✗ 0 · bugbot clean");
+
+  state.prd = {kind: "ok", remaining: 3, total: 6};
+  state.prdIterationBaseline = 3;
+  expect(constellationDockPanels(state)[2]!.content).toBe("Stories  3/6 complete");
+  state.prd = {kind: "ok", remaining: 2, total: 6};
+  const one = constellationDockPanels(state)[2]!;
+  expect(one.content).toBe("Stories  4/6 complete · +1 ✓");
+  expect(one.tone).toBe("activity");
+  state.prd = {kind: "ok", remaining: 1, total: 6};
+  const two = constellationDockPanels(state)[2]!;
+  expect(two.content).toBe("Stories  5/6 complete · ⚠ +2");
+  expect(two.tone).toBe("failure");
+  expect(two.key).not.toBe(one.key);
+});

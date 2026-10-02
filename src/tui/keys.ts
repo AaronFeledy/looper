@@ -15,10 +15,6 @@ import {
   historyMoveIteration,
   historyMoveStep,
   requestScrollIntent,
-  collapseSelectedCompleteGroup,
-  expandSelectedCompleteGroup,
-  selectNextStep,
-  selectPreviousStep,
   setFocusedPane,
   showHelp,
   syncSelectionToActiveStep,
@@ -246,7 +242,7 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       return;
     }
 
-    if (winner === "inspector" && state.constellation) {
+    if (winner === "inspector") {
       const view = state.constellation;
       const tab = view.inspectorTab ?? "output";
       const direction = HISTORY_SCROLL_KEYS[keyName];
@@ -287,11 +283,18 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
       }
     }
 
-    if (state.constellation && state.historyView === null) {
+    if (state.historyView === null) {
       const view = state.constellation;
+      const startable = !state.started && !state.control.quitting;
       let handled = true;
-      if (keyName === "o" || keyName === "enter" || keyName === "return") {
+      if (keyName === "o") {
         openAgentInspector(state);
+      } else if (keyName === "enter" || keyName === "return") {
+        // Before the run starts, Enter launches it (o still inspects the trail).
+        if (startable) hooks.onStart();
+        else openAgentInspector(state);
+      } else if (keyName === "g" && startable) {
+        hooks.onStart();
       } else if (keyName === "b") {
         openAgentInspector(state, "context");
       } else if (keyName === "m") {
@@ -315,54 +318,19 @@ export function bindKeys(renderer: CliRenderer, state: LoopState, hooks: KeyHook
     const action =
       keyName === "q"
         ? hooks.onQuit
-        : (keyName === "return" || keyName === "enter") && state.focusedPane === "github"
-          ? () => tryOpenCurrentPr(state)
-          : !state.started && !state.control.quitting && (keyName === "g" || keyName === "return" || keyName === "enter")
-            ? hooks.onStart
-            : keyName === "e"
-            ? hooks.onStopAfterIteration
-            : keyName === "p"
-              ? hooks.onTogglePause
-              : keyName === "r"
-                ? hooks.onRestart
-                : keyName === "s"
-                  ? hooks.onSkip
-                  : keyName === "t"
-                    ? () => {
-                        state.control.extendTimeout();
-                      }
-                  : keyName === "tab"
-                    ? () => {
-                        toggleFocusedPane(state);
-                        if (state.focusedPane === "output" && state.selectedStepIndex === null) {
-                          syncSelectionToActiveStep(state);
-                        }
-                      }
-                    : state.focusedPane === "steps" && keyName === "up"
-                      ? () => selectPreviousStep(state)
-                      : state.focusedPane === "steps" && keyName === "down"
-                        ? () => selectNextStep(state)
-                        : state.focusedPane === "steps" && (keyName === "right" || keyName === "arrowright")
-                          ? () => {
-                              expandSelectedCompleteGroup(state);
-                            }
-                          : state.focusedPane === "steps" && (keyName === "left" || keyName === "arrowleft")
-                            ? () => {
-                                collapseSelectedCompleteGroup(state);
-                              }
-                        : state.focusedPane === "output" && keyName === "up"
-                          ? () => scrollSelectedStepOutput(state, "up")
-                          : state.focusedPane === "output" && keyName === "down"
-                            ? () => scrollSelectedStepOutput(state, "down")
-                            : state.focusedPane === "output" && keyName === "pageup"
-                              ? () => scrollSelectedStepOutput(state, "pageup")
-                              : state.focusedPane === "output" && keyName === "pagedown"
-                                ? () => scrollSelectedStepOutput(state, "pagedown")
-                                : state.focusedPane === "output" && keyName === "home"
-                                  ? () => scrollSelectedStepOutput(state, "home")
-                                  : state.focusedPane === "output" && keyName === "end"
-                                    ? () => scrollSelectedStepOutput(state, "end")
-                                    : null;
+        : keyName === "e"
+          ? hooks.onStopAfterIteration
+          : keyName === "p"
+            ? hooks.onTogglePause
+            : keyName === "r"
+              ? hooks.onRestart
+              : keyName === "s"
+                ? hooks.onSkip
+                : keyName === "t"
+                  ? () => {
+                      state.control.extendTimeout();
+                    }
+                  : null;
 
     if (!action) return;
 

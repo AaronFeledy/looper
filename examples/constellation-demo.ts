@@ -8,7 +8,7 @@ import { createConfigOverlay } from "../src/tui/config-overlay.ts";
 import { notify } from "../src/lib/state.ts";
 
 const state = constellationFixture({ withInspection: true });
-state.constellation!.reducedMotion = process.env.LOOPER_REDUCED_MOTION === "1";
+state.constellation.reducedMotion = process.env.LOOPER_REDUCED_MOTION === "1";
 const renderer = await createCliRenderer({ exitOnCtrlC: false });
 renderer.root.add(createConstellationView(renderer, state));
 renderer.root.add(createHelpOverlay(renderer, state));

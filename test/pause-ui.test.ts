@@ -42,7 +42,7 @@ describe("isPauseEngaged", () => {
 });
 
 describe("footerStatus pause flag", () => {
-  test("hides paused until the current live step finishes", () => {
+  test("announces an armed pause until the current live step finishes, then paused", () => {
     const s = state(["build"]);
     s.started = true;
     const build = s.steps[0];
@@ -50,8 +50,10 @@ describe("footerStatus pause flag", () => {
     build.status = "running";
     s.paused = true;
     expect(footerStatus(s)).not.toContain("paused");
+    expect(footerStatus(s)).toContain("pausing after this agent");
     build.status = "done";
-    expect(footerStatus(s)).toContain("paused");
+    expect(footerStatus(s)).toContain("paused — press p to resume");
+    expect(footerStatus(s)).not.toContain("pausing");
   });
 
   test("still shows other run flags while a pause is only pending", () => {
@@ -69,16 +71,11 @@ describe("footerStatus pause flag", () => {
 });
 
 describe("footerStatusDivider", () => {
-  test("is empty when there is no status message", () => {
+  test("is a mid-dot whenever the status slot has text", () => {
     const s = state(["build"]);
-    expect(footerStatus(s)).toBe("");
-    expect(footerStatusDivider(s)).toBe("");
-  });
-
-  test("is a mid-dot when a status message is present", () => {
-    const s = state(["build"]);
-    s.paused = true;
     expect(footerStatus(s).length).toBeGreaterThan(0);
+    expect(footerStatusDivider(s)).toBe("·");
+    s.paused = true;
     expect(footerStatusDivider(s)).toBe("·");
   });
 });

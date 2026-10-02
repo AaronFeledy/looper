@@ -1,4 +1,4 @@
-import type { GithubPr, GithubStatus } from "../lib/state.ts";
+import type { GithubPr, GithubStatus } from "../../lib/state.ts";
 
 export function ciIsRunning(status: GithubStatus): boolean {
   // GitHub can report an overall failure while other checks are still running.
@@ -6,7 +6,7 @@ export function ciIsRunning(status: GithubStatus): boolean {
 }
 
 export function ciCounts(pr: GithubPr): string {
-  return `◷${pr.ciPending} ✓${pr.ciPassing} ✗${pr.ciFailing}${pr.ciNeutral ? ` ~${pr.ciNeutral}` : ""}`;
+  return `◷ ${pr.ciPending} ✓ ${pr.ciPassing} ✗ ${pr.ciFailing}${pr.ciNeutral ? ` ~ ${pr.ciNeutral}` : ""}`;
 }
 
 /** Slow dim-to-bright border pulse; reduced motion keeps the warm highlight. */

@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { compactActivity, summarizeActivity, toolActivity } from "../src/core/agent-activity.ts";
-import { constellationEnabled } from "../src/config/tunables.ts";
 import { constellationAgents, layoutConstellation, visibleConstellationAgents } from "../src/presentation/tui/constellation.ts";
 import { cancelPendingNotify, createBackgroundAgent, finalizeStepRow, notify, snapshotIterationToHistory } from "../src/lib/state.ts";
 import { syncStepAgentTree } from "../src/lib/agent-tree-state.ts";
+import { closeAgentInspector } from "../src/lib/agent-inspector-state.ts";
 import { createConstellationView } from "../src/tui/constellation.ts";
 import { bindKeys, type KeyHooks } from "../src/tui/keys.ts";
 import { constellationFixture } from "./fixtures/constellation-state.ts";
@@ -29,10 +29,6 @@ describe("agent activity", () => {
       { kind: "step.done", reason: "stop", cost: 0, tokens: {input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0} },
     ])).toBe("Running tests");
     expect(summarizeActivity([{ kind: "assistant.text", text: "Running unit tests before moving on." }])).toBe("Running unit tests before moving on");
-  });
-  test("is explicitly opt-in", () => {
-    for (const value of ["", "classic", "true", "1", "typo"]) expect(constellationEnabled(value)).toBe(false);
-    expect(constellationEnabled("constellation")).toBe(true);
   });
 });
 
@@ -75,15 +71,14 @@ describe("constellation layout and lifecycle", () => {
       }
     }
   });
-  test("retains retired children only in the experimental UI", () => {
+  test("retains retired children as idle satellites after the step completes", () => {
     const state = constellationFixture();
     finalizeStepRow(state, 1, "done");
     syncStepAgentTree(state, 1, []);
     expect(state.steps[1]!.backgroundAgents).toHaveLength(5);
     expect(state.steps[1]!.backgroundAgents.every((agent) => agent.activity === "idle")).toBe(true);
-    delete state.constellation;
     finalizeStepRow(state, 1, "done");
-    expect(state.steps[1]!.backgroundAgents).toHaveLength(0);
+    expect(state.steps[1]!.backgroundAgents).toHaveLength(5);
   });
   test("marks stale summaries and attaches requests to their actual owner", () => {
     const state = constellationFixture();
@@ -157,4 +152,40 @@ test("permission requests keep ownership of input over experimental shortcuts", 
     expect(setup.captureCharFrame()).toContain("Waiting for approval");
     expect(setup.captureCharFrame()).toContain("needs you");
   } finally { unbind(); setup.renderer.destroy(); }
+});
+
+test("Enter starts an idle run while o still inspects; once started Enter inspects", async () => {
+  const state = constellationFixture();
+  state.started = false;
+  const started: number[] = [];
+  const setup = await createTestRenderer({ width: 140, height: 34 });
+  setup.renderer.root.add(createConstellationView(setup.renderer, state));
+  const unbind = bindKeys(setup.renderer, state, { ...hooks, onStart() { started.push(1); } });
+  try {
+    setup.mockInput.pressKey("o");
+    expect(state.constellation.detailsOpen).toBe(true);
+    expect(started).toHaveLength(0);
+    setup.mockInput.pressEnter();
+    expect(started).toHaveLength(0);
+    closeAgentInspector(state);
+    setup.mockInput.pressEnter();
+    expect(started).toHaveLength(1);
+    expect(state.constellation.detailsOpen).toBe(false);
+    setup.mockInput.pressKey("g");
+    expect(started).toHaveLength(2);
+    state.started = true;
+    setup.mockInput.pressEnter();
+    expect(started).toHaveLength(2);
+    expect(state.constellation.detailsOpen).toBe(true);
+  } finally { unbind(); setup.renderer.destroy(); }
+});
+
+test("a waiting agent surfaces its continuation reason on the bubble", () => {
+  const state = constellationFixture();
+  const step = state.steps[1]!;
+  step.status = "waiting";
+  step.continuation = { reason: "background tasks active", since: Date.now() };
+  expect(constellationAgents(state).find((node) => node.id === "step:1")?.summary).toBe("Waiting: background tasks active");
+  step.continuation = undefined;
+  expect(constellationAgents(state).find((node) => node.id === "step:1")?.summary).toBe("Waiting for delegated work");
 });

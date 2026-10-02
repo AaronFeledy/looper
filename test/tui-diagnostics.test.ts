@@ -56,9 +56,8 @@ test("real runtime warnings, console errors and stderr are captured and console 
   expect(messages).toContain("console informational message");
 });
 
-for (const constellation of [false, true]) test(`diagnostics open, scroll and close without taking permission input (${constellation ? "constellation" : "classic"})`, async () => {
-  const state = createLoopState({maxIterations: 1, stepNames: ["Build"]});
-  if (constellation) state.constellation = {detailsOpen: false, reducedMotion: true};
+test("diagnostics open, scroll and close without taking permission input", async () => {
+  const state = createLoopState({maxIterations: 1, stepNames: ["Build"], reducedMotion: true});
   const setup = await createTestRenderer({width: 90, height: 24});
   const root = new BoxRenderable(setup.renderer, {width: "100%", height: "100%", flexDirection: "column"});
   root.add(createDiagnosticsView(setup.renderer, state)); root.add(createFooter(setup.renderer, state));

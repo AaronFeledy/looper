@@ -60,13 +60,14 @@ describe("footerStatus timeout hint", () => {
   test("shows the hint only when the live timeout is close", () => {
     const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
     state.started = true;
-    expect(footerStatus(state)).toBe("");
+    const idle = footerStatus(state);
+    expect(idle).not.toContain("timeout");
 
     state.control.bindTimeoutExtender(
       () => ({ remainingMs: 1 }),
       () => ({ remainingMs: 10 * 60_000, originalMs: 60 * 60_000 }),
     );
-    expect(footerStatus(state)).toBe("");
+    expect(footerStatus(state)).toBe(idle);
 
     state.control.bindTimeoutExtender(
       () => ({ remainingMs: 1 }),

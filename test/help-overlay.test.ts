@@ -124,7 +124,7 @@ describe("prompt overlay keys", () => {
     expect(stopped).toBe(1);
   });
   test("help lines mention the prompt modal key", () => {
-    expect(helpLines().some((line) => line.startsWith("v "))).toBe(true);
+    expect(helpLines().some((line) => line.startsWith("v / c"))).toBe(true);
   });
 });
 
@@ -190,7 +190,7 @@ describe("config overlay keys", () => {
   });
 
   test("help lines mention the config modal key", () => {
-    expect(helpLines().some((line) => line.startsWith("c "))).toBe(true);
+    expect(helpLines().some((line) => line.startsWith("v / c"))).toBe(true);
   });
 });
 
@@ -286,11 +286,11 @@ describe("helpLines", () => {
 });
 
 describe("footerStatus", () => {
-  test("default footer has no key cheat sheet in the status slot", () => {
+  test("default footer points at inspection, not the run-control cheat sheet", () => {
     const state = makeState();
-    expect(footerStatus(state)).toBe("");
+    expect(footerStatus(state)).toBe("[g/enter] run  ·  [o] inspect  ·  [b] context  ·  [i] plan");
     state.started = true;
-    expect(footerStatus(state)).toBe("");
+    expect(footerStatus(state)).toBe("[o/enter] inspect  ·  [b] context  ·  [i] plan");
     expect(footerHelpHint()).toBe("[?] keys");
     expect(footerStatus(state)).not.toContain("[q]uit");
     expect(footerStatus(state)).not.toContain("[p]ause");

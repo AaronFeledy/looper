@@ -76,7 +76,7 @@ export function snapshotPhases(
   storyIds: readonly string[] | undefined,
 ): StoryPhasesMap | undefined {
   if (readPhase === undefined || storyIds === undefined) return undefined;
-  const phases: Record<string, StoryPhase> = {};
+  const phases: Record<string, StoryPhase> = Object.create(null);
   for (const storyId of storyIds) {
     phases[storyId] = readPhase(storyId) ?? "building";
   }

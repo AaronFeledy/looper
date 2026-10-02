@@ -163,7 +163,7 @@ describe("S2 edge cases", () => {
     expect(scenario.state.selectedBackgroundSessionID).toBe("ses_child");
   });
 
-  test("prunes agents and clears their selection when the parent step becomes done", async () => {
+  test("retires agents as idle and keeps their selection when the parent step becomes done", async () => {
     // Given
     const scenario = await activateNestedScenario();
     const step = scenario.state.steps[0];
@@ -175,8 +175,11 @@ describe("S2 edge cases", () => {
     await notifyAndSettle();
 
     // Then
-    expect(step.backgroundAgents).toEqual([]);
-    expect(scenario.state.selectedBackgroundSessionID).toBeNull();
+    expect(step.backgroundAgents.map(({ sessionID, activity }) => ({ sessionID, activity }))).toEqual([
+      { sessionID: "ses_child", activity: "idle" },
+      { sessionID: "ses_grand", activity: "idle" },
+    ]);
+    expect(scenario.state.selectedBackgroundSessionID).toBe("ses_grand");
   });
 });
 
@@ -201,10 +204,11 @@ describe("S3 regressions", () => {
     });
   }
 
-  test("fetches nested child messages when its projected row is selected", async () => {
+  test("fetches nested child messages when its projected row is inspected", async () => {
     // Given
     const scenario = await activateNestedScenario();
     selectStepListRow(scenario.state, 2);
+    scenario.state.constellation.detailsOpen = true;
 
     // When
     const streamer = startBackgroundAgentStreamer({ state: scenario.state, client: scenario.fake.client, repoDir: REPO_DIR });

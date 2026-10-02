@@ -93,7 +93,11 @@ export function routeConstellationLinks(scene: ConstellationScene, cache: WireCa
     [b.node.id, b.node.parentID, b.node.lane, b.node.status, b.compact, b.x, b.y, b.width, b.height])]);
   if (geometry === cache.geometry) return cache.paths;
   const byID = new Map(scene.bubbles.map((bubble) => [bubble.node.id, bubble]));
-  const roots = scene.bubbles.filter((bubble) => !bubble.node.parentID && bubble.node.previewIteration === undefined).sort((a, b) => a.node.stepIndex - b.node.stepIndex);
+  // Retained rows count backward (-1 is oldest); current rows count forward.
+  // Keep both in execution order so the newest retained row joins the current run.
+  const roots = scene.bubbles.filter((bubble) => !bubble.node.parentID && bubble.node.previewIteration === undefined)
+    .sort((a, b) => a.node.stepIndex < 0 && b.node.stepIndex < 0
+      ? b.node.stepIndex - a.node.stepIndex : a.node.stepIndex - b.node.stepIndex);
   const edges = scene.bubbles.flatMap((child) => {
     const parent = child.node.parentID ? byID.get(child.node.parentID) : undefined;
     return parent && child.node.lane === "live" && !child.compact ? [{ parent, child, active: child.node.status !== "idle", flow: false }] : [];

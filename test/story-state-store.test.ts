@@ -26,10 +26,10 @@ async function runFreshCli(repoDir: string, tty: boolean, resetStories = false):
     OPENCODE_BIN: "looper-test-missing-opencode",
   };
   if (!tty) {
-    const child = Bun.spawn(["bun", MAIN_ENTRY, "--fresh", ...(resetStories ? ["--reset-stories"] : []), "--start", "1"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
+    const child = Bun.spawn(["bun", MAIN_ENTRY, "--adopt-prd-state", "--confirm-legacy-stopped", "--fresh", ...(resetStories ? ["--reset-stories"] : []), "--start", "1"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
     return child.exited;
   }
-  const command = `bun ${MAIN_ENTRY} --fresh ${resetStories ? "--reset-stories " : ""}--start 1`;
+  const command = `bun ${MAIN_ENTRY} --adopt-prd-state --confirm-legacy-stopped --fresh ${resetStories ? "--reset-stories " : ""}--start 1`;
   const child = Bun.spawn(["script", "-qefc", command, "/dev/null"], { cwd: repoDir, env, stdout: "ignore", stderr: "ignore" });
   return child.exited;
 }

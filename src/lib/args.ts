@@ -21,6 +21,8 @@ export type Options = {
   readonly fresh: boolean;
   /** Clear `.looper-story-state.json`. Only valid together with `--fresh`. */
   readonly resetStories: boolean;
+  readonly prdStateDecision?: "adopt" | "reset";
+  readonly confirmLegacyStopped?: boolean;
   readonly maxIterations: number;
   readonly start: boolean;
   readonly waitProvided: boolean;
@@ -67,13 +69,16 @@ Flags:
   --fresh             Ignore any saved checkpoint and start a new run from iteration 1, step 1.
                       Story phases in .looper-story-state.json are kept unless --reset-stories is also set.
   --reset-stories     Clear story phase state. Only valid together with --fresh.
+  --adopt-prd-state   Associate existing state with the configured PRD (also for a moved PRD).
+  --reset-prd-state   Archive PRD-bound state and reset it after stopping recorded work.
+  --confirm-legacy-stopped
+                      Acknowledge ALL pre-lease Looper frontends for this config directory are stopped.
   --continue          Deprecated alias of --start (resuming is now the default).
   --wait[=minutes]    Wait between iterations. Without minutes, wait for the previous iteration duration.
   -h, --help          Show this help.
 
-Experimental UI:
-  LOOPER_UI=constellation looper    Animated agent bubbles with simultaneous activity summaries.
-  LOOPER_REDUCED_MOTION=1           Keep the constellation still (also toggle with [m]).
+Display:
+  LOOPER_REDUCED_MOTION=1           Start with the constellation's animation off (also toggle with [m]).
 
 By default looper resumes the previous run where it left off: it restores the iteration and step, and
 reattaches to the in-progress opencode session if it is still active (otherwise it restarts that step).
@@ -214,6 +219,8 @@ export function parseArgs(argv: readonly string[]): Options {
   let attachUrl: string | undefined;
   let fresh = false;
   let resetStories = false;
+  let prdStateDecision: "adopt" | "reset" | undefined;
+  let confirmLegacyStopped = false;
   let maxIterations = 100;
   let start = false;
   let waitProvided = false;
@@ -247,6 +254,16 @@ export function parseArgs(argv: readonly string[]): Options {
 
     if (arg === "--reset-stories") {
       resetStories = true;
+      continue;
+    }
+
+    if (arg === "--adopt-prd-state" || arg === "--reset-prd-state") {
+      if (prdStateDecision !== undefined) throw new UsageError("Choose only one of --adopt-prd-state or --reset-prd-state");
+      prdStateDecision = arg === "--adopt-prd-state" ? "adopt" : "reset";
+      continue;
+    }
+    if (arg === "--confirm-legacy-stopped") {
+      confirmLegacyStopped = true;
       continue;
     }
 
@@ -292,6 +309,8 @@ export function parseArgs(argv: readonly string[]): Options {
     ...(globalArgs.configDir !== undefined ? { configDir: globalArgs.configDir } : {}),
     fresh,
     resetStories,
+    ...(prdStateDecision !== undefined ? { prdStateDecision } : {}),
+    ...(confirmLegacyStopped ? { confirmLegacyStopped } : {}),
     maxIterations,
     start,
     waitProvided,

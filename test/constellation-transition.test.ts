@@ -4,7 +4,7 @@ import { createConstellationTransition, HANDOFF_DURATION_MS } from "../src/prese
 import { constellationAgents, layoutConstellation, type ConstellationScene } from "../src/presentation/tui/constellation.ts";
 import { constellationLinks, createConstellationView } from "../src/tui/constellation.ts";
 import { stripAnsi } from "../src/lib/ansi.ts";
-import { cancelPendingNotify, createLoopState, notify, type LoopState } from "../src/lib/state.ts";
+import { cancelPendingNotify, createBackgroundAgent, createLoopState, notify, type LoopState } from "../src/lib/state.ts";
 import { constellationFixture } from "./fixtures/constellation-state.ts";
 
 afterEach(cancelPendingNotify);
@@ -130,4 +130,19 @@ test("the final handoff settles even when no running agents remain to animate", 
     await Bun.sleep(HANDOFF_DURATION_MS + 180); await setup.flush();
     expect(view.findDescendantById("bubble-step:0")!.x).toBe(0);
   } finally { setup.renderer.destroy(); }
+});
+
+test("a nested branch that starts under its parent card tees into the card", () => {
+  const state = createLoopState({ maxIterations: 1, stepNames: ["Build"] });
+  state.steps[0]!.status = "running"; state.steps[0]!.sessionID = "ses_root";
+  state.steps[0]!.backgroundAgents = [-1, -1, 0, 0, 1, 1].map((parent, i) => createBackgroundAgent(`ses_c${i}`, 0,
+    { agent: "x", activity: "busy", parentSessionID: parent < 0 ? "ses_root" : `ses_c${parent}` }));
+  const scene = sceneOf(state);
+  const lines = stripAnsi(constellationLinks(scene, 0, false, { geometry: "", paths: [] })).split("\n");
+  for (const id of ["step:0", "child:0:ses_c0", "child:0:ses_c1"]) {
+    const parent = box(scene, id);
+    expect("│┴┼├┤").toContain(lines[parent.y + parent.height]![parent.x + Math.floor(parent.width / 2)]!);
+  }
+  for (const child of scene.bubbles.filter(bubble => bubble.node.parentID))
+    expect("│┬┼├┤").toContain(lines[child.y - 1]![child.x + Math.floor(child.width / 2)]!);
 });

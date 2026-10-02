@@ -8,11 +8,10 @@ import { cancelPendingNotify, notify } from "../src/lib/state.ts";
 import { constellationFixture } from "./fixtures/constellation-state.ts";
 afterEach(cancelPendingNotify);
 
-for (const inspector of [false, true]) test(`${inspector ? "inspector" : "classic"} output has a fixed animated activity row just above its bottom border`, async () => {
+for (const inspector of [false, true]) test(`${inspector ? "inspector" : "standalone stream"} output has a fixed animated activity row just above its bottom border`, async () => {
   const state = constellationFixture({withInspection: true});
-  state.constellation!.reducedMotion = false;
+  state.constellation.reducedMotion = false;
   if (inspector) openAgentInspector(state);
-  else delete state.constellation;
   state.steps[1]!.outputPinnedToBottom = false;
   state.steps[1]!.outputScrollTop = 3;
   state.steps[1]!.outputEvents = [
@@ -41,7 +40,6 @@ for (const inspector of [false, true]) test(`${inspector ? "inspector" : "classi
     expect(stream.scrollTop).toBe(scrollTop);
     expect(stream.content.getChildren()[0]).toBe(content);
     // Motion preference changes only the colors, not transcript geometry.
-    state.constellation ??= {detailsOpen: false, reducedMotion: false};
     state.constellation.reducedMotion = true; notify();
     await Bun.sleep(40); await setup.flush();
     const still = row();
@@ -50,9 +48,8 @@ for (const inspector of [false, true]) test(`${inspector ? "inspector" : "classi
   } finally { setup.renderer.destroy(); }
 });
 
-test("classic output summarizes the selected child's existing transcript and handles idle and permission states", async () => {
+test("standalone stream summarizes the selected child's existing transcript and handles idle and permission states", async () => {
   const state = constellationFixture();
-  delete state.constellation;
   state.selectedBackgroundSessionID = "ses_tests";
   const child = state.steps[1]!.backgroundAgents[1]!;
   child.activitySummary = undefined;
@@ -83,11 +80,10 @@ test("classic output summarizes the selected child's existing transcript and han
 });
 
 
-for (const inspector of [false, true]) test(`${inspector ? "inspector" : "classic"} activity row uses the configured PRD file roles`, async () => {
+for (const inspector of [false, true]) test(`${inspector ? "inspector" : "standalone stream"} activity row uses the configured PRD file roles`, async () => {
   const state = constellationFixture({ withInspection: true });
   state.activityContext = { repoDir: "/repo", prdDir: "spec/feature" };
   if (inspector) openAgentInspector(state);
-  else delete state.constellation;
   state.steps[1]!.outputEvents = [{ kind: "tool.started", tool: "edit", input: { filePath: "/repo/spec/feature/prd.json" } }];
   const setup = await createTestRenderer({ width: 100, height: 30 });
   const view = inspector ? createConstellationView(setup.renderer, state) : createAgentStream(setup.renderer, state);

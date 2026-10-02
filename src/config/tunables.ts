@@ -25,10 +25,6 @@ function booleanEnv(name: string, fallback: boolean): boolean {
   return !FALSE_ENV_VALUES.has(value);
 }
 
-export function constellationEnabled(value = process.env.LOOPER_UI): boolean {
-  return value?.trim().toLowerCase() === "constellation";
-}
-
 export function constellationReducedMotion(): boolean {
   return booleanEnv("LOOPER_REDUCED_MOTION", false);
 }
@@ -154,6 +150,19 @@ export function outcomeReminderMinMs(): number {
   return nonNegativeIntegerEnv("LOOPER_OUTCOME_REMINDER_MIN_MS", OUTCOME_REMINDER_MIN_MS_DEFAULT);
 }
 
+const STEP_ATTEMPT_MAX_DEFAULT = 3;
+
+/**
+ * How many CONSECUTIVE non-advancing outcomes (hand-back or blocked) one step may
+ * report for the same story before the run escalates to adjudication (or stops,
+ * when no `adjudicate:` step is configured). `0` disables the ledger escalation.
+ *
+ * Precedence: environment override, then looper.yaml `stepAttemptMax`, then the default.
+ */
+export function stepAttemptMax(configValue?: number): number {
+  return nonNegativeIntegerEnv("LOOPER_STEP_ATTEMPT_MAX", configValue ?? STEP_ATTEMPT_MAX_DEFAULT);
+}
+
 export function inheritedRenameDelayMs(): number {
   return positiveIntegerEnv("LOOPER_INHERITED_TITLE_DELAY_MS", 5000);
 }
@@ -165,6 +174,7 @@ export function titleGenTimeoutMs(): number {
 const FAILURE_RETRY_BASE_MS_DEFAULT = 15_000;
 const FAILURE_RETRY_MAX_DELAY_MS_DEFAULT = 300_000;
 const FAILURE_RETRY_MIN_REMAINING_MS_DEFAULT = 5_000;
+const TIMEOUT_RESTART_MAX_DEFAULT = 3;
 const FAILURE_RETRY_JITTER_DEFAULT = 0.2;
 
 export function failureRetryBaseMs(): number {
@@ -173,6 +183,16 @@ export function failureRetryBaseMs(): number {
 
 export function failureRetryMaxDelayMs(): number {
   return positiveIntegerEnv("LOOPER_FAILURE_RETRY_MAX_DELAY_MS", FAILURE_RETRY_MAX_DELAY_MS_DEFAULT);
+}
+
+/**
+ * How many times one step may be restarted by its own timeout watchdog before
+ * the run halts. Capped because the stall detector only observes at ITERATION
+ * boundaries: a step that restarts forever never finishes its iteration, so
+ * nothing else would ever catch it. `0` disables timeout restarts entirely.
+ */
+export function timeoutRestartMax(): number {
+  return nonNegativeIntegerEnv("LOOPER_TIMEOUT_RESTART_MAX", TIMEOUT_RESTART_MAX_DEFAULT);
 }
 
 export function failureRetryMinRemainingMs(): number {

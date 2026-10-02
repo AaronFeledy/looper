@@ -37,7 +37,7 @@ export type {
   PendingRequestStatus,
 } from "../core/pending-request.ts";
 
-export type LoopPane = "steps" | "output" | "github";
+export type LoopPane = "steps" | "output";
 
 export type ScrollDirection = "up" | "down" | "pageup" | "pagedown" | "home" | "end";
 
@@ -234,10 +234,20 @@ export type BootResumeSession = {
   canReattach: boolean;
 };
 
+/** TTY view state for the constellation: inspector modal, plan drawer, and motion preference. */
+export type ConstellationViewState = {
+  detailsOpen: boolean;
+  reducedMotion: boolean;
+  planOpen?: boolean;
+  planScroll?: number;
+  inspectorTab?: InspectorTab;
+  inspectorScroll?: number;
+  inspectorPageRows?: number;
+};
+
 export type LoopState = {
   bootResumeSession?: BootResumeSession;
-  /** Present only when LOOPER_UI=constellation. */
-  constellation?: { detailsOpen: boolean; reducedMotion: boolean; planOpen?: boolean; planScroll?: number; inspectorTab?: InspectorTab; inspectorScroll?: number; inspectorPageRows?: number };
+  constellation: ConstellationViewState;
   iteration: number;
   maxIterations: number;
   branch: string;
@@ -426,12 +436,15 @@ export function createLoopState({
   maxIterations,
   stepNames,
   control = createRunControl(),
+  reducedMotion = false,
 }: {
   maxIterations: number;
   stepNames: string[];
   control?: RunControl;
+  reducedMotion?: boolean;
 }): LoopState {
   return {
+    constellation: { detailsOpen: false, reducedMotion },
     iteration: 0,
     maxIterations,
     branch: "",
@@ -598,9 +611,6 @@ export function setTodos(state: LoopState, todos: TodoItem[]): void {
 export function setGithubStatus(state: LoopState, status: GithubStatus): void {
   if (JSON.stringify(state.github) === JSON.stringify(status)) return;
   state.github = status;
-  if (state.focusedPane === "github" && status.kind !== "pr") {
-    state.focusedPane = "steps";
-  }
   notifyStateChange();
 }
 
@@ -648,28 +658,12 @@ export function setFocusedPane(state: LoopState, focusedPane: LoopPane): void {
   notifyStateChange();
 }
 
-export function githubPrPanelVisible(state: LoopState): boolean {
-  return state.github.kind === "pr";
-}
-
-function focusPaneCycle(state: LoopState): LoopPane[] {
-  return githubPrPanelVisible(state) ? ["steps", "github", "output"] : ["steps", "output"];
-}
-
 export function nextFocusedPane(state: LoopState): LoopPane {
-  const order = focusPaneCycle(state);
-  const index = order.indexOf(state.focusedPane);
-  return order[(index + 1) % order.length] ?? "steps";
-}
-
-export function focusPaneTabLabel(pane: LoopPane): string {
-  if (pane === "github") return "PR";
-  return pane;
+  return state.focusedPane === "steps" ? "output" : "steps";
 }
 
 export function toggleFocusedPane(state: LoopState): LoopPane {
-  const next = nextFocusedPane(state);
-  state.focusedPane = next;
+  state.focusedPane = nextFocusedPane(state);
   notifyStateChange();
   return state.focusedPane;
 }
@@ -1540,7 +1534,7 @@ export function toggleConfigModal(state: LoopState): void {
 
 export function resetIterationNavigationState(state: LoopState): void {
   state.bootResumeSession = undefined;
-  if (state.constellation) state.constellation.detailsOpen = false;
+  state.constellation.detailsOpen = false;
   state.focusedPane = "steps";
   state.selectedStepIndex = clampStepIndex(getStepCount(state), state.activeStepIndex);
   state.selectedBackgroundSessionID = null;
@@ -1597,7 +1591,7 @@ export function syncStepBackgroundAgents(
   }
 
   // Retain retired satellites so the completed step trail can snapshot them.
-  if (state.constellation && next.length === 0) {
+  if (next.length === 0) {
     for (const agent of step.backgroundAgents) {
       agent.activity = "idle";
       agent.finishedAt ??= Date.now();
