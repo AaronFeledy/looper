@@ -844,6 +844,30 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
       failStepRow(state, stepIdx, "failed");
       return { status: "failed", sessionID, errorMessage: reason };
     };
+    // Every restart path comes here AFTER confirming that the old session has
+    // stopped. All automatic timeouts share one per-step counter, including
+    // background waits and failures arriving with an exhausted budget.
+    const restartStep = (reason: StepRestartReason): StepRunResult | undefined => {
+      if (reason === "timeout") {
+        const limit = timeoutRestartMax();
+        if (attempt.timeoutRestartCount >= limit) {
+          const message = `${step.name} timeout restart limit reached (${attempt.timeoutRestartCount}/${limit})`;
+          attempt.lastErrorMessage = message;
+          logStepLine(currentStepIndex, `[looper] ${message}`);
+          failStepRow(state, currentStepIndex, "failed");
+          writeStop?.(message);
+          return { status: "failed", errorMessage: message };
+        }
+        attempt.timeoutRestartCount += 1;
+      }
+      currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
+      stepIndexForTitle = currentStepIndex;
+      stepStartTime = Date.now();
+      control.clearTimeoutBonus();
+      attempt.resumeSessionID = undefined;
+      attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
+      return undefined;
+    };
     const failAfterUnrecoveredServer = (sessionID: string, stepIdx: number): StepRunResult => {
       const reason = `server did not recover while checking session ${sessionID}; leaving the session alone so it can complete in the background`;
       attempt.suppressFailureRetry = true;
@@ -1214,11 +1238,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a restart session");
             break;
           }
-          currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
-          stepIndexForTitle = currentStepIndex;
-          stepStartTime = Date.now();
-          attempt.resumeSessionID = undefined;
-          attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
+          const restartFailure = restartStep(reason);
+          if (restartFailure !== undefined) {
+            result = restartFailure;
+            break;
+          }
           pushAgentLine(state, `[looper] restart requested during background wait for session ${waitSessionID}`);
           pushStepOutputLine(state, previousStepIndex, `[looper] restart requested during background wait for session ${waitSessionID}`);
           control.setRestartRequested(false);
@@ -1239,11 +1263,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             result = failAfterUnconfirmedStop(waitSessionID, previousStepIndex, "starting a timeout restart session");
             break;
           }
-          currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
-          stepIndexForTitle = currentStepIndex;
-          stepStartTime = Date.now();
-          attempt.resumeSessionID = undefined;
-          attempt.resumePrompt = cleanRestartPrompt(promptText(step), "timeout");
+          const restartFailure = restartStep("timeout");
+          if (restartFailure !== undefined) {
+            result = restartFailure;
+            break;
+          }
           pushAgentLine(state, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
           pushStepOutputLine(state, previousStepIndex, `[looper] timeout restarting ${step.name} after background wait for session ${waitSessionID}`);
           resetStepRowToPending(state, currentStepIndex);
@@ -1284,12 +1308,11 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
           result = failAfterUnconfirmedStop(priorSessionID, currentStepIndex, "starting a restart session");
           break;
         }
-        currentStepIndex = insertRestartAttempt(state, currentStepIndex, reason);
-        stepIndexForTitle = currentStepIndex;
-        stepStartTime = Date.now();
-        control.clearTimeoutBonus();
-        attempt.resumeSessionID = undefined;
-        attempt.resumePrompt = cleanRestartPrompt(promptText(step), reason);
+        const restartFailure = restartStep(reason);
+        if (restartFailure !== undefined) {
+          result = restartFailure;
+          break;
+        }
         continue;
       }
 
@@ -1416,7 +1439,7 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
         // exhausted: SDK request interrupted` -- a report of a retry loop that
         // structurally could not run even once.
         //
-        // Capped, unlike the background-wait path, because the stall detector
+        // All timeout paths share a cap because the stall detector
         // only observes at ITERATION boundaries: a step that restarts forever
         // never finishes its iteration, so nothing else would ever catch it.
         //
@@ -1441,17 +1464,15 @@ export async function runIteration(options: RunIterationOptions): Promise<"compl
             result = failAfterUnconfirmedStop(timedOutSessionID, timedOutStepIndex, "starting a timeout restart session");
             break;
           }
-          attempt.timeoutRestartCount += 1;
+          const restartFailure = restartStep("timeout");
+          if (restartFailure !== undefined) {
+            result = restartFailure;
+            break;
+          }
           const restartTag = `${attempt.timeoutRestartCount}/${timeoutRestartsAllowed}`;
           const timeoutLine = `[looper] ${step.name} timed out after ${Math.round(budgetMs / 60000)}m (${errReason}) \u2014 restarting with a full budget (restart ${restartTag})`;
           pushAgentLine(state, timeoutLine);
           pushStepOutputLine(state, timedOutStepIndex, timeoutLine);
-          currentStepIndex = insertRestartAttempt(state, currentStepIndex, "timeout");
-          stepIndexForTitle = currentStepIndex;
-          // The fresh budget. This is what makes the timeout a watchdog.
-          stepStartTime = Date.now();
-          attempt.resumeSessionID = undefined;
-          attempt.resumePrompt = cleanRestartPrompt(promptText(step), "timeout");
           attempt.lastErrorMessage = undefined;
           attempt.failureRetryCount = 0;
           resetStepRowToPending(state, currentStepIndex);
