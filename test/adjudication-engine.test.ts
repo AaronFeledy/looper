@@ -24,6 +24,9 @@ function setup(stepCount: number, adjudicate = true): Scratch {
   const prdDir = join(repoDir, "spec");
   mkdirSync(configDir, { recursive: true });
   mkdirSync(prdDir, { recursive: true });
+  // Prevent this nested fixture from inheriting the real project's Git remote.
+  const git = Bun.spawnSync(["git", "init", "-q", "-b", "main"], { cwd: repoDir });
+  if (git.exitCode !== 0) throw new Error(git.stderr.toString());
   initStatePaths({ configDir });
   const lines = ["steps:"];
   for (let index = 0; index < stepCount; index += 1) {

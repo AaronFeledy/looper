@@ -3,6 +3,8 @@ import { join, resolve } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { legalOutcomeCommands } from "../src/engine/step-outcome.ts";
+
 import { SIGNAL_LOG_FILE_NAME, readSignalsSince } from "../src/lib/signal-log.ts";
 
 const MAIN_ENTRY = resolve(import.meta.dir, "../src/main.ts");
@@ -360,6 +362,37 @@ describe("looper signal", () => {
       "--config-dir",
       fixture.configDir,
     ]);
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr).toContain("push the branch first");
+  });
+
+  test.each(["US-200", "US-'quoted'; touch injected; #"])("generated outcome command records %s while on main", async storyId => {
+    const fixture = createScratch();
+    scratch = fixture.repoDir;
+    writeMinimalConfig(fixture.configDir);
+    const { originDir } = await initRepoWithOrigin(fixture.repoDir);
+    extraScratch = originDir;
+    const command = legalOutcomeCommands({ expects: "merged", storyId })[0]!.command;
+    const script = 'looper() { "$LOOPER_TEST_BUN" "$LOOPER_TEST_MAIN" "$@"; }; ' + command;
+    const child = Bun.spawn(["bash", "-c", script], { cwd: fixture.repoDir, stdout: "pipe", stderr: "pipe", env: {
+      ...process.env, LOOPER_TEST_BUN: process.execPath, LOOPER_TEST_MAIN: MAIN_ENTRY,
+      LOOPER_REPO_DIR: fixture.repoDir, LOOPER_CONFIG_DIR: fixture.configDir,
+    } });
+    const [exitCode, stderr] = await Promise.all([child.exited, child.stderr.text()]);
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+    const persisted = JSON.parse(readFileSync(join(fixture.configDir, ".looper-story-state.json"), "utf8"));
+    expect(persisted.stories[storyId]?.phase).toBe("merged");
+    expect(existsSync(join(fixture.repoDir, "injected"))).toBe(false);
+  });
+
+  test("published rejects a local branch named like an origin ref", async () => {
+    const fixture = createScratch();
+    scratch = fixture.repoDir;
+    writeMinimalConfig(fixture.configDir);
+    const { originDir } = await initRepoWithOrigin(fixture.repoDir);
+    extraScratch = originDir;
+    await git(fixture.repoDir, ["branch", "origin/us-200-local-only"]);
+    const result = await runCli(fixture.repoDir, ["signal", "story-phase", "published", "--story", "US-200", "--config-dir", fixture.configDir]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("push the branch first");
   });

@@ -68,7 +68,7 @@ export function createAgentInspector(
     fitDialog();
     const history = state.historyView !== null;
     const shown = !history && modalFocusWinner(state) === "inspector";
-    const tab = state.constellation?.inspectorTab ?? "output";
+    const tab = state.constellation.inspectorTab ?? "output";
     host.visible = shown;
     const parent = history ? historyHost : output;
     if (stream.parent !== parent) { stream.parent?.remove(stream); parent.add(stream); }
@@ -92,7 +92,7 @@ export function createAgentInspector(
         if (!row) {
           row = new TextRenderable(renderer, { id: i === 4 ? "agent-inspector-session-link" : `agent-inspector-detail-${i}`, width: "100%", minHeight: 1, fg: "#cdd6f4", wrapMode: "word", content: "" });
           if (i === 4) row.onMouseUp = (event) => {
-            if (event.type !== "up" || event.button !== 0 || modalFocusWinner(state) !== "inspector" || state.constellation?.inspectorTab !== "details" || !sessionID || !opencodeSessionUrl(sessionID) || opening) return;
+            if (event.type !== "up" || event.button !== 0 || modalFocusWinner(state) !== "inspector" || state.constellation.inspectorTab !== "details" || !sessionID || !opencodeSessionUrl(sessionID) || opening) return;
             event.stopPropagation();
             const clickedID = sessionID;
             opening = true; openError = "";
@@ -108,10 +108,10 @@ export function createAgentInspector(
     }
     const body = sanitizeTerminalText(tab === "prompt" ? inspectorPrompt(state) : tab === "context" ? inspectorContext(state) : "");
     if (body !== lastBody) { text.content = body; lastBody = body; }
-    if (state.constellation) state.constellation.inspectorPageRows = Math.max(1, textPane.viewport.height - 1);
+    state.constellation.inspectorPageRows = Math.max(1, textPane.viewport.height - 1);
     applyingScroll = true;
-    textPane.scrollTop = state.constellation?.inspectorScroll ?? 0;
-    if (state.constellation) state.constellation.inspectorScroll = textPane.scrollTop;
+    textPane.scrollTop = state.constellation.inspectorScroll ?? 0;
+    state.constellation.inspectorScroll = textPane.scrollTop;
     applyingScroll = false;
     tabLabels.forEach((label, i) => {
       const selected = INSPECTOR_TABS[i] === tab;
@@ -124,7 +124,7 @@ export function createAgentInspector(
     renderer.requestRender();
   };
   textPane.verticalScrollBar.on("change", () => {
-    if (!applyingScroll && state.constellation && textPane.visible) state.constellation.inspectorScroll = textPane.scrollTop;
+    if (!applyingScroll && textPane.visible) state.constellation.inspectorScroll = textPane.scrollTop;
   });
   const unsubscribe = subscribe(update);
   host.on(RenderableEvents.DESTROYED, () => { unsubscribe(); host.off(LayoutEvents.RESIZED, fitDialog); renderer.off("resize", fitDialog); });

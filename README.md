@@ -46,15 +46,75 @@ CLI flags:
 
 Without `--config-dir`, looper looks under `$PWD` in this order: `.looper`, `.local/looper`, `.local/.looper`. The first directory that already contains a config file wins; if none do, looper defaults to `.looper`. Within that directory, config file resolution prefers `looper.yml`, then `looper.yaml`, `.looper.yml`, `.looper.yaml`.
 
-Both terminal UIs show the selected agent’s current activity inside the output pane’s bottom border. Its moving
-color gradient stays visible while scrolling; `LOOPER_REDUCED_MOTION=1` keeps it static.
+Every agent bubble shows its current activity phrase. The inspector's output pane (`o`, or `Enter` once the run has
+started) shows the same phrase in its bottom border with a moving color gradient that stays visible while scrolling;
+`LOOPER_REDUCED_MOTION=1` keeps it static.
 
 ## Resuming
+
+### PRD-bound state
+
+Looper records the normalized, symlink-resolved `prd:` directory in
+`.looper-prd-identity.json`, independently of the resume checkpoint. Changing story IDs or
+editing `prd.json` at the same path never triggers a reset. Switching to another readable
+PRD directory automatically archives the old state under `.looper-archive/<unique>/` and
+starts with empty state. The archive includes phases, attempts, checkpoints, adjudication,
+signals, permission audit, stop markers, and the agent trail. Config, prompts, PRD files,
+and SQLite mutexes are never reset by this mechanism.
+
+Existing state without an association requires a decision **before** fresh deletion or
+automatic session attachment. Interactive startup asks in the normal terminal, before
+the TUI opens. Unattended startup stops with these explicit choices:
+
+- `--adopt-prd-state`: keep state and associate it with the configured PRD. Use this when
+  moving the same PRD to a different directory, or adopting known legacy state.
+- `--reset-prd-state`: archive and reset PRD-bound state, including story phases. Does not
+  require `--fresh`. The flags are mutually exclusive.
+
+Legacy state also requires **separate frontend-shutdown acknowledgment**: stop every older
+Looper frontend using that config directory, then pass `--confirm-legacy-stopped` (or type
+`stopped` at the interactive prompt). Adopt/reset consent is not shutdown acknowledgment.
+This applies even without `prd:` and to identities created before the protected writer
+protocol. An idle parent session is not proof that its frontend cannot launch more work.
+A known live owner in `.looper-run-owner.json` blocks startup even with the acknowledgment.
+Clean no-PRD startup requires no extra flags; it records a protected no-PRD association.
+
+Ordinary `--fresh` still preserves story phases unless `--reset-stories` is also supplied;
+neither bypasses association confirmation or session safety. Removing `prd:` is ambiguous
+and requires a decision; a configured but missing/unreadable PRD always blocks startup
+without erasing state.
+
+Before a reset or adoption, Looper confirms recorded step/adjudicator work and relevant
+descendants are stopped. Unknown status, corrupt checkpoints, or unsettled background
+continuations block the operation. Reconciliation uses the recorded server endpoint,
+not a newly configured server. This also applies to normal same-PRD startup: the replacement
+must validate, and saved work must be reconciled against the original server before its
+authority is replaced. Failed validation or changed checkpoints preserve the old authority.
+For legacy records with no endpoint, explicitly supply `--attach=<original-server-url>`;
+a configured URL alone is not proof of the original endpoint. An unreachable original server must be restored/reconciled;
+an idle replacement is not proof that old work stopped. Stop any older Looper process
+before upgrading; new versions hold a process-lifetime `.looper-run-lock.sqlite` lease
+to prevent two frontends using the same state directory concurrently.
+
+The TTY uses the same frozen runtime-config snapshot for protection and execution. Edits
+made while its startup prompt is open take effect on a later launch, not halfway through
+this startup. Deferred Go-with-`--fresh` and manual fresh reset recheck ownership and saved
+work immediately before deletion; a launch-time check is not reusable permission to wipe.
+All fresh paths use the same fixed allowlist cleanup under the writer mutex, comparing the
+snapshot captured before session reconciliation. Fresh cleanup also saves a recovery archive
+and reset journal before deleting files; ordinary fresh keeps story phases and `.last-branch`.
+TTY in-memory cleanup runs only after disk cleanup succeeds, never while holding that mutex.
+
+If a process dies during archival/reset, `.looper-prd-reset.json` blocks subsequent startup.
+With all Looper processes stopped, inspect its archive and `manifest.json`, restore the
+listed files into the config directory, then remove **only** the reset journal and retry.
+Never remove a SQLite lock file. Archives may contain prompts and session metadata; treat
+them as private backups.
 
 Looper resumes the previous run by default. If you quit (or it stops) mid-run, the next start picks up at the
 same iteration and step. While a step is running, looper records its opencode session in `.looper-run.json`; on
 resume it reattaches to that session if it is still generating, otherwise it restarts the step in a fresh session.
-Both terminal UIs check the saved session during startup, including delegated work when its parent is idle.
+The TUI and the non-TTY runner both check the saved session during startup, including delegated work when its parent is idle.
 If work is still running and the checkpoint identifies its turn, Looper automatically reattaches and resumes
 the loop, clearing prior stop markers. No step selection or reattach action is needed. Unknown or stale status
 and incomplete checkpoints remain in recovery handling. Inspecting or reselecting the saved step preserves
@@ -75,7 +135,8 @@ session metadata, and child agents are saved in `.looper-agents.json` under the 
 
 ## History
 
-Press `h` in the TUI to browse the output of previous iterations from the current run. Use `Left`/`Right` to move
+Press `h` in the TUI to browse the output of previous iterations from the current run. While open, history replaces
+the map with a step list and an output pane. Use `Left`/`Right` to move
 between iterations, `Up`/`Down` to pick a step, and `Tab` to focus the output pane and scroll. Step output is
 refetched from opencode on demand; history is kept in memory for the current run only and is not written to disk.
 
@@ -121,7 +182,7 @@ useSessionIdle: false                # optional: use session idle status in reco
 validateResources: false             # optional: validate configured agents exist during startup
 prd: spec/beta-1                     # optional PRD directory; relative paths resolve from the repo dir
 terminalPhase: merged                # optional; the run stops once every story reaches this phase (default merged)
-mainBranch: main                     # optional; branch that derived published/merged phases are checked against (default main)
+mainBranch: main                     # optional; branch fetched for gate scripts and implemented-signal checks (default main)
 context: true                        # optional; see "Prompt context" below
 storyIdPattern: "^([a-z]+-[0-9]+[a-z]?)-"   # optional; overrides the default branch->story-id regex (see "Story gates" below)
 
@@ -188,8 +249,8 @@ The TTY rings once for newly gated requests by default. Set `LOOPER_PERMISSION_B
 - `expects` &mdash; optional; see "Outcome contract" below.
 - `setsPhase` &mdash; optional; see "Story gates" below.
 
-Migration note: the former top-level `vcsSummary` option and Changes panel are retired in favor of the consolidated
-Diff panel. Existing YAML containing `vcsSummary` still loads because unknown top-level keys are ignored, but the key
+Migration note: the former top-level `vcsSummary` option is retired; branch changes are summarized by the dock's
+Changes capsule. Existing YAML containing `vcsSummary` still loads because unknown top-level keys are ignored, but the key
 has no effect and should be removed.
 
 ### Prompt context
@@ -267,9 +328,10 @@ resolve against the repo dir, not the config dir:
 prd: spec/beta-1
 ```
 
-When configured, the TUI shows a PRD progress panel and the prompt context can include the structured `prd:`
-block above. Looper polls `prd.json` every few seconds and reports parse/read errors in the panel instead of
-failing the run.
+When configured, the dock's **Stories** capsule shows `done/total complete`, appending `+1 ✓` when exactly one
+story advanced this iteration or `⚠ +N` (failure accent) when more than one did; the inspector's Context tab
+carries the full details, and the prompt context can include the structured `prd:` block above. Looper polls
+`prd.json` every few seconds and shows `Stories · unavailable` on parse/read errors instead of failing the run.
 
 `prd.json` is a spec, nothing more. Looper reads `userStories[].{id,title,priority,dependsOn}` and ignores any
 `passes` flag; it never writes the file. Where a story actually stands lives in the phase ladder described next.
@@ -277,21 +339,17 @@ failing the run.
 ### Story phases
 
 Every story moves along one ladder: `building < implemented < reviewed < verified < published < merged`. Phases
-are stored per story in `.looper-story-state.json`; a story with no entry is `building`. Two phases are also
-derived from git, so a story cannot be stuck below what the repository proves:
+are stored per story in `.looper-story-state.json`; a story with no entry is `building`. Agents assert phases
+with `looper signal story-phase`, and steps with `expects:` enforce that outcome contract.
 
-- `published` &mdash; a branch whose name resolves to the story exists under `refs/remotes/origin/`.
-- `merged` &mdash; such a branch tip is an ancestor of `origin/<mainBranch>`.
-
-The **effective phase** is the higher of stored and derived. When git says more than the ledger, looper persists the
-upgrade (so deleting a branch after merge does not lose `merged`) and logs
-`[looper] story US-xxx: phase merged (derived from git)`. Gates, prompt context, story selection, stall detection,
-run termination, and `expects` all read the effective phase. Git failures never throw; they just yield no derived
-phase. Looper runs a best-effort `git fetch origin <mainBranch>` once per iteration boundary
-(`LOOPER_STORY_FETCH_TIMEOUT_MS`, default 15000, `0` disables).
+Git refs never determine a story's phase: squash merges, branch deletion, and empty branches make that
+inference unreliable. Gates, prompt context, story selection, stall detection, run termination, and `expects`
+all read the stored phase. Looper runs a best-effort `git fetch origin <mainBranch>` at iteration boundaries
+to keep refs current for gate scripts and signal preconditions (`LOOPER_STORY_FETCH_TIMEOUT_MS`, default
+15000; `0` disables). A missing phase signal is handled by outcome enforcement and stall detection.
 
 `terminalPhase:` (default `merged`) is the phase at which a story counts as complete. `mainBranch:` (default
-`main`) is the branch derived phases are checked against.
+`main`) is the branch fetched and used by the `implemented` signal's commit check.
 
 ### Story selection
 
@@ -371,8 +429,8 @@ A step's `gate:` skips that step (no opencode session is created) unless every c
   `phase` and `phaseBelow` bracket the window in which a step has work: `{phase: implemented, phaseBelow: reviewed}`
   runs Review exactly once per implementation.
 - The story a phase condition evaluates is the branch story if the current branch resolves to a PRD story, else the
-  engine's selected `next` story. With neither, the phase conditions pass (fail open) so a build step can run on
-  `main` and create the branch.
+  engine's selected `next` story. With neither, `phaseBelow` passes, while `phase` compares against `building`. A build step can omit `phase`
+  and use `phaseBelow: implemented` to run on `main` and create the branch.
 - `prdPasses: true` is accepted as a deprecated alias of `phase: implemented` and logs a warning at load time.
 - `script: "<bash>"` &mdash; the script is run via `bash -c` and must exit `0`. It gets the current branch and
   story id as `LOOPER_BRANCH`/`LOOPER_STORY_ID`, plus configured PRD paths as `LOOPER_PRD_DIR`,
@@ -407,7 +465,7 @@ the branch during its turn), else the selected `next` story. After the turn comp
    or past `expects`, and no `story-phase` signal for that story arrived during the step, the stored phase is
    reset to the phase just below `expects` and logged as `phase reset to <p> (new commits during <step>)`. The
    story was reworked, so the step has to re-prove the phase. An explicit signal during the step is the agent's
-   own re-proof and is never overridden; derived phases are unaffected.
+   own re-proof and is never overridden.
 2. **Decision.** Effective phase at or past `expects`: `done`. Otherwise the signals since step start for that
    story decide, **by what they say, not by how far the phase moved**: `blocked` ends the step as blocked;
    `no-op` and `adjudicate` end it as a no-op (reason logged); a `story-phase` to any phase *below `expects`*
@@ -425,7 +483,8 @@ the branch during its turn), else the selected `next` story. After the turn comp
 Looper generates the legal outcome commands for each `expects:` step from the ladder itself and injects them as
 `story.outcome` in the `<looper-context>` block, and the reminder in step 3 is built by the same function. **Do not
 restate the legal exits in a step prompt** — a hand-maintained list drifts from the engine and can instruct the
-agent to make a move the engine rejects.
+agent to make a move the engine rejects. Commands include an explicit story ID when known, so they still work
+after a merge returns to the main branch.
 
 A **blocked** step is not a failure. Its row shows `blocked: <reason>`, the resume pointer advances like a
 completion, later steps in the iteration see `<step>=blocked (<reason>)` in their prior-steps context, and when
@@ -471,27 +530,26 @@ story id. `blocked` and `no-op` may be storyless; `story-phase` may not. Every s
 - `implemented` &mdash; at least one commit on `HEAD` that is not on `origin/<mainBranch>` touches a path outside the
   PRD directory. Docs-only churn does not count. If `origin/<mainBranch>` cannot be resolved, the claim is accepted.
 - `published` &mdash; a branch for the story exists under `refs/remotes/origin/`; otherwise "push the branch first".
-- `merged` &mdash; after a best-effort fetch, a story branch tip must be an ancestor of `origin/<mainBranch>`. If no
-  branch for the story exists locally or remotely, the claim is accepted (it cannot be disproved).
+- `merged` &mdash; no Git precondition. The signal asserts that the merge succeeded; branch topology cannot
+  reliably establish this after squash merges or branch deletion.
 - `building`, `reviewed`, `verified` &mdash; no precondition.
-- No `story-phase` may set a phase below the story's git-derived phase: a merged story cannot be demoted.
+- A `story-phase` signal may demote any stored phase to repair an incorrect claim. Phases are never inferred from Git refs.
 
 A rejected claim exits `2` with the reason, so the agent sees why and can fix the underlying state instead of
 the ledger.
 
 ### Branch diff
 
-Whenever the current branch differs from the branch OpenCode detects as the repository's default, the TUI shows a
-compact `Diff` panel above the PRD panel summarizing the branch's diff against that default branch: total `+additions`,
-`-deletions`, and the number of changed files. Looper's polled branch snapshot is authoritative, while the data comes
+Whenever the current branch differs from the branch OpenCode detects as the repository's default, the **Changes**
+capsule in the dock at the bottom of the map summarizes the branch's diff against that default branch
+(`N files · +A −D`); the full details are in the inspector's Context tab (`b`). Looper's polled branch snapshot is authoritative, while the data comes
 live from OpenCode's own VCS API whenever its cached current branch agrees with that snapshot
 (`client.vcs.get` for the current/default branch and `client.vcs.diff` in branch mode): the diff uses merge-base
 semantics against the detected default branch and folds in committed, staged, unstaged, and untracked worktree changes,
-so the totals match what OpenCode reports. Only while OpenCode's cached branch lags Looper's watcher does the panel use a
+so the totals match what OpenCode reports. Only while OpenCode's cached branch lags Looper's watcher does the capsule use a
 narrow read-only Git fallback with the same merge-base-to-working-tree scope. A feature branch with no changes shows
-`+0 -0 0 files`. The panel is absent
-from the layout while checked out on the default branch itself, and refreshes at startup, on branch switches, and at
-each step's begin and finish. There is nothing to configure &mdash; the default branch is whatever OpenCode detects.
+`0 files · +0 −0`. The capsule stays dim while there is nothing to show, including while checked out on the default
+branch itself, and refreshes at startup, on branch switches, and at each step's begin and finish. There is nothing to configure &mdash; the default branch is whatever OpenCode detects.
 
 ### Session titles
 
@@ -509,7 +567,7 @@ Looper writes the managed `looper-title` agent into opencode's global agent dire
 
 By default looper starts its own OpenCode server. Set `opencode.serverUrl` to connect to an existing server instead. CLI `--attach=<url>` overrides the config value; `--attach` without a URL uses the config value, then `OPENCODE_ATTACH_URL`, then `http://127.0.0.1:4096`.
 
-When attached to an existing server, looper checks the server's active location when the SDK exposes it and stops early if it points at a different project directory. If the server cannot provide location data, attach proceeds with the existing managed-agent validation.
+An attached server may have a different working directory: Looper sends the target repository directory with SDK calls. Managed-agent validation still runs.
 
 Set `recovery.snapshots` to log safe session/message boundaries before retry/restart (`before-retry`) or before retry/restart/skip (`before-retry-and-skip`). This is diagnostic only: looper does not call opencode revert APIs or roll back user file changes automatically.
 
@@ -539,10 +597,11 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_CONFIG_DIR` &mdash; override config dir (default: auto-detect `.looper`, `.local/looper`, `.local/.looper`; otherwise `$PWD/.looper`)
 - `LOOPER_REPO_DIR` &mdash; override repo dir passed to OpenCode (default: `$PWD`)
 - `LOOPER_DEBUG_EVENTS=1` &mdash; verbose OpenCode event logging
+- `LOOPER_REDUCED_MOTION=1` &mdash; start with the constellation's animation off (toggle with `m`)
 - `LOOPER_ATTACH_VALIDATION_TIMEOUT_MS` &mdash; timeout for attach-mode managed-resource validation (default: `10000`)
 - `LOOPER_BRANCH_DIFF_TIMEOUT_MS` &mdash; timeout for one live Diff-panel collection (default: `10000`)
 - `LOOPER_GATE_SCRIPT_TIMEOUT_MS` &mdash; timeout for a step's `gate.script` (default: `30000`)
-- `LOOPER_STORY_FETCH_TIMEOUT_MS` &mdash; timeout for the per-iteration `git fetch origin <mainBranch>` behind derived phases (default: `15000`; `0` disables the fetch)
+- `LOOPER_STORY_FETCH_TIMEOUT_MS` &mdash; timeout for the iteration-boundary `git fetch origin <mainBranch>` used by gates and signal checks (default: `15000`; `0` disables the fetch). Fetches cannot read terminal input, and timeout cleanup stops Git and its helpers
 - `LOOPER_OUTCOME_REMINDER_MIN_MS` &mdash; minimum remaining step budget for an `expects:` reminder turn; below it the step is blocked instead (default: `60000`)
 - `LOOPER_PRD_FLIP_THRESHOLD` &mdash; signal-sourced demotions of one story before adjudication routes (default: `2`)
 - `LOOPER_STEP_ATTEMPT_MAX` &mdash; consecutive non-advancing outcomes (hand-back or blocked) one step may report for the same story before escalating (default: `3`; `0` disables)
@@ -570,9 +629,9 @@ The e2e test (`test/e2e.test.ts`) drives a real OpenCode server with `openai/gpt
 - `LOOPER_FAILURE_RETRY_JITTER` &mdash; delay jitter ratio 0–1 (default: `0.2`; `0` disables)
 - `LOOPER_TIMEOUT_RESTART_MAX` &mdash; times one step may be restarted with a fresh budget by its own timeout watchdog before the run halts (default: `3`; `0` disables). Fail-closed paths that suppress retry are never restarted, whatever the budget.
 
-## Experimental agent UI
+## Agent UI
 
-Run `LOOPER_UI=constellation looper` for agent bubbles with gentle pulses, flowing gradients, and simultaneous activity summaries. Double-click a bubble or press Enter to inspect its full output, model, variant, prompt, and project context. Preview without a server with `bun run demo:constellation`. See [the Constellation guide](docs/constellation.md) for controls and behavior.
+The TUI is a constellation of agent bubbles with gentle pulses, flowing gradients, and simultaneous activity summaries. Double-click a bubble, press `o`, or press `Enter` once the run has started to open the inspector with its full output, model, variant, prompt, and project context. Preview without a server with `bun run demo:constellation`. See [the Constellation guide](docs/constellation.md) for controls and behavior.
 
 
 While the TUI is active, runtime warnings and errors appear in **Diagnostics** instead of printing over the screen. Press **l** or click the footer indicator to read them; **Esc** closes the window.

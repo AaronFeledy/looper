@@ -20,7 +20,6 @@ import {
 } from "../lib/output-follow.ts";
 import { createToolBlock, toolOutputBlockKey } from "./tool-block.ts";
 import { childActivitySummary, stepActivitySummary } from "../presentation/tui/agent-activity.ts";
-import { constellationReducedMotion } from "../config/tunables.ts";
 import { flowingActivityText } from "./activity-text.ts";
 import { createWheelScrollAcceleration } from "./wheel-scroll.ts";
 
@@ -310,9 +309,9 @@ export function createAgentStream(renderer: CliRenderer, state: LoopState): Scro
   let activityText = "";
   let activityRunning = false;
   const paintActivity = () => {
-    // Let the native row truncate after layout, including its first classic-UI frame.
+    // Let the native row truncate after layout, including its first frame.
     const text = activityText;
-    const animate = activityRunning && !(state.constellation?.reducedMotion ?? constellationReducedMotion());
+    const animate = activityRunning && !state.constellation.reducedMotion;
     activity.content = animate ? ansiToStyledText(flowingActivityText(text, activityPhase)) : text;
   };
   const refreshActivity = (output: SelectedOutput) => {

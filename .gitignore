@@ -37,3 +37,7 @@ logs
 # Recreates on the next locked write; never commit it (or its -journal/-wal/-shm sidecars).
 .looper-state-lock.sqlite
 .looper-state-lock.sqlite-*
+.looper-run-lock.sqlite
+.looper-run-lock.sqlite-*
+.looper-run-owner.json
+.looper-archive/

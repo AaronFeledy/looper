@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("startBackgroundAgentStreamer selection", () => {
-  test("fetches messages when the selected background row is nested at depth two", async () => {
+  test("fetches messages when the inspected background row is nested at depth two", async () => {
     // Given
     const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
     syncStepAgentTree(state, 0, [
@@ -35,6 +35,7 @@ describe("startBackgroundAgentStreamer selection", () => {
       { sessionID: "ses_grand", parentSessionID: "ses_child", startedAt: 2, depth: 2, activity: "busy" },
     ]);
     selectStepListRow(state, 2);
+    state.constellation.detailsOpen = true;
     const calls: string[] = [];
 
     // When
@@ -50,11 +51,12 @@ describe("startBackgroundAgentStreamer selection", () => {
     streamer.stop();
   });
 
-  test("does not fetch messages when the selected session is not a registered background agent", async () => {
+  test("does not fetch messages when the inspected session is not a registered background agent", async () => {
     // Given
     const state = createLoopState({ maxIterations: 1, stepNames: ["build"] });
     state.selectedStepIndex = 0;
     state.selectedBackgroundSessionID = "ses_unknown";
+    state.constellation.detailsOpen = true;
     const calls: string[] = [];
 
     // When

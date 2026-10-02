@@ -40,10 +40,6 @@ function gitLines(stdout: string): string[] {
     .filter((line) => line.length > 0);
 }
 
-function stripOriginPrefix(ref: string): string {
-  return ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
-}
-
 /**
  * `implemented` requires at least one commit on HEAD not on origin/<mainBranch>
  * that touches a path outside the PRD dir (per-commit path list via `git log`,
@@ -77,30 +73,23 @@ async function assertImplementedPrecondition(
   }
 }
 
-async function listStoryRefs(
+async function listRemoteStoryRefs(
   repoDir: string,
   storyId: string,
   pattern: string | undefined,
   storyIds: readonly string[] | undefined,
-): Promise<{ readonly localOrRemote: string[]; readonly remote: string[] }> {
-  const refsOut = await gitStdout(repoDir, [
-    "for-each-ref",
-    "--format=%(refname:short)",
-    "refs/heads",
-    "refs/remotes/origin",
-  ]);
-  if (refsOut === undefined) return { localOrRemote: [], remote: [] };
-  const localOrRemote: string[] = [];
+): Promise<string[]> {
+  const prefix = "refs/remotes/origin/";
+  const refsOut = await gitStdout(repoDir, ["for-each-ref", "--format=%(refname)", prefix]);
+  if (refsOut === undefined) return [];
   const remote: string[] = [];
   const effectivePattern = pattern ?? DEFAULT_STORY_ID_PATTERN;
   for (const ref of gitLines(refsOut)) {
-    const nameForId = stripOriginPrefix(ref);
-    const id = storyIdFromBranch(nameForId, effectivePattern, storyIds ?? [storyId]);
-    if (id !== storyId) continue;
-    localOrRemote.push(ref);
-    if (ref.startsWith("origin/")) remote.push(ref);
+    if (!ref.startsWith(prefix)) continue;
+    const id = storyIdFromBranch(ref.slice(prefix.length), effectivePattern, storyIds ?? [storyId]);
+    if (id === storyId) remote.push(ref);
   }
-  return { localOrRemote, remote };
+  return remote;
 }
 
 /** `published`: a story branch must exist under refs/remotes/origin/. */
@@ -109,7 +98,7 @@ async function assertPublishedPrecondition(
   storyId: string,
   runtime: StoryPhaseClaimRuntime,
 ): Promise<void> {
-  const { remote } = await listStoryRefs(repoDir, storyId, runtime.storyIdPattern, runtime.storyIds);
+  const remote = await listRemoteStoryRefs(repoDir, storyId, runtime.storyIdPattern, runtime.storyIds);
   if (remote.length === 0) {
     throw new UsageError(
       `cannot claim published for ${storyId}: no branch for this story under refs/remotes/origin/; push the branch first`,

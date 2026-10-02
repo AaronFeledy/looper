@@ -1,5 +1,6 @@
 import { startAgentTrailPersistence } from "./agent-trail.ts";
-import { createAgentTrailStore } from "../persistence/agent-trail-store.ts";
+import { protectPrdStartup } from "./prd-startup.ts";
+import { acquireRunLease } from "../persistence/run-lease.ts";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 
 import type { Options } from "./args.ts";
@@ -22,11 +23,8 @@ import { createAdjudicationStore, type AdjudicationStore } from "../persistence/
 import { createAdjudicationConfig } from "../engine/adjudication-routing.ts";
 import { createFallbackEngineHooks } from "./fallback-engine-hooks.ts";
 import { createStoryStateStore, type StoryStateStore } from "../persistence/story-state-store.ts";
-import { createStepAttemptStore } from "../persistence/step-attempt-store.ts";
-import { clearPermissionAudit } from "../opencode/permission-audit.ts";
 import { createRunControl, type RunControl } from "../engine/run-control.ts";
 import { installProcessSignals } from "../tui/process-lifecycle.ts";
-import { clearSignalLog } from "./signal-log.ts";
 import { prdIndexPath } from "./prd.ts";
 import { createStoryPhaseResolver } from "../engine/story-phases.ts";
 import type { StoryPhase } from "./story-state-files.ts";
@@ -84,6 +82,7 @@ export async function runNonTty({
   contextPolicy,
   currentBranch,
 }: FallbackOptions): Promise<void> {
+  using runLease = acquireRunLease(configDir);
   const abort = new AbortController();
   const control = createRunControl();
   let closeServer: (() => Promise<void>) | undefined;
@@ -95,21 +94,13 @@ export async function runNonTty({
     closing ??= closeServer?.();
   });
   await using shutdown = { [Symbol.asyncDispose]: async () => { await closing; } };
+  const startup = await protectPrdStartup({ configDir, repoDir, prdDir, attachUrl, options, interactive: false, signal: abort.signal, ownership: runLease });
+  if (abort.signal.aborted) return;
   const runStateStore = createRunStateStore({ configDir });
   const adjudicationStore = createAdjudicationStore({ configDir });
   const storyStateStore = createStoryStateStore({ configDir });
-  runStateStore.clearStopFiles();
-  if (options.fresh) {
-    createAgentTrailStore(configDir).clear();
-    runStateStore.clearRunArtifacts();
-    adjudicationStore.clearHistory();
-    adjudicationStore.clearMarker();
-    adjudicationStore.clearSession();
-    if (options.resetStories) storyStateStore.clear();
-    clearSignalLog(configDir);
-    clearPermissionAudit(configDir);
-    createStepAttemptStore({ configDir }).clear();
-  }
+  if (options.fresh) await startup.fresh();
+  else runStateStore.clearStopFiles();
 
   process.stdout.write(divider("Looper · OpenCode step runner", ui.magenta));
   process.stdout.write(`${label("Mode", "non-TTY fallback")}\n`);
@@ -123,20 +114,21 @@ export async function runNonTty({
   closeServer = () => server.close();
   if (abort.signal.aborted) return;
   const client = createOpencodeClient({ baseUrl: server.url });
-
-  if (attachUrl !== undefined) {
-    await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
-    await assertManagedOpencodeResourcesLoaded({
-      client,
-      repoDir,
-      serverUrl: server.url,
-      requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
-      signal: abort.signal,
-    });
-  }
-  if (validateResources) {
-    await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)), signal: abort.signal });
-  }
+  await startup.acceptServer(server.url, async () => {
+    if (attachUrl !== undefined) {
+      await assertAttachedServerLocation({ client, repoDir, serverUrl: server.url });
+      await assertManagedOpencodeResourcesLoaded({
+        client,
+        repoDir,
+        serverUrl: server.url,
+        requiredNames: LOOPER_MANAGED_RESOURCES.map((resource) => resource.name),
+        signal: abort.signal,
+      });
+    }
+    if (validateResources) {
+      await assertConfiguredResourcesExist({ client, repoDir, agents: configuredStepAgents(loadSteps(configDir)), signal: abort.signal });
+    }
+  });
   await runNonTtyIterations({
     control,
     options,
@@ -257,7 +249,6 @@ export async function runNonTtyIterations({
     ...(configuredPrdFlipThreshold !== undefined ? { configuredThreshold: configuredPrdFlipThreshold } : {}),
   });
   let currentState: LoopState | null = null;
-  if (options.fresh) createAgentTrailStore(configDir).clear();
   const agentTrail = startAgentTrailPersistence(configDir, () => currentState);
   const detachMemoryPressure = installMemoryPressureTrimmer(() => currentState);
   using hooks = createFallbackEngineHooks(currentBranch, control);

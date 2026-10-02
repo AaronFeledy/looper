@@ -1,4 +1,5 @@
-import type { LoopState } from "../../lib/state.ts";
+import { prdPassingGain, type GithubPr, type LoopState } from "../../lib/state.ts";
+import { ciCounts } from "./ci-progress.ts";
 
 export type DockPanel = {
   id: "changes" | "pr" | "stories" | "plan";
@@ -9,6 +10,18 @@ export type DockPanel = {
   continuous: boolean;
 };
 
+/** Short review-state suffixes the former PR sidebar showed as their own rows. */
+function prReviewNotes(pr: GithubPr): string[] {
+  const notes: string[] = [];
+  if (pr.mergeable === "conflicting") notes.push("conflicts");
+  const bugbot = pr.bugbot;
+  if (bugbot?.state === "pending") notes.push("bugbot running");
+  else if (bugbot?.state === "error") notes.push("bugbot error");
+  else if (bugbot?.state === "issues") notes.push(bugbot.unresolved === undefined ? "bugbot issues" : `bugbot ${bugbot.unresolved} unresolved`);
+  else if (bugbot?.state === "clean") notes.push("bugbot clean");
+  return notes;
+}
+
 /** Compare meaningful values, not watcher object identity or polling timestamps. */
 export function constellationDockPanels(state: LoopState): DockPanel[] {
   const { branchDiff: diff, github, prd, todos } = state;
@@ -16,7 +29,7 @@ export function constellationDockPanels(state: LoopState): DockPanel[] {
   const pr = github.kind === "pr" ? github.pr : undefined;
   const checking = !!pr && (pr.ciPending > 0 || pr.ciOverall === "pending");
   const completed = todos.filter(todo => todo.status === "completed").length;
-  const counts = pr ? "◷ " + pr.ciPending + " ✓ " + pr.ciPassing + " ✗ " + pr.ciFailing + (pr.ciNeutral ? " ~ " + pr.ciNeutral : "") : "";
+  const gain = prdPassingGain(prd, state.prdIterationBaseline);
   return [
     {
       id: "changes",
@@ -29,7 +42,7 @@ export function constellationDockPanels(state: LoopState): DockPanel[] {
     },
     {
       id: "pr",
-      content: pr ? "PR #" + pr.number + " · " + (checking ? "CI " + counts : pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft · " + pr.ciOverall : pr.ciOverall)
+      content: pr ? ["PR #" + pr.number, checking ? "CI " + ciCounts(pr) : pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft · " + pr.ciOverall : pr.ciOverall, ...prReviewNotes(pr)].join(" · ")
         : github.kind === "error" ? "PR · unavailable" : "PR · none",
       active: !!pr || github.kind === "error",
       tone: checking ? "attention" : github.kind === "error" ? "attention"
@@ -44,10 +57,13 @@ export function constellationDockPanels(state: LoopState): DockPanel[] {
     },
     {
       id: "stories",
-      content: prd.kind === "ok" ? "Stories  " + (prd.total - prd.remaining) + "/" + prd.total + " complete" : prd.kind === "error" ? "Stories · unavailable" : "Stories  ·",
+      // The former PRD sidebar flagged one advance per iteration with ✓ and more than one with ⚠, since a
+      // single iteration should complete at most one story.
+      content: prd.kind === "ok" ? "Stories  " + (prd.total - prd.remaining) + "/" + prd.total + " complete" + (gain >= 2 ? " · ⚠ +" + gain : gain === 1 ? " · +1 ✓" : "")
+        : prd.kind === "error" ? "Stories · unavailable" : "Stories  ·",
       active: prd.kind === "ok" ? prd.total > 0 : prd.kind === "error",
-      tone: prd.kind === "error" ? "attention" : prd.kind === "ok" && prd.remaining === 0 ? "success" : "activity",
-      key: JSON.stringify([prd.kind, prd.kind === "ok" ? [prd.remaining, prd.total, prd.terminal] : prd.kind === "error" ? prd.message : null]),
+      tone: prd.kind === "error" ? "attention" : gain >= 2 ? "failure" : prd.kind === "ok" && prd.remaining === 0 ? "success" : "activity",
+      key: JSON.stringify([prd.kind, prd.kind === "ok" ? [prd.remaining, prd.total, prd.terminal, gain] : prd.kind === "error" ? prd.message : null]),
       continuous: false,
     },
     {

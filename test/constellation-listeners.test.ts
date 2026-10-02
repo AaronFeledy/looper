@@ -32,7 +32,7 @@ test("the complete constellation UI fits a finite listener budget and releases e
       renderer.root.add(root);
       await setup.flush();
       const mountedCount = renderer.listenerCount("selection");
-      expect(mountedCount - baseline).toBe(12);
+      expect(mountedCount - baseline).toBe(11);
       expect(renderer.getMaxListeners()).toBe(16);
       expect(mountedCount).toBeLessThanOrEqual(renderer.getMaxListeners());
       for (const modal of ["helpVisible", "promptModalVisible", "configModalVisible"] as const) {

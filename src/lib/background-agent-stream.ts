@@ -11,9 +11,9 @@ type Target = { sessionID: string; stepIndex: number; owner: BackgroundAgent | L
 type ActiveStream = { target: Target; timer: ReturnType<typeof setInterval>; controller: AbortController; reading: boolean };
 
 function selectedTarget(state: LoopState): Target | null {
-  // In the constellation, selecting a bubble is cheap. Full transcripts load when inspected.
-  if (state.constellation && (!state.constellation.detailsOpen || state.historyView !== null)) return null;
-  const stepIndex = state.selectedStepIndex ?? (state.constellation ? state.activeStepIndex : null);
+  // Selecting a bubble is cheap. Full transcripts load when inspected.
+  if (!state.constellation.detailsOpen || state.historyView !== null) return null;
+  const stepIndex = state.selectedStepIndex ?? state.activeStepIndex;
   if (stepIndex === null) return null;
   const step = displayStepAt(state, stepIndex);
   if (!step) return null;
@@ -23,7 +23,7 @@ function selectedTarget(state: LoopState): Target | null {
     return owner ? { sessionID, stepIndex, owner, background: true } : null;
   }
   // Parents already have a live output buffer; fetch only recent metadata for their inspector.
-  return (state.constellation || stepIndex < 0) && step.sessionID ? { sessionID: step.sessionID, stepIndex, owner: step, background: false } : null;
+  return step.sessionID ? { sessionID: step.sessionID, stepIndex, owner: step, background: false } : null;
 }
 
 export function startBackgroundAgentStreamer({
@@ -56,10 +56,8 @@ export function startBackgroundAgentStreamer({
       );
       if (stopped || active !== lease || lease.controller.signal.aborted || selectedTarget(state)?.owner !== target.owner || selectedTarget(state)?.sessionID !== target.sessionID) return;
       if (result.error || !result.data) throw new Error("The server did not return session messages.");
-      if (state.constellation) {
-        target.owner.inspection = inspectSessionMessages(target.sessionID, result.data);
-        if (target.background) target.owner.promptText = firstSessionPrompt(result.data, target.sessionID);
-      }
+      target.owner.inspection = inspectSessionMessages(target.sessionID, result.data);
+      if (target.background) target.owner.promptText = firstSessionPrompt(result.data, target.sessionID);
       if (target.background) replaceBuffer(target, renderSession(result.data));
       else if (target.stepIndex < 0) {
         const rendered = renderSession(result.data, new Set((target.owner as LoopStep).looperMessageIDs ?? []));
@@ -72,10 +70,8 @@ export function startBackgroundAgentStreamer({
     } catch (error) {
       if (stopped || active !== lease || lease.controller.signal.aborted || selectedTarget(state)?.owner !== target.owner || selectedTarget(state)?.sessionID !== target.sessionID) return;
       const message = error instanceof Error ? error.message : String(error);
-      if (state.constellation) {
-        target.owner.inspection = { ...target.owner.inspection, sessionID: target.sessionID, status: "error", error: message };
-        notify();
-      }
+      target.owner.inspection = { ...target.owner.inspection, sessionID: target.sessionID, status: "error", error: message };
+      notify();
       if (process.env.LOOPER_DEBUG_EVENTS === "1") console.error(`[looper] background agent stream: refresh failed: ${message}`);
     } finally { lease.reading = false; }
   };
@@ -107,11 +103,9 @@ export function startBackgroundAgentStreamer({
     };
     lease.timer.unref?.();
     active = lease;
-    if (state.constellation) {
-      const previous = target.owner.inspection?.sessionID === target.sessionID ? target.owner.inspection : undefined;
-      target.owner.inspection = { ...previous, sessionID: target.sessionID, status: "loading" };
-      notify();
-    }
+    const previous = target.owner.inspection?.sessionID === target.sessionID ? target.owner.inspection : undefined;
+    target.owner.inspection = { ...previous, sessionID: target.sessionID, status: "loading" };
+    notify();
     void refresh(lease);
   };
 

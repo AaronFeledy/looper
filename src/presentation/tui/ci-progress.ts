@@ -1,4 +1,4 @@
-import type { GithubPr, GithubStatus } from "../lib/state.ts";
+import type { GithubPr, GithubStatus } from "../../lib/state.ts";
 
 export function ciIsRunning(status: GithubStatus): boolean {
   // GitHub can report an overall failure while other checks are still running.

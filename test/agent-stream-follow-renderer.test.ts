@@ -33,6 +33,8 @@ function createScrollableState(): LoopState {
   if (step === undefined) throw new Error("test state must contain the build step");
   state.selectedStepIndex = 0;
   state.focusedPane = "output";
+  // Keyboard scrolling reaches the transcript through the open inspector.
+  state.constellation.detailsOpen = true;
   step.outputLines = Array.from({ length: 30 }, (_, index) => `output line ${index}`);
   step.outputLineTimes = step.outputLines.map(() => 1);
   return state;

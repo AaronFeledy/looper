@@ -1,4 +1,4 @@
-import { ciIsRunning } from "./ci-progress.ts";
+import { ciIsRunning } from "../presentation/tui/ci-progress.ts";
 import { constellationDockPanels } from "../presentation/tui/constellation-dock.ts";
 import { createDockFeedback } from "./dock-feedback.ts";
 import { ArrowScrollBoxRenderable } from "./arrow-scroll-box.ts";
@@ -12,7 +12,7 @@ import { AgentBubbleRenderable, activityRing } from "./agent-bubble.ts";
 import { createAgentInspector } from "./agent-inspector.ts";
 import { modalFocusWinner } from "./permission-gate.ts";
 import { createAgentStream } from "./agent-stream.ts";
-import { createStepList, durationSecondsFrom } from "./step-list.ts";
+import { createStepList, durationSecondsFrom, LIST_WIDTH } from "./step-list.ts";
 import { displayWidth, truncateDisplay } from "./text-layout.ts";
 import { flowingActivityText } from "./activity-text.ts";
 import { buildTodoPanelLines } from "./todo-panel.ts";
@@ -34,13 +34,21 @@ const isMoving = (node: AgentBubble) => node.status === "running";
 export function constellationLinks(scene: ConstellationScene, frame: number, motion: boolean, cache: WireCache): string {
   const cells = new Map<string, { mask: number; active: boolean; glow: number }>();
   routeConstellationLinks(scene, cache);
+  const direction = (from: Point, to: Point) => to.y < from.y ? 1 : to.x > from.x ? 2 : to.y > from.y ? 4 : 8;
+  const step: Record<number, Point> = { 1: { x: 0, y: -1 }, 2: { x: 1, y: 0 }, 4: { x: 0, y: 1 }, 8: { x: -1, y: 0 } };
+  const inBubble = (p: Point) => scene.bubbles.some(box => p.x >= box.x && p.x < box.x + box.width && p.y >= box.y && p.y < box.y + box.height);
+  // Endpoints attach to the card they touch. Without this, a branch that
+  // starts on the row directly under its parent reads as a detached line.
+  const attach = (point: Point, inward: number) => [1, 2, 4, 8].reduce((mask, side) =>
+    side !== inward && inBubble({ x: point.x + step[side]!.x, y: point.y + step[side]!.y }) ? mask | side : mask, 0);
   for (const { points, active } of cache.paths) {
-    const direction = (from: Point, to: Point) => to.y < from.y ? 1 : to.x > from.x ? 2 : to.y > from.y ? 4 : 8;
     points.forEach((point, i) => {
       const key = `${point.x}:${point.y}`;
       let mask = 0;
       if (i > 0) mask |= direction(point, points[i - 1]!);
       if (i + 1 < points.length) mask |= direction(point, points[i + 1]!);
+      if (points.length > 1 && i === 0) mask |= attach(point, direction(point, points[1]!));
+      if (points.length > 1 && i === points.length - 1) mask |= attach(point, direction(point, points[i - 1]!));
       const prior = cells.get(key);
       const glow = active ? motion ? pulse(i / 7 - frame / 10) : 0.45 : 0;
       cells.set(key, { mask: mask | (prior?.mask ?? 0), active: active || prior?.active === true, glow: Math.max(glow, prior?.glow ?? 0) });
@@ -100,8 +108,9 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
   const planText = new TextRenderable(renderer, { id: "constellation-plan-text", width: "100%", wrapMode: "none", content: "", fg: "#c7d4df" });
   plan.add(planText);
   stage.add(heading); stage.add(legend); stage.add(field); stage.add(plan); stage.add(dock);
-  const history = createStepList(renderer, state);
-  history.visible = false;
+  // The step list sizes itself for a column; give it a fixed-width lane in this row.
+  const history = new BoxRenderable(renderer, { id: "constellation-history", width: LIST_WIDTH, height: "100%", flexShrink: 0, flexDirection: "column", visible: false });
+  history.add(createStepList(renderer, state));
   const stream = createAgentStream(renderer, state);
   stream.visible = false;
   host.add(history); host.add(stage);
@@ -131,11 +140,11 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
       const stageWidth = host.width || renderer.width;
       stage.width = stageWidth;
       if (inHistory) { renderer.requestRender(); return; }
-      plan.visible = state.constellation?.planOpen === true;
+      plan.visible = state.constellation.planOpen === true;
       plan.height = Math.max(3, Math.min(8, state.todos.length + 2, Math.floor(renderer.height / 3)));
       plan.title = `Work plan · ${state.steps[state.activeStepIndex ?? -1]?.name ?? "latest agent"} · i close · ↑↓ scroll`;
       planText.content = buildTodoPanelLines(state.todos, stageWidth - 4).map((line) => line.content).join("\n") || "No work plan reported yet.";
-      plan.scrollTop = state.constellation?.planScroll ?? 0;
+      plan.scrollTop = state.constellation.planScroll ?? 0;
       let nodes = constellationAgents(state);
       const visible = visibleConstellationAgents(nodes);
       let selectedNode = nodes.find(node => node.selected);
@@ -148,7 +157,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
         if (selectedNode) { selectConstellationAgent(state, selectedNode); nodes = constellationAgents(state); }
       }
       const width = Math.max(16, stageWidth - 2);
-      const motion = !state.constellation?.reducedMotion;
+      const motion = !state.constellation.reducedMotion;
       const target = layoutConstellation(nodes, width, constellationNextIteration(state));
       const viewportHeight = Math.max(1, field.viewport.height || renderer.height - 5);
       if (lastScope !== state.steps) {
@@ -328,7 +337,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
             onMouseUp(event) {
               if (event.button !== 0 || event.type !== "up" || modalFocusWinner(state) !== "none") return;
               if (i < 3) openAgentInspector(state, "context");
-              if (i === 3 && state.constellation) { state.constellation.planOpen = !state.constellation.planOpen; state.focusedPane = "steps"; notify(); }
+              if (i === 3) { state.constellation.planOpen = !state.constellation.planOpen; state.focusedPane = "steps"; notify(); }
             } });
           const text = new TextRenderable(renderer, { id: `constellation-context-text-${i}`, width: "100%", height: 1, fg: "#95aaba", truncate: true, content: "" });
           box.add(text); dock.add(box); capsule = { box, text }; capsules.push(capsule);
@@ -359,7 +368,7 @@ export function createConstellationView(renderer: CliRenderer, state: LoopState)
   host.on(LayoutEvents.RESIZED, paint);
   const timer = setInterval(() => {
     if (state.historyView !== null) return;
-    const animate = !state.constellation?.reducedMotion && modalFocusWinner(state) === "none" && (constellationAgents(state).some(isMoving) || ciIsRunning(state.github) || dockAnimating);
+    const animate = !state.constellation.reducedMotion && modalFocusWinner(state) === "none" && (constellationAgents(state).some(isMoving) || ciIsRunning(state.github) || dockAnimating);
     const now = Date.now();
     const moving = layoutMotion.isTransitioning();
     if (now - lastTimedPaint < (moving ? 40 : animate ? 80 : 1_000)) return;

@@ -35,16 +35,16 @@ export function comparePhase(a: StoryPhase, b: StoryPhase): number {
 }
 
 function parseStoryState(content: string | null): StoryStateFile {
-  if (content === null) return { stories: {} };
+  if (content === null) return { stories: Object.create(null) };
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
-    return { stories: {} };
+    return { stories: Object.create(null) };
   }
-  if (!isRecord(parsed) || !isRecord(parsed["stories"])) return { stories: {} };
+  if (!isRecord(parsed) || !isRecord(parsed["stories"])) return { stories: Object.create(null) };
 
-  const stories: Record<string, StoryStateEntry> = {};
+  const stories: Record<string, StoryStateEntry> = Object.create(null);
   for (const [storyId, value] of Object.entries(parsed["stories"])) {
     if (storyId.length === 0 || !isRecord(value)) continue;
     const phase = value["phase"];
@@ -62,7 +62,7 @@ function readStoryState(): StoryStateFile {
     return parseStoryState(tolerantRead(storyStatePath()));
   } catch {
     // no-excuse-ok: catch -- story state is a tolerant cache; unreadable state is equivalent to an empty map
-    return { stories: {} };
+    return { stories: Object.create(null) };
   }
 }
 

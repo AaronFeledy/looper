@@ -95,6 +95,9 @@ export function legalOutcomeCommands(input: {
   readonly storyId?: string;
 }): readonly OutcomeCommand[] {
   const story = input.storyId ?? "this story";
+  // The step may have returned to main (for example after merging the PR).
+  // Quote the known ID so the command remains usable independently of the branch.
+  const storyArg = input.storyId === undefined ? "" : ` --story '${input.storyId.replaceAll("'", "'\"'\"'")}'`;
   const handbackTargets = lowerPhases(input.expects);
   const handbackArg =
     handbackTargets.length === 0
@@ -104,23 +107,23 @@ export function legalOutcomeCommands(input: {
         : `<${handbackTargets.join("|")}>`;
   return [
     {
-      command: `looper signal story-phase ${input.expects}`,
+      command: `looper signal story-phase ${input.expects}${storyArg}`,
       when: `this step's work is complete and committed: ${story} is now at ${input.expects}`,
     },
     ...(handbackArg === undefined
       ? []
       : [
           {
-            command: `looper signal story-phase ${handbackArg} --reason "<defect>"`,
+            command: `looper signal story-phase ${handbackArg} --reason "<defect>"${storyArg}`,
             when: `attempted, but ${story} did not reach ${input.expects}; name the defect so the next pass can fix it`,
           },
         ]),
     {
-      command: `looper signal blocked --reason "<what stopped you>"`,
+      command: `looper signal blocked --reason "<what stopped you>"${storyArg}`,
       when: "you could not proceed at all (environment, permissions, missing input)",
     },
     {
-      command: `looper signal no-op --reason "<why>"`,
+      command: `looper signal no-op --reason "<why>"${storyArg}`,
       when: "there was legitimately nothing for this step to do",
     },
   ];

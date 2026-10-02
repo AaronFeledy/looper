@@ -484,6 +484,13 @@ describe("engine-generated outcome commands", () => {
     expect(block).toContain('looper signal story-phase <building|implemented|reviewed> --reason "<defect>"');
   });
 
+  test("outcome commands name the selected story even on main", () => {
+    const block = buildLooperContext(ALL_ON, baseInput({ story: {
+      branch: "main", next: { id: "US-649" }, expects: "implemented",
+    } }));
+    expect(block).toContain("looper signal story-phase implemented --story 'US-649'");
+  });
+
   test("omits the outcome block entirely for a step without expects", () => {
     const block = buildLooperContext(
       ALL_ON,

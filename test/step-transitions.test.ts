@@ -84,14 +84,17 @@ describe("finalizeStepRow", () => {
     expect(s.activeStepIndex).toBeNull();
   });
 
-  test("clears background-agent rows and their selection", () => {
+  test("retires background-agent rows as idle satellites and keeps their selection", () => {
     const s = state(["build"]);
     beginStepRun(s, 0);
     syncStepBackgroundAgents(s, 0, [{ sessionID: "ses_a", startedAt: 1 }]);
+    s.selectedStepIndex = 0;
     s.selectedBackgroundSessionID = "ses_a";
     finalizeStepRow(s, 0, "done");
-    expect(s.steps[0]!.backgroundAgents).toHaveLength(0);
-    expect(s.selectedBackgroundSessionID).toBeNull();
+    expect(s.steps[0]!.backgroundAgents).toHaveLength(1);
+    expect(s.steps[0]!.backgroundAgents[0]!.activity).toBe("idle");
+    expect(s.steps[0]!.backgroundAgents[0]!.finishedAt).toBeDefined();
+    expect(s.selectedBackgroundSessionID).toBe("ses_a");
   });
 });
 

@@ -1,6 +1,7 @@
 import { comparePhase, type StoryPhase } from "../lib/story-state-files.ts";
 import { readPrdStories, type PrdStory } from "../lib/prd.ts";
 import { storyFetchTimeoutMs } from "../config/tunables.ts";
+import { fetchGitMain } from "../platform/git-fetch.ts";
 
 const DEFAULT_TERMINAL_PHASE: StoryPhase = "merged";
 const DEFAULT_MAIN_BRANCH = "main";
@@ -149,7 +150,7 @@ export function createStoryPhaseResolver(input: CreateStoryPhaseResolverInput): 
     const stories = readStories(input.prdIndex);
     if (stories === undefined) return undefined;
 
-    const phases: Record<string, StoryPhase> = {};
+    const phases: Record<string, StoryPhase> = Object.create(null);
     for (const story of stories) {
       phases[story.id] = input.storyState.readPhase(story.id) ?? "building";
     }
@@ -158,17 +159,7 @@ export function createStoryPhaseResolver(input: CreateStoryPhaseResolverInput): 
 
   const fetchMain = async (): Promise<void> => {
     if (fetchTimeoutMs <= 0) return;
-    try {
-      const child = Bun.spawn(["git", "fetch", "origin", mainBranch], {
-        cwd: input.repoDir,
-        stdout: "ignore",
-        stderr: "ignore",
-        timeout: fetchTimeoutMs,
-      });
-      await child.exited;
-    } catch {
-      // no-excuse-ok: catch -- keeping origin/main fresh is best-effort only
-    }
+    await fetchGitMain(input.repoDir, mainBranch, fetchTimeoutMs);
   };
 
   return { snapshot, fetchMain };

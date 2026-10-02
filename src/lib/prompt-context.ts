@@ -219,7 +219,7 @@ export function buildLooperContext(policy: ContextPolicy, input: ContextInput): 
                 "  outcome: end this step by running EXACTLY ONE of these as a shell command (never print it as your reply; the engine only records a signal if the process actually runs):",
                 ...legalOutcomeCommands({
                   expects: story.expects,
-                  ...(story.storyId !== undefined ? { storyId: story.storyId } : {}),
+                  storyId: story.storyId ?? story.next?.id,
                 }).map(({ command, when }) => `    - ${command}\n      ${when}`),
               ]
             : []),

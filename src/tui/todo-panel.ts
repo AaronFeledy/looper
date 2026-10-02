@@ -1,7 +1,4 @@
-import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
-
-import type { LoopState, TodoItem } from "../lib/state.ts";
-import { subscribe } from "../lib/state.ts";
+import type { TodoItem } from "../lib/state.ts";
 import { LIST_WIDTH } from "./step-list.ts";
 import { displayWidth, truncateDisplay } from "./text-layout.ts";
 
@@ -65,71 +62,4 @@ export function buildTodoPanelLines(todos: TodoItem[], maxWidth: number = TODO_P
     const content = truncateDisplay(todo.content, contentMax);
     return { content: `${prefix}${content}`, fg: statusColor(todo.status) };
   });
-}
-
-export function createTodoPanel(renderer: CliRenderer, state: LoopState): BoxRenderable {
-  const panel = new BoxRenderable(renderer, {
-    id: "loop-todo-panel",
-    width: LIST_WIDTH,
-    flexShrink: 0,
-    marginTop: 1,
-    border: true,
-    borderStyle: "rounded",
-    borderColor: "#45475a",
-    title: "TODO",
-    titleAlignment: "left",
-    paddingX: PANEL_PADDING_X,
-    flexDirection: "column",
-    visible: false,
-  });
-
-  let nextRowId = 0;
-  const rows: TextRenderable[] = [];
-
-  const ensureRowCount = (count: number) => {
-    while (rows.length > count) {
-      const row = rows.pop()!;
-      panel.remove(row);
-      row.destroy();
-    }
-    while (rows.length < count) {
-      const row = new TextRenderable(renderer, {
-        id: `loop-todo-row-${nextRowId++}`,
-        width: "100%",
-        height: 1,
-        content: "",
-        fg: COLOR_MUTED,
-        truncate: true,
-      });
-      rows.push(row);
-      panel.add(row);
-    }
-  };
-
-  const update = () => {
-    const lines = buildTodoPanelLines(state.todos);
-    if (lines.length === 0) {
-      if (panel.visible) panel.visible = false;
-      ensureRowCount(0);
-      renderer.requestRender();
-      return;
-    }
-    if (!panel.visible) panel.visible = true;
-    ensureRowCount(lines.length);
-    lines.forEach((line, index) => {
-      const row = rows[index];
-      if (!row) return;
-      row.content = line.content;
-      row.fg = line.fg;
-    });
-    renderer.requestRender();
-  };
-
-  update();
-  const unsubscribe = subscribe(update);
-  panel.on(RenderableEvents.DESTROYED, () => {
-    unsubscribe();
-  });
-
-  return panel;
 }

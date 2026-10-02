@@ -2,7 +2,7 @@ import { setDiagnosticsVisible } from "../lib/tui-diagnostics.ts";
 import { BoxRenderable, RenderableEvents, TextRenderable, type CliRenderer } from "@opentui/core";
 
 import type { LoopState } from "../lib/state.ts";
-import { focusPaneTabLabel, nextFocusedPane, subscribe } from "../lib/state.ts";
+import { nextFocusedPane, subscribe } from "../lib/state.ts";
 import { modalFocusWinner } from "./permission-gate.ts";
 import { isPauseEngaged } from "./step-list.ts";
 import { timeoutExtendHintText } from "./timeout-hint.ts";
@@ -32,14 +32,8 @@ export function footerStatus(state: LoopState): string {
   if (modalFocusWinner(state) === "diagnostics") return "[esc/l] close diagnostics  ·  ↑↓ scroll";
   if (modalFocusWinner(state) === "inspector") return "[esc] close inspector  ·  [tab] section  ·  [c] config";
   if (state.historyView !== null) {
-    const navHint =
-      state.focusedPane === "steps"
-        ? "Up/Down: step"
-        : state.focusedPane === "github"
-          ? "Enter: open PR"
-          : "Up/Down/PageUp/PageDown/Home/End: scroll";
-    const tabTarget = focusPaneTabLabel(nextFocusedPane(state));
-    return `[h] exit history  Left/Right: iteration  Tab: ${tabTarget}  ${navHint}  [q]uit`;
+    const navHint = state.focusedPane === "steps" ? "Up/Down: step" : "Up/Down/PageUp/PageDown/Home/End: scroll";
+    return `[h] exit history  Left/Right: iteration  Tab: ${nextFocusedPane(state)}  ${navHint}  [q]uit`;
   }
   if (state.helpVisible) {
     return `press any key to close help`;
@@ -56,13 +50,14 @@ export function footerStatus(state: LoopState): string {
   }
   const flags: string[] = [];
   if (isPauseEngaged(state)) flags.push("paused — press p to resume");
+  else if (state.paused) flags.push("pausing after this agent — press p to cancel");
   if (state.stopAfterIteration) flags.push("ending after iteration");
   if (state.restartRequested) flags.push("restarting step");
   if (state.skipRequested) flags.push("skipping step");
   const timeoutHint = timeoutExtendHintText(state.control.timeoutSnapshot());
   if (timeoutHint !== undefined) flags.push(timeoutHint);
-  if (state.constellation && flags.length === 0) return "[o/enter] inspect  ·  [b] context  ·  [i] plan";
-  return flags.join("  ·  ");
+  if (flags.length > 0) return flags.join("  ·  ");
+  return state.started ? "[o/enter] inspect  ·  [b] context  ·  [i] plan" : "[g/enter] run  ·  [o] inspect  ·  [b] context  ·  [i] plan";
 }
 
 export function footerStatusDivider(state: LoopState): string {
@@ -82,7 +77,7 @@ export function footerColor(state: LoopState): string {
   if (state.recovery !== null) return "#f38ba8";
   if (state.pendingRequests.length > 0) return "#f9e2af";
   if (state.historyView !== null) return "#cba6f7";
-  const actionable = isPauseEngaged(state) || state.stopAfterIteration || state.skipRequested || state.restartRequested
+  const actionable = state.paused || state.stopAfterIteration || state.skipRequested || state.restartRequested
     || timeoutExtendHintText(state.control.timeoutSnapshot()) !== undefined;
   return actionable ? "#f9e2af" : "#6c7086";
 }

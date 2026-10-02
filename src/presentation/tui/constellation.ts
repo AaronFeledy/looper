@@ -174,6 +174,9 @@ export function layoutConstellation(nodes: AgentBubble[], width: number, preview
       const gutter = children.length > 1 && cols === 1 ? Math.min(3, Math.max(0, available - 10)) : 0;
       const innerLeft = left + gutter, innerWidth = available - gutter;
       const childWidth = Math.min(crowded ? Math.min(32, activeChildWidth) : activeChildWidth, Math.floor((innerWidth - 4 * (cols - 1)) / cols));
+      // Folded drawers add a row. Every following row still needs two clear
+      // rows above it: one for the sibling tap and one for the drop.
+      const heightOf = (node: AgentBubble) => node.completedCount ? 5 : 4;
       if (!leavesOnly && cols === 2) {
         // Each column owns whole subtrees; fill the shorter column next.
         // The center gutter remains clear for the common parent's trunk.
@@ -184,20 +187,19 @@ export function layoutConstellation(nodes: AgentBubble[], width: number, preview
           const laneLeft = innerLeft + col * (laneWidth + 4);
           const cursor = columnTop[col]!;
           place(node, laneLeft + Math.floor((laneWidth - childWidth) / 2), cursor,
-            childWidth, node.completedCount ? 5 : 4, wide ? "center" : undefined);
-          columnTop[col] = layoutChildren(node.id, laneLeft, laneWidth, cursor + 6);
+            childWidth, heightOf(node), wide ? "center" : undefined);
+          columnTop[col] = layoutChildren(node.id, laneLeft, laneWidth, cursor + heightOf(node) + 2);
         }
         return Math.max(...columnTop);
       }
       let cursor = top;
       for (let i = 0; i < children.length; i += cols) {
         const count = Math.min(cols, children.length - i);
+        const row = children.slice(i, i + count);
         const startX = innerLeft + Math.floor((innerWidth - (count * childWidth + (count - 1) * 4)) / 2);
-        for (let col = 0; col < count; col++) {
-          const node = children[i + col]!;
-          place(node, startX + col * (childWidth + 4), cursor, childWidth, node.completedCount ? 5 : 4, wide ? "center" : undefined);
-        }
-        cursor += 6;
+        row.forEach((node, col) =>
+          place(node, startX + col * (childWidth + 4), cursor, childWidth, heightOf(node), wide ? "center" : undefined));
+        cursor += Math.max(...row.map(heightOf)) + 2;
         if (!leavesOnly) cursor = layoutChildren(children[i]!.id, innerLeft, innerWidth, cursor);
       }
       return cursor;

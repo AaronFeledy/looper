@@ -47,20 +47,20 @@ function parseRecord(value: unknown): StepAttemptRecord | undefined {
 
 /** Malformed entries are skipped while valid peers survive (mirrors story state). */
 function parseFile(content: string | null): StepAttemptFile {
-  if (content === null) return { attempts: {} };
+  if (content === null) return { attempts: Object.create(null) };
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
   } catch {
     // no-excuse-ok: catch -- the ledger is a tolerant counter; unreadable state is an empty ledger
-    return { attempts: {} };
+    return { attempts: Object.create(null) };
   }
-  if (!isRecord(parsed) || !isRecord(parsed["attempts"])) return { attempts: {} };
+  if (!isRecord(parsed) || !isRecord(parsed["attempts"])) return { attempts: Object.create(null) };
 
-  const attempts: Record<string, Record<string, StepAttemptRecord>> = {};
+  const attempts: Record<string, Record<string, StepAttemptRecord>> = Object.create(null);
   for (const [storyId, steps] of Object.entries(parsed["attempts"])) {
     if (storyId.length === 0 || !isRecord(steps)) continue;
-    const parsedSteps: Record<string, StepAttemptRecord> = {};
+    const parsedSteps: Record<string, StepAttemptRecord> = Object.create(null);
     for (const [stepName, entry] of Object.entries(steps)) {
       if (stepName.length === 0) continue;
       const record = parseRecord(entry);
@@ -76,7 +76,7 @@ function readFile(): StepAttemptFile {
     return parseFile(tolerantRead(stepAttemptPath()));
   } catch {
     // no-excuse-ok: catch -- an unreadable ledger must never fail a step
-    return { attempts: {} };
+    return { attempts: Object.create(null) };
   }
 }
 
@@ -85,7 +85,7 @@ export function readStepAttempt(storyId: string, stepName: string): StepAttemptR
 }
 
 export function readStoryStepAttempts(storyId: string): Readonly<Record<string, StepAttemptRecord>> {
-  return readFile().attempts[storyId] ?? {};
+  return readFile().attempts[storyId] ?? Object.create(null);
 }
 
 function write(file: StepAttemptFile): void {

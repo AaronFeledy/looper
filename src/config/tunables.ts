@@ -25,10 +25,6 @@ function booleanEnv(name: string, fallback: boolean): boolean {
   return !FALSE_ENV_VALUES.has(value);
 }
 
-export function constellationEnabled(value = process.env.LOOPER_UI): boolean {
-  return value?.trim().toLowerCase() === "constellation";
-}
-
 export function constellationReducedMotion(): boolean {
   return booleanEnv("LOOPER_REDUCED_MOTION", false);
 }

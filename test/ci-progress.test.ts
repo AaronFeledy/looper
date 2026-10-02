@@ -2,9 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createLoopState, cancelPendingNotify, notify } from "../src/lib/state.ts";
 import { createConstellationView } from "../src/tui/constellation.ts";
-import { createGithubStatusPanel } from "../src/tui/github-status.ts";
 import { DOCK_PULSE_MS } from "../src/tui/dock-feedback.ts";
-import { ciBorderColor, ciCounts, ciIsRunning } from "../src/tui/ci-progress.ts";
+import { ciBorderColor, ciCounts, ciIsRunning } from "../src/presentation/tui/ci-progress.ts";
 
 afterEach(cancelPendingNotify);
 function fixture() {
@@ -32,16 +31,16 @@ test("CI progress includes unfinished checks even after another check fails", ()
   expect(ciBorderColor(0, true)).toBe(ciBorderColor(700, true));
 });
 
-for (const classic of [false, true]) test(`${classic ? "classic" : "constellation"} PR border pulses until CI settles and obeys reduced motion`, async () => {
+test("PR border pulses until CI settles and obeys reduced motion", async () => {
   const state = fixture();
   const setup = await createTestRenderer({width: 140, height: 30});
-  const view = classic ? createGithubStatusPanel(setup.renderer, state) : createConstellationView(setup.renderer, state);
+  const view = createConstellationView(setup.renderer, state);
   setup.renderer.root.add(view);
   try {
     await setup.flush();
     expect(setup.captureCharFrame()).toContain("◷ 2 ✓ 3 ✗ 1 ~ 1");
-    if (!classic) expect(setup.captureCharFrame()).toContain("8 files");
-    const card = classic ? view : view.findDescendantById("constellation-context-1")!;
+    expect(setup.captureCharFrame()).toContain("8 files");
+    const card = view.findDescendantById("constellation-context-1")!;
     const color = () => {
       const target = card.x + card.width - 2;
       let x = 0;
@@ -55,14 +54,14 @@ for (const classic of [false, true]) test(`${classic ? "classic" : "constellatio
     await Bun.sleep(200); await setup.flush(); const next = color();
     await Bun.sleep(200); await setup.flush(); const last = color();
     expect(JSON.stringify(initial) !== JSON.stringify(next) || JSON.stringify(next) !== JSON.stringify(last)).toBe(true);
-    state.constellation!.reducedMotion = true; notify();
+    state.constellation.reducedMotion = true; notify();
     await Bun.sleep(50); await setup.flush(); const still = color();
     await Bun.sleep(220); await setup.flush(); expect(color()).toEqual(still);
     if (state.github.kind !== "pr") throw new Error("missing PR");
     state.github.pr.ciPending = 0;
     state.github.pr.ciOverall = "failing";
-    state.constellation!.reducedMotion = false; notify();
-    await Bun.sleep(classic ? 50 : DOCK_PULSE_MS + 100); await setup.flush(); const stopped = color();
+    state.constellation.reducedMotion = false; notify();
+    await Bun.sleep(DOCK_PULSE_MS + 100); await setup.flush(); const stopped = color();
     await Bun.sleep(220); await setup.flush(); expect(color()).toEqual(stopped);
   } finally { setup.renderer.destroy(); }
 });

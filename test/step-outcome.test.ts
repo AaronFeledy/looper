@@ -27,10 +27,10 @@ function base(overrides: Partial<DecideStepOutcomeInput> = {}): DecideStepOutcom
 const EXACT_REMINDER = [
   `Your turn ended without running a looper signal for US-618E.`,
   `Run exactly one of these with your bash/shell tool now. Do not write the command as assistant text; the engine only records a signal if the process actually runs.`,
-  `looper signal story-phase verified\n  (this step's work is complete and committed: US-618E is now at verified)`,
-  `looper signal story-phase <building|implemented|reviewed> --reason "<defect>"\n  (attempted, but US-618E did not reach verified; name the defect so the next pass can fix it)`,
-  `looper signal blocked --reason "<what stopped you>"\n  (you could not proceed at all (environment, permissions, missing input))`,
-  `looper signal no-op --reason "<why>"\n  (there was legitimately nothing for this step to do)`,
+  `looper signal story-phase verified --story 'US-618E'\n  (this step's work is complete and committed: US-618E is now at verified)`,
+  `looper signal story-phase <building|implemented|reviewed> --reason "<defect>" --story 'US-618E'\n  (attempted, but US-618E did not reach verified; name the defect so the next pass can fix it)`,
+  `looper signal blocked --reason "<what stopped you>" --story 'US-618E'\n  (you could not proceed at all (environment, permissions, missing input))`,
+  `looper signal no-op --reason "<why>" --story 'US-618E'\n  (there was legitimately nothing for this step to do)`,
   `Do not start new work. Run the command, then stop.`,
 ].join("\n");
 

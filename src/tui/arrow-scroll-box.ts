@@ -29,7 +29,7 @@ export class ArrowScrollBoxRenderable extends ScrollBoxRenderable {
   }
 
   private reducedMotion(): boolean {
-    return this.motionState?.constellation?.reducedMotion ?? constellationReducedMotion();
+    return this.motionState?.constellation.reducedMotion ?? constellationReducedMotion();
   }
 
   private stopPulse(): void {

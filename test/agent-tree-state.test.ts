@@ -154,12 +154,12 @@ describe("syncStepAgentTree", () => {
     expect(step.backgroundAgents.map(({ sessionID }) => sessionID)).toEqual(["ses_new", "ses_old_a", "ses_old_b"]);
   });
 
-  test("prunes absent agents when the step is done", () => {
+  test("retains absent agents as finished satellites once the step is done", () => {
     // Given
     const state = createState();
     const step = firstStep(state);
     syncStepAgentTree(state, 0, [
-      { sessionID: "ses_child", parentSessionID: "ses_step", depth: 1, activity: "idle", startedAt: 10 },
+      { sessionID: "ses_child", parentSessionID: "ses_step", depth: 1, activity: "busy", startedAt: 10 },
     ]);
     step.status = "done";
 
@@ -167,7 +167,9 @@ describe("syncStepAgentTree", () => {
     syncStepAgentTree(state, 0, []);
 
     // Then
-    expect(step.backgroundAgents).toEqual([]);
+    expect(step.backgroundAgents.map((agent) => agent.sessionID)).toEqual(["ses_child"]);
+    expect(step.backgroundAgents[0]?.activity).toBe("idle");
+    expect(step.backgroundAgents[0]?.finishedAt).toBeDefined();
   });
 
   test("preserves selection when the selected agent is retained", () => {
@@ -187,7 +189,7 @@ describe("syncStepAgentTree", () => {
     expect(state.selectedBackgroundSessionID).toBe("ses_child");
   });
 
-  test("clears selection when the selected agent is pruned", () => {
+  test("keeps the selection on a retained agent after the step is done", () => {
     // Given
     const state = createState();
     firstStep(state).status = "done";
@@ -201,7 +203,7 @@ describe("syncStepAgentTree", () => {
     syncStepAgentTree(state, 0, []);
 
     // Then
-    expect(state.selectedBackgroundSessionID).toBeNull();
+    expect(state.selectedBackgroundSessionID).toBe("ses_child");
   });
 
   test("does not notify for an unchanged sync", async () => {

@@ -128,7 +128,7 @@ describe("startAgentRegistryController", () => {
     controller.stop();
   });
 
-  test("prunes agents when a leased step becomes done", async () => {
+  test("retires agents as idle when a leased step becomes done", async () => {
     // Given
     const state = createState("running", "ses_root");
     const fake = createFakeRegistry(new Map([["ses_root", [CHILD]]]));
@@ -143,7 +143,7 @@ describe("startAgentRegistryController", () => {
     await Bun.sleep(50);
 
     // Then
-    expect(step.backgroundAgents).toEqual([]);
+    expect(step.backgroundAgents.map(({ sessionID, activity }) => ({ sessionID, activity }))).toEqual([{ sessionID: CHILD.sessionID, activity: "idle" }]);
     expect(fake.rootCalls).toEqual([["ses_root"], []]);
     controller.stop();
   });
